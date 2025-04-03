@@ -16,11 +16,3 @@ proc-macro = true
 syn = { version = "1", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
-
-[dev-dependencies]
-derive_more = { version = "2", features = ["from"] }
-serde = { version = "1", features = ["serde_derive"] }
-trybuild = "1.0"
-irpc = { version = "0.1.0", path = ".." }
-tracing = "0.1.41"
-

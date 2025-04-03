@@ -51,6 +51,7 @@ tokio = { version = "1", features = ["full"] }
 thousands = "0.2.0"
 # for AbortOnDropHandle
 n0-future = { version = "0.1.2" }
+trybuild = "1.0.104"
 
 [features]
 # enable the remote transport

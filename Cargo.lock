@@ -1738,20 +1738,16 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
 ]
 
 [[package]]
 name = "irpc-derive"
 version = "0.1.0"
 dependencies = [
- "derive_more 2.0.1",
- "irpc",
  "proc-macro2",
  "quote",
- "serde",
  "syn 1.0.109",
- "tracing",
- "trybuild",
 ]
 
 [[package]]

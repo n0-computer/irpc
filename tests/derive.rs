@@ -3,7 +3,7 @@ use irpc_derive::rpc_requests;
 use serde::{Deserialize, Serialize};
 
 #[test]
-fn simple() {
+fn derive_simple() {
     #[derive(Debug, Serialize, Deserialize)]
     struct RpcRequest;
 
