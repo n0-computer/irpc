@@ -1,7 +1,7 @@
 use std::{io, sync::Arc};
 
 use iroh::endpoint::{ConnectionError, RecvStream, SendStream};
-use quic_rpc::{
+use irpc::{
     RequestError,
     rpc::{Handler, RemoteConnection},
     util::AsyncReadVarintExt,

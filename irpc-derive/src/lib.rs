@@ -22,7 +22,7 @@ const TX_ATTR: &str = "tx";
 /// the rx type name
 const RX_ATTR: &str = "rx";
 /// Fully qualified path to the default rx type
-const DEFAULT_RX_TYPE: &str = "::quic_rpc::channel::none::NoReceiver";
+const DEFAULT_RX_TYPE: &str = "::irpc::channel::none::NoReceiver";
 
 fn generate_channels_impl(
     mut args: NamedTypeArgs,
@@ -39,7 +39,7 @@ fn generate_channels_impl(
     let tx = args.get(TX_ATTR, attr_span)?;
 
     let res = quote! {
-        impl ::quic_rpc::Channels<#service_name> for #request_type {
+        impl ::irpc::Channels<#service_name> for #request_type {
             type Tx = #tx;
             type Rx = #rx;
         }
@@ -58,8 +58,8 @@ fn generate_from_impls(
     // Generate and add From impls for the message enum
     for (variant_name, inner_type) in variants {
         let message_impl = quote! {
-            impl From<::quic_rpc::WithChannels<#inner_type, #service_name>> for #message_enum_name {
-                fn from(value: ::quic_rpc::WithChannels<#inner_type, #service_name>) -> Self {
+            impl From<::irpc::WithChannels<#inner_type, #service_name>> for #message_enum_name {
+                fn from(value: ::irpc::WithChannels<#inner_type, #service_name>) -> Self {
                     #message_enum_name::#variant_name(value)
                 }
             }
@@ -159,7 +159,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         .iter()
         .map(|(variant_name, inner_type)| {
             quote! {
-                #variant_name(::quic_rpc::WithChannels<#inner_type, #service_name>)
+                #variant_name(::irpc::WithChannels<#inner_type, #service_name>)
             }
         })
         .collect::<Vec<_>>();

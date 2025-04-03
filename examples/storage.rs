@@ -5,13 +5,13 @@ use std::{
 };
 
 use anyhow::bail;
-use n0_future::task::{self, AbortOnDropHandle};
-use quic_rpc::{
+use irpc::{
     channel::{none::NoReceiver, oneshot, spsc},
     rpc::{listen, Handler},
     util::{make_client_endpoint, make_server_endpoint},
     Channels, Client, LocalSender, Request, Service, WithChannels,
 };
+use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 

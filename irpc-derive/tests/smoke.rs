@@ -1,5 +1,5 @@
-use quic_rpc::channel::{none::NoSender, oneshot};
-use quic_rpc_derive::rpc_requests;
+use irpc::channel::{none::NoSender, oneshot};
+use irpc_derive::rpc_requests;
 use serde::{Deserialize, Serialize};
 
 #[test]
@@ -50,7 +50,7 @@ fn simple() {
     #[derive(Debug, Clone)]
     struct Service;
 
-    impl quic_rpc::Service for Service {}
+    impl irpc::Service for Service {}
 }
 
 /// Use

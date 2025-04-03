@@ -6,17 +6,17 @@ use std::{
 
 use anyhow::bail;
 use futures_buffered::BufferedStreamExt;
-use n0_future::{
-    stream::StreamExt,
-    task::{self, AbortOnDropHandle},
-};
-use quic_rpc::{
+use irpc::{
     channel::{oneshot, spsc},
     rpc::{listen, Handler},
     util::{make_client_endpoint, make_server_endpoint},
     Client, LocalSender, Request, Service, WithChannels,
 };
-use quic_rpc_derive::rpc_requests;
+use irpc_derive::rpc_requests;
+use n0_future::{
+    stream::StreamExt,
+    task::{self, AbortOnDropHandle},
+};
 use serde::{Deserialize, Serialize};
 use thousands::Separable;
 use tracing::trace;

@@ -1,4 +1,4 @@
-use quic_rpc_derive::rpc_requests;
+use irpc_derive::rpc_requests;
 
 #[rpc_requests(Service, Msg)]
 struct Foo;
