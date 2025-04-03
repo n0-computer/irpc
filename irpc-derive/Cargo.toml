@@ -1,0 +1,18 @@
+[package]
+name = "irpc-derive"
+version = "0.1.0"
+edition = "2021"
+authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
+keywords = ["api", "protocol", "network", "rpc", "macro"]
+categories = ["network-programming"]
+license = "Apache-2.0/MIT"
+repository = "https://github.com/n0-computer/irpc"
+description = "Macros for irpc"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "1", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
