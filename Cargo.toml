@@ -42,7 +42,7 @@ futures-buffered ={ version = "0.2.9", optional = true }
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.19", features = ["fmt"] }
 # used in the derive example. This must not be a main crate dep or else it will be circular!
-irpc-derive = { path = "irpc-derive" }
+irpc-derive = { version = "0.1.0", path = "./irpc-derive" }
 # just convenient for the enum definitions
 derive_more = { version = "2", features = ["from"] }
 # we need full for example main etc.
