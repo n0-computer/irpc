@@ -1,12 +1,12 @@
 [package]
-name = "quic-rpc"
-version = "0.50.0"
+name = "irpc"
+version = "0.1.0"
 edition = "2021"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>", "n0 team"]
 keywords = ["api", "protocol", "network", "rpc"]
 categories = ["network-programming"]
 license = "Apache-2.0/MIT"
-repository = "https://github.com/n0-computer/quic-rpc"
+repository = "https://github.com/n0-computer/irpc"
 description = "A streaming rpc system based on quic"
 
 # Sadly this also needs to be updated in .github/workflows/ci.yml
@@ -19,6 +19,8 @@ serde = { version = "1", default-features = false }
 tokio = { version = "1.44", features = ["sync"], default-features = false  }
 # for PollSender (which for some reason is not available in the main tokio api)
 tokio-util = { version = "0.7.14", default-features = false }
+# errors
+thiserror = "2.0.12"
 
 # used in the endpoint handler code when using rpc
 tracing = { version = "0.1.41", optional = true }
@@ -36,12 +38,11 @@ rcgen = { version = "0.13.2", optional = true }
 anyhow = { version = "1.0.66", optional = true }
 # used in the benches
 futures-buffered ={ version = "0.2.9", optional = true }
-thiserror = "2.0.12"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.19", features = ["fmt"] }
 # used in the derive example. This must not be a main crate dep or else it will be circular!
-quic-rpc-derive = { path = "quic-rpc-derive" }
+irpc-derive = { path = "irpc-derive" }
 # just convenient for the enum definitions
 derive_more = { version = "2", features = ["from"] }
 # we need full for example main etc.
@@ -61,7 +62,7 @@ message_spans = []
 default = ["rpc", "quinn_endpoint_setup", "message_spans"]
 
 [workspace]
-members = ["quic-rpc-derive", "quic-rpc-iroh"]
+members = ["irpc-derive", "irpc-iroh"]
 
 [package.metadata.docs.rs]
 all-features = true

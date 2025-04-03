@@ -111,4 +111,4 @@ jobs:
       - name: cargo check
         run: |
           rm -f Cargo.lock
-          cargo +nightly check -Z minimal-versions -p quic-rpc -p quic-rpc-derive --all-features --lib --bins
+          cargo +nightly check -Z minimal-versions -p irpc -p irpc-derive --all-features --lib --bins

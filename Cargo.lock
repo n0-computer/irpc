@@ -1718,6 +1718,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "irpc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "derive_more 2.0.1",
+ "futures-buffered",
+ "iroh-quinn",
+ "irpc-derive",
+ "n0-future",
+ "postcard",
+ "rcgen",
+ "rustls",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.12",
+ "thousands",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "irpc-derive"
+version = "0.1.0"
+dependencies = [
+ "derive_more 2.0.1",
+ "irpc",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn 1.0.109",
+ "tracing",
+ "trybuild",
+]
+
+[[package]]
+name = "irpc-iroh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "iroh",
+ "irpc",
+ "irpc-derive",
+ "n0-future",
+ "postcard",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2576,59 +2629,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
-]
-
-[[package]]
-name = "quic-rpc"
-version = "0.50.0"
-dependencies = [
- "anyhow",
- "derive_more 2.0.1",
- "futures-buffered",
- "iroh-quinn",
- "n0-future",
- "postcard",
- "quic-rpc-derive",
- "rcgen",
- "rustls",
- "serde",
- "smallvec",
- "thiserror 2.0.12",
- "thousands",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "quic-rpc-derive"
-version = "0.50.0"
-dependencies = [
- "derive_more 2.0.1",
- "proc-macro2",
- "quic-rpc",
- "quote",
- "serde",
- "syn 1.0.109",
- "tracing",
- "trybuild",
-]
-
-[[package]]
-name = "quic-rpc-iroh"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "iroh",
- "n0-future",
- "postcard",
- "quic-rpc",
- "quic-rpc-derive",
- "serde",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
