@@ -10,7 +10,7 @@ A streaming rpc system for iroh
 [docs.rs]: https://docs.rs/irpc
 [license badge]: https://img.shields.io/crates/l/irpc
 [status badge]: https://github.com/n0-computer/irpc/actions/workflows/rust.yml/badge.svg
-[status link]: https://github.com/n0-computer/irpc/actions/workflows/rust.yml
+[status link]: https://github.com/n0-computer/irpc/actions/workflows/ci.yml
 [repo link]: https://github.com/n0-computer/irpc
 
 # Goals
