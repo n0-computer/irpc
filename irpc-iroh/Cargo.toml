@@ -16,6 +16,7 @@ tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
+n0-future = { workspace = true }
 irpc = { version = "0.2.0", path = ".." }
 
 [dev-dependencies]

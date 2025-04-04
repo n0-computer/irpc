@@ -27,7 +27,7 @@ tracing = { workspace = true, optional = true }
 # used to ser/de messages when using rpc
 postcard = { workspace = true, features = ["alloc", "use-std"], optional = true }
 # currently only transport when using rpc
-quinn = { version = "0.13.0", package = "iroh-quinn", optional = true }
+quinn = { workspace = true, optional = true }
 # used as a buffer for serialization when using rpc
 smallvec = { version = "1.14.0", features = ["write"], optional = true }
 # used in the test utils to generate quinn endpoints
@@ -38,6 +38,8 @@ rcgen = { version = "0.13.2", optional = true }
 anyhow = { workspace = true, optional = true }
 # used in the benches
 futures-buffered ={ version = "0.2.9", optional = true }
+# for AbortOnDropHandle
+n0-future = { workspace = true, optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["fmt"] }
@@ -49,14 +51,12 @@ derive_more = { version = "2", features = ["from"] }
 tokio = { workspace = true, features = ["full"] }
 # formatting
 thousands = "0.2.0"
-# for AbortOnDropHandle
-n0-future = { workspace = true }
 # macro tests
 trybuild = "1.0.104"
 
 [features]
 # enable the remote transport
-rpc = ["dep:quinn", "dep:postcard", "dep:anyhow", "dep:smallvec", "dep:tracing", "tokio/io-util"]
+rpc = ["dep:quinn", "dep:postcard", "dep:anyhow", "dep:smallvec", "dep:tracing", "dep:n0-future", "tokio/io-util"]
 # add test utilities
 quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:anyhow", "dep:futures-buffered"]
 # pick up parent span when creating channel messages
@@ -82,3 +82,4 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.1.2", default-features = false }
 tracing-subscriber = { version = "0.3.19", default-features = false }
 iroh = { version = "0.34" }
+quinn = { package = "iroh-quinn", version = "0.13.0", default-features = false }

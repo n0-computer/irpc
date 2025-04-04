@@ -817,6 +817,7 @@ pub(crate) enum ClientInner<M> {
     Remote(Box<dyn rpc::RemoteConnection>),
     #[cfg(not(feature = "rpc"))]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
+    #[allow(dead_code)]
     Remote(PhantomData<M>),
 }
 
@@ -924,10 +925,10 @@ pub mod rpc {
     //! Module for cross-process RPC using [`quinn`].
     use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::Arc};
 
+    use n0_future::task::JoinSet;
     use quinn::ConnectionError;
     use serde::{de::DeserializeOwned, Serialize};
     use smallvec::SmallVec;
-    use tokio::task::JoinSet;
     use tracing::{trace, trace_span, warn, Instrument};
 
     use crate::{

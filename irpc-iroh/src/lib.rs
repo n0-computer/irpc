@@ -90,7 +90,6 @@ mod multithreaded {
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 use multithreaded::*;
 use serde::de::DeserializeOwned;
-use tokio::task::JoinSet;
 use tracing::{Instrument, trace, trace_span, warn};
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 use wasm_browser::*;
@@ -98,7 +97,7 @@ use wasm_browser::*;
 /// Utility function to listen for incoming connections and handle them with the provided handler
 pub async fn listen<R: DeserializeOwned + 'static>(endpoint: iroh::Endpoint, handler: Handler<R>) {
     let mut request_id = 0u64;
-    let mut tasks = JoinSet::new();
+    let mut tasks = n0_future::task::JoinSet::new();
     while let Some(incoming) = endpoint.accept().await {
         let handler = handler.clone();
         let fut = async move {
