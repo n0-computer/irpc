@@ -58,7 +58,7 @@ trybuild = "1.0.104"
 # enable the remote transport
 rpc = ["dep:quinn", "dep:postcard", "dep:anyhow", "dep:smallvec", "dep:tracing", "dep:n0-future", "tokio/io-util"]
 # add test utilities
-quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:anyhow", "dep:futures-buffered"]
+quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:anyhow", "dep:futures-buffered", "quinn/rustls-ring"]
 # pick up parent span when creating channel messages
 message_spans = []
 default = ["rpc", "quinn_endpoint_setup", "message_spans"]

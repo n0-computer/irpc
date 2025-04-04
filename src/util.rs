@@ -5,10 +5,10 @@
 #[cfg(feature = "quinn_endpoint_setup")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "quinn_endpoint_setup")))]
 mod quinn_setup_utils {
-    use std::{net::SocketAddr, sync::Arc};
+    use std::sync::Arc;
 
     use anyhow::Result;
-    use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, Endpoint, ServerConfig};
+    use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, ServerConfig};
 
     /// Builds default quinn client config and trusts given certificates.
     ///
@@ -35,27 +35,6 @@ mod quinn_setup_utils {
         Ok(ClientConfig::new(Arc::new(quic_client_config)))
     }
 
-    /// Constructs a QUIC endpoint configured for use a client only.
-    ///
-    /// ## Args
-    ///
-    /// - server_certs: list of trusted certificates.
-    pub fn make_client_endpoint(bind_addr: SocketAddr, server_certs: &[&[u8]]) -> Result<Endpoint> {
-        let client_cfg = configure_client(server_certs)?;
-        let mut endpoint = Endpoint::client(bind_addr)?;
-        endpoint.set_default_client_config(client_cfg);
-        Ok(endpoint)
-    }
-
-    /// Create a server endpoint with a self-signed certificate
-    ///
-    /// Returns the server endpoint and the certificate in DER format
-    pub fn make_server_endpoint(bind_addr: SocketAddr) -> Result<(Endpoint, Vec<u8>)> {
-        let (server_config, server_cert) = configure_server()?;
-        let endpoint = Endpoint::server(server_config, bind_addr)?;
-        Ok((endpoint, server_cert))
-    }
-
     /// Create a quinn server config with a self-signed certificate
     ///
     /// Returns the server config and the certificate in DER format
@@ -73,21 +52,61 @@ mod quinn_setup_utils {
         Ok((server_config, cert_der.to_vec()))
     }
 
-    /// Constructs a QUIC endpoint that trusts all certificates.
-    ///
-    /// This is useful for testing and local connections, but should be used with care.
-    pub fn make_insecure_client_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
+    pub fn configure_client_insecure() -> Result<ClientConfig> {
         let crypto = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
             .with_no_client_auth();
-
         let client_cfg = QuicClientConfig::try_from(crypto)?;
         let client_cfg = ClientConfig::new(Arc::new(client_cfg));
-        let mut endpoint = Endpoint::client(bind_addr)?;
-        endpoint.set_default_client_config(client_cfg);
-        Ok(endpoint)
+        Ok(client_cfg)
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod non_wasm {
+        use std::net::SocketAddr;
+
+        use quinn::Endpoint;
+
+        use super::*;
+
+        /// Constructs a QUIC endpoint configured for use a client only.
+        ///
+        /// ## Args
+        ///
+        /// - server_certs: list of trusted certificates.
+        pub fn make_client_endpoint(
+            bind_addr: SocketAddr,
+            server_certs: &[&[u8]],
+        ) -> Result<Endpoint> {
+            let client_cfg = configure_client(server_certs)?;
+            let mut endpoint = Endpoint::client(bind_addr)?;
+            endpoint.set_default_client_config(client_cfg);
+            Ok(endpoint)
+        }
+
+        /// Create a server endpoint with a self-signed certificate
+        ///
+        /// Returns the server endpoint and the certificate in DER format
+        pub fn make_server_endpoint(bind_addr: SocketAddr) -> Result<(Endpoint, Vec<u8>)> {
+            let (server_config, server_cert) = configure_server()?;
+            let endpoint = Endpoint::server(server_config, bind_addr)?;
+            Ok((endpoint, server_cert))
+        }
+
+        /// Constructs a QUIC endpoint that trusts all certificates.
+        ///
+        /// This is useful for testing and local connections, but should be used with care.
+        pub fn make_insecure_client_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
+            let client_cfg = configure_client_insecure()?;
+            let mut endpoint = Endpoint::client(bind_addr)?;
+            endpoint.set_default_client_config(client_cfg);
+            Ok(endpoint)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use non_wasm::{make_client_endpoint, make_insecure_client_endpoint, make_server_endpoint};
 
     #[derive(Debug)]
     struct SkipServerVerification;
