@@ -48,6 +48,7 @@ fn generate_channels_impl(
     args.check_empty(attr_span)?;
     Ok(res)
 }
+
 fn generate_from_impls(
     message_enum_name: &Ident,
     variants: &[(Ident, Type)],
@@ -81,10 +82,10 @@ fn generate_from_impls(
 #[proc_macro_attribute]
 pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as DeriveInput);
-    let MacroArgs {
-        service_name,
-        message_enum_name,
-    } = parse_macro_input!(attr as MacroArgs);
+    let args = parse_macro_input!(attr as MacroArgs);
+
+    let service_name = args.service_name;
+    let message_enum_name = args.message_enum_name;
 
     let input_span = input.span();
     let data_enum = match &mut input.data {
@@ -155,66 +156,80 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    let message_variants = variants
-        .iter()
-        .map(|(variant_name, inner_type)| {
-            quote! {
-                #variant_name(::irpc::WithChannels<#inner_type, #service_name>)
+    // Only generate the extended enum and related code if message_enum_name is provided
+    let extended_enum_code = if let Some(message_enum_name) = message_enum_name {
+        let message_variants = variants
+            .iter()
+            .map(|(variant_name, inner_type)| {
+                quote! {
+                    #variant_name(::irpc::WithChannels<#inner_type, #service_name>)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // Extract variant names for the match pattern
+        let variant_names = variants.iter().map(|(name, _)| name).collect::<Vec<_>>();
+
+        let message_enum = quote! {
+            #[derive(Debug)]
+            pub enum #message_enum_name {
+                #(#message_variants),*
             }
-        })
-        .collect::<Vec<_>>();
 
-    // Extract variant names for the match pattern
-    let variant_names = variants.iter().map(|(name, _)| name).collect::<Vec<_>>();
-
-    let message_enum = quote! {
-        #[derive(Debug)]
-        pub enum #message_enum_name {
-            #(#message_variants),*
-        }
-
-        impl #message_enum_name {
-            /// Get the parent span of the message
-            pub fn parent_span(&self) -> tracing::Span {
-                let span = match self {
-                    #(#message_enum_name::#variant_names(inner) => inner.parent_span_opt()),*
-                };
-                span.cloned().unwrap_or_else(|| ::tracing::Span::current())
+            impl #message_enum_name {
+                /// Get the parent span of the message
+                pub fn parent_span(&self) -> tracing::Span {
+                    let span = match self {
+                        #(#message_enum_name::#variant_names(inner) => inner.parent_span_opt()),*
+                    };
+                    span.cloned().unwrap_or_else(|| ::tracing::Span::current())
+                }
             }
-        }
+        };
+
+        // Generate the From implementations
+        generate_from_impls(
+            &message_enum_name,
+            &variants,
+            &service_name,
+            &input.ident,
+            &mut additional_items,
+        );
+
+        message_enum
+    } else {
+        // If no message_enum_name is provided, don't generate the extended enum
+        quote! {}
     };
-
-    // Generate the From implementations
-    generate_from_impls(
-        &message_enum_name,
-        &variants,
-        &service_name,
-        &input.ident,
-        &mut additional_items,
-    );
 
     let output = quote! {
         #input
 
-        #message_enum
-
         #(#additional_items)*
+
+        #extended_enum_code
     };
 
     output.into()
 }
 
-// Parse arguments in the format (ServiceType, MessageEnumName)
+// Parse arguments in the format (ServiceType) or (ServiceType, MessageEnumName)
 struct MacroArgs {
     service_name: Ident,
-    message_enum_name: Ident,
+    message_enum_name: Option<Ident>,
 }
 
 impl Parse for MacroArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let service_name: Ident = input.parse()?;
-        let _: Token![,] = input.parse()?;
-        let message_enum_name: Ident = input.parse()?;
+
+        // Check if there's a comma, indicating a second argument
+        let message_enum_name = if input.peek(Token![,]) {
+            let _: Token![,] = input.parse()?;
+            Some(input.parse()?)
+        } else {
+            None
+        };
 
         Ok(MacroArgs {
             service_name,
