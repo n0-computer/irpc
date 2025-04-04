@@ -10,7 +10,7 @@ mod quinn_setup_utils {
     use anyhow::Result;
     use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, ServerConfig};
 
-    /// Builds default quinn client config and trusts given certificates.
+    /// Create a quinn client config and trusts given certificates.
     ///
     /// ## Args
     ///
@@ -52,6 +52,7 @@ mod quinn_setup_utils {
         Ok((server_config, cert_der.to_vec()))
     }
 
+    /// Create a quinn client config and trust all certificates.
     pub fn configure_client_insecure() -> Result<ClientConfig> {
         let crypto = rustls::ClientConfig::builder()
             .dangerous()
@@ -85,16 +86,7 @@ mod quinn_setup_utils {
             Ok(endpoint)
         }
 
-        /// Create a server endpoint with a self-signed certificate
-        ///
-        /// Returns the server endpoint and the certificate in DER format
-        pub fn make_server_endpoint(bind_addr: SocketAddr) -> Result<(Endpoint, Vec<u8>)> {
-            let (server_config, server_cert) = configure_server()?;
-            let endpoint = Endpoint::server(server_config, bind_addr)?;
-            Ok((endpoint, server_cert))
-        }
-
-        /// Constructs a QUIC endpoint that trusts all certificates.
+        /// Constructs a QUIC endpoint configured for use a client only that trusts all certificates.
         ///
         /// This is useful for testing and local connections, but should be used with care.
         pub fn make_insecure_client_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
@@ -102,6 +94,15 @@ mod quinn_setup_utils {
             let mut endpoint = Endpoint::client(bind_addr)?;
             endpoint.set_default_client_config(client_cfg);
             Ok(endpoint)
+        }
+
+        /// Constructs a QUIC server endpoint with a self-signed certificate
+        ///
+        /// Returns the server endpoint and the certificate in DER format
+        pub fn make_server_endpoint(bind_addr: SocketAddr) -> Result<(Endpoint, Vec<u8>)> {
+            let (server_config, server_cert) = configure_server()?;
+            let endpoint = Endpoint::server(server_config, bind_addr)?;
+            Ok((endpoint, server_cert))
         }
     }
 
