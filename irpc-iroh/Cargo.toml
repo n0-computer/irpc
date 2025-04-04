@@ -1,6 +1,6 @@
 [package]
 name = "irpc-iroh"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>", "n0 team"]
 keywords = ["api", "protocol", "network", "rpc"]
@@ -16,9 +16,9 @@ tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
-irpc = { version = "0.1.0", path = ".." }
+irpc = { version = "0.2.0", path = ".." }
 
 [dev-dependencies]
 n0-future = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
-irpc-derive = { version = "0.1.0", path = "../irpc-derive" }
+irpc-derive = { version = "0.2.0", path = "../irpc-derive" }
