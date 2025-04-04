@@ -24,6 +24,21 @@ const RX_ATTR: &str = "rx";
 /// Fully qualified path to the default rx type
 const DEFAULT_RX_TYPE: &str = "::irpc::channel::none::NoReceiver";
 
+/// Generate parent span method for an enum
+fn generate_parent_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> TokenStream2 {
+    quote! {
+        impl #enum_name {
+            /// Get the parent span of the message
+            pub fn parent_span(&self) -> tracing::Span {
+                let span = match self {
+                    #(#enum_name::#variant_names(inner) => inner.parent_span_opt()),*
+                };
+                span.cloned().unwrap_or_else(|| ::tracing::Span::current())
+            }
+        }
+    }
+}
+
 fn generate_channels_impl(
     mut args: NamedTypeArgs,
     service_name: &Ident,
@@ -77,6 +92,123 @@ fn generate_from_impls(
         };
         additional_items.extend(original_impl);
     }
+}
+
+/// Transforms an enum into a message enum where each variant wraps its type in WithChannels<T, Service>
+#[proc_macro_attribute]
+pub fn message_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let service_name = parse_macro_input!(attr as Ident);
+    let mut input = parse_macro_input!(item as DeriveInput);
+    let enum_name = &input.ident;
+
+    // Make sure we're dealing with an enum
+    let data_enum = match &mut input.data {
+        Data::Enum(data_enum) => data_enum,
+        _ => {
+            return syn::Error::new(input.span(), "message_enum can only be applied to enums")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // Transform each variant to use WithChannels
+    for variant in &mut data_enum.variants {
+        match &mut variant.fields {
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                let inner_type = &fields.unnamed[0].ty;
+                let new_type = syn::parse_quote! {
+                    ::irpc::WithChannels<#inner_type, #service_name>
+                };
+                fields.unnamed[0].ty = new_type;
+            }
+            _ => {
+                return syn::Error::new(
+                    variant.span(),
+                    "Each variant must have exactly one unnamed field",
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    }
+
+    // Extract variant names for parent_span implementation
+    let variant_names: Vec<_> = data_enum
+        .variants
+        .iter()
+        .map(|variant| &variant.ident)
+        .collect();
+
+    // Generate parent_span method
+    let parent_span_impl = generate_parent_span_impl(enum_name, &variant_names);
+
+    // Generate From implementations for each variant
+    let mut from_impls = TokenStream2::new();
+    for variant in &data_enum.variants {
+        if let Fields::Unnamed(fields) = &variant.fields {
+            if fields.unnamed.len() == 1 {
+                let variant_name = &variant.ident;
+                let wrapped_type = &fields.unnamed[0].ty;
+
+                // Extract the inner type from WithChannels<T, Service>
+                // We know the structure, so we can extract it this way
+                let inner_type = match wrapped_type {
+                    Type::Path(type_path) => {
+                        // Find the first generic argument which is our original type
+                        if let Some(segment) = type_path.path.segments.last() {
+                            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                                if let Some(generic_arg) = args.args.first() {
+                                    if let syn::GenericArgument::Type(inner) = generic_arg {
+                                        inner.clone()
+                                    } else {
+                                        continue;
+                                    }
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                };
+
+                // Generate From<InnerType> for the enum
+                let from_inner = quote! {
+                    impl From<#inner_type> for #enum_name {
+                        fn from(value: #inner_type) -> Self {
+                            #enum_name::#variant_name(value.into())
+                        }
+                    }
+                };
+
+                // Generate From<WithChannels<InnerType, Service>> for the enum
+                let from_wrapped = quote! {
+                    impl From<#wrapped_type> for #enum_name {
+                        fn from(value: #wrapped_type) -> Self {
+                            #enum_name::#variant_name(value)
+                        }
+                    }
+                };
+
+                from_impls.extend(from_inner);
+                from_impls.extend(from_wrapped);
+            }
+        }
+    }
+
+    let result = quote! {
+        #input
+
+        #parent_span_impl
+
+        #from_impls
+    };
+
+    result.into()
 }
 
 #[proc_macro_attribute]
@@ -168,24 +300,17 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             .collect::<Vec<_>>();
 
         // Extract variant names for the match pattern
-        let variant_names = variants.iter().map(|(name, _)| name).collect::<Vec<_>>();
+        let variant_names: Vec<&Ident> = variants.iter().map(|(name, _)| name).collect();
 
         let message_enum = quote! {
             #[derive(Debug)]
             pub enum #message_enum_name {
                 #(#message_variants),*
             }
-
-            impl #message_enum_name {
-                /// Get the parent span of the message
-                pub fn parent_span(&self) -> tracing::Span {
-                    let span = match self {
-                        #(#message_enum_name::#variant_names(inner) => inner.parent_span_opt()),*
-                    };
-                    span.cloned().unwrap_or_else(|| ::tracing::Span::current())
-                }
-            }
         };
+
+        // Generate parent_span method
+        let parent_span_impl = generate_parent_span_impl(&message_enum_name, &variant_names);
 
         // Generate the From implementations
         generate_from_impls(
@@ -196,7 +321,10 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             &mut additional_items,
         );
 
-        message_enum
+        quote! {
+            #message_enum
+            #parent_span_impl
+        }
     } else {
         // If no message_enum_name is provided, don't generate the extended enum
         quote! {}
