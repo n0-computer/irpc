@@ -56,7 +56,7 @@ enum ComputeRequest {
 }
 
 // Define the protocol and message enums using the macro
-#[rpc_requests(ComputeService, ComputeMessage)]
+#[rpc_requests(ComputeService, message = ComputeMessage)]
 #[derive(Serialize, Deserialize)]
 enum ComputeProtocol {
     #[rpc(tx=oneshot::Sender<u128>)]

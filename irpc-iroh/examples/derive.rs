@@ -35,7 +35,7 @@ struct Set {
 
 // Use the macro to generate both the StorageProtocol and StorageMessage enums
 // plus implement Channels for each type
-#[rpc_requests(StorageService, StorageMessage)]
+#[rpc_requests(StorageService, message = StorageMessage)]
 #[derive(Serialize, Deserialize)]
 enum StorageProtocol {
     #[rpc(tx=oneshot::Sender<Option<String>>)]
