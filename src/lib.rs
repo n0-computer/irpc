@@ -1,4 +1,4 @@
-//! # A minimal RPC library for use with [iroh].
+//! # A minimal RPC library for use with [iroh](https://docs.rs/iroh/latest/iroh/index.html).
 //!
 //! ## Goals
 //!
@@ -74,13 +74,12 @@
 //! This crate evolved out of the [quic-rpc] crate, which is a generic RPC
 //! framework for any transport with cheap streams such as QUIC. Compared to
 //! quic-rpc, this crate does not abstract over the stream type and is focused
-//! on [iroh] and our [iroh quinn fork].
+//! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [iroh quinn fork].
 //!
-//! - quic-rpc: https://docs.rs/quic-rpc/latest/quic-rpc/index.html
-//! - iroh: https://docs.rs/iroh/latest/iroh/index.html
-//! - quinn: https://docs.rs/quinn/latest/quinn/index.html
-//! - bytes: https://docs.rs/bytes/latest/bytes/index.html
-//! - iroh quinn fork: https://docs.rs/iroh-quinn/latest/iroh-quinn/index.html
+//! - [quic-rpc](https://docs.rs/quic-rpc/latest/quic-rpc/index.html)
+//! - [quinn](https://docs.rs/quinn/latest/quinn/index.html)
+//! - [bytes](https://docs.rs/bytes/latest/bytes/index.html)
+//! - [iroh quinn fork](https://docs.rs/iroh-quinn/latest/iroh-quinn/index.html)
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 
