@@ -9,7 +9,7 @@ use irpc::{
     channel::{oneshot, spsc},
     rpc::Handler,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, Request, Service, WithChannels,
+    Client, Error, LocalSender, Service, WithChannels,
 };
 // Import the macro
 use irpc_derive::rpc_requests;
@@ -148,76 +148,29 @@ impl StorageApi {
         Ok(AbortOnDropHandle::new(join_handle))
     }
 
-    pub async fn get(&self, key: String) -> anyhow::Result<oneshot::Receiver<Option<String>>> {
-        let msg = Get { key };
-        match self.inner.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = oneshot::channel();
-                request.send((msg, tx)).await?;
-                Ok(rx)
-            }
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                Ok(rx.into())
-            }
-        }
+    pub async fn get(&self, key: String) -> Result<Option<String>, Error> {
+        self.inner.rpc(Get { key }).await
     }
 
-    pub async fn list(&self) -> anyhow::Result<spsc::Receiver<String>> {
-        let msg = List;
-        match self.inner.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = spsc::channel(10);
-                request.send((msg, tx)).await?;
-                Ok(rx)
-            }
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                Ok(rx.into())
-            }
-        }
+    pub async fn list(&self) -> Result<spsc::Receiver<String>, Error> {
+        self.inner.server_streaming(List, 16).await
     }
 
-    pub async fn set(&self, key: String, value: String) -> anyhow::Result<oneshot::Receiver<()>> {
-        let msg = Set { key, value };
-        match self.inner.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = oneshot::channel();
-                request.send((msg, tx)).await?;
-                Ok(rx)
-            }
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                Ok(rx.into())
-            }
-        }
+    pub async fn set(&self, key: String, value: String) -> Result<(), Error> {
+        self.inner.rpc(Set { key, value }).await
     }
 
     pub async fn set_many(
         &self,
-    ) -> Result<(spsc::Sender<(String, String)>, oneshot::Receiver<u64>)> {
-        let msg = SetMany;
-        match self.inner.request().await? {
-            Request::Local(request) => {
-                let (req_tx, req_rx) = spsc::channel(16);
-                let (res_tx, res_rx) = oneshot::channel();
-                request.send((msg, res_tx, req_rx)).await?;
-                Ok((req_tx, res_rx))
-            }
-            Request::Remote(request) => {
-                let (tx, rx) = request.write(msg).await?;
-                Ok((tx.into(), rx.into()))
-            }
-        }
+    ) -> Result<(spsc::Sender<(String, String)>, oneshot::Receiver<u64>), Error> {
+        self.inner.client_streaming(SetMany, 4).await
     }
 }
 
-async fn client_demo(api: StorageApi) -> anyhow::Result<()> {
-    api.set("hello".to_string(), "world".to_string())
-        .await?
-        .await?;
-    let value = api.get("hello".to_string()).await?.await?;
-    println!("hello = {:?}", value);
+async fn client_demo(api: StorageApi) -> Result<()> {
+    api.set("hello".to_string(), "world".to_string()).await?;
+    let value = api.get("hello".to_string()).await?;
+    println!("get: hello = {:?}", value);
 
     let (mut tx, rx) = api.set_many().await?;
     for i in 0..3 {
