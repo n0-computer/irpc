@@ -41,6 +41,9 @@ futures-buffered ={ version = "0.2.9", optional = true }
 # for AbortOnDropHandle
 n0-future = { workspace = true, optional = true }
 
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+quinn = { workspace = true, optional = true, features = ["runtime-tokio"] }
+
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 # used in the derive example. This must not be a main crate dep or else it will be circular!
@@ -80,6 +83,7 @@ postcard = { version = "1.1.1", default-features = false }
 serde = { version = "1", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.1.2", default-features = false }
-tracing-subscriber = { version = "0.3.19", default-features = false }
+tracing-subscriber = { version = "0.3.19" }
 iroh = { version = "0.34" }
 quinn = { package = "iroh-quinn", version = "0.13.0", default-features = false }
+

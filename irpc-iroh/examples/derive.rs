@@ -2,13 +2,13 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::Context;
 use irpc::{
-    Client, LocalSender, Request, Service, WithChannels,
     channel::{oneshot, spsc},
     rpc::Handler,
+    Client, LocalSender, Request, Service, WithChannels,
 };
 // Import the macro
 use irpc_derive::rpc_requests;
-use irpc_iroh::{IrohRemoteConnection, listen};
+use irpc_iroh::{listen, IrohRemoteConnection};
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
