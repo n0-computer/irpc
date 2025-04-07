@@ -2,9 +2,9 @@ use std::{io, sync::Arc};
 
 use iroh::endpoint::{ConnectionError, RecvStream, SendStream};
 use irpc::{
-    RequestError,
     rpc::{Handler, RemoteConnection},
     util::AsyncReadVarintExt,
+    RequestError,
 };
 
 /// A connection to a remote service.
@@ -90,7 +90,7 @@ mod multithreaded {
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 use multithreaded::*;
 use serde::de::DeserializeOwned;
-use tracing::{Instrument, trace, trace_span, warn};
+use tracing::{trace, trace_span, warn, Instrument};
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 use wasm_browser::*;
 
