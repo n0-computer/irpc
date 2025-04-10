@@ -301,6 +301,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             .iter()
             .map(|(variant_name, inner_type)| {
                 quote! {
+                    #[allow(missing_docs)]
                     #variant_name(::irpc::WithChannels<#inner_type, #service_name>)
                 }
             })
@@ -311,6 +312,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // Create the message enum definition
         let message_enum = quote! {
+            #[allow(missing_docs)]
             #[derive(Debug)]
             pub enum #message_enum_name {
                 #(#message_variants),*
