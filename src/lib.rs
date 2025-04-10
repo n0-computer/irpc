@@ -362,6 +362,17 @@ pub mod channel {
                     Sender::Boxed(x) => x.is_rpc(),
                 }
             }
+
+            #[cfg(feature = "stream")]
+            pub fn into_sink(self) -> impl n0_future::Sink<T, Error = SendError> + Send + 'static
+            where
+                T: RpcMessage,
+            {
+                futures_util::sink::unfold(self, |mut sink, value| async move {
+                    sink.send(value).await?;
+                    Ok(sink)
+                })
+            }
         }
 
         impl<T> From<tokio::sync::mpsc::Sender<T>> for Sender<T> {
@@ -488,6 +499,16 @@ pub mod channel {
                     Self::Tokio(rx) => Ok(rx.recv().await),
                     Self::Boxed(rx) => Ok(rx.recv().await?),
                 }
+            }
+
+            #[cfg(feature = "stream")]
+            pub fn into_stream(
+                self,
+            ) -> impl n0_future::Stream<Item = std::result::Result<T, RecvError>> + Send + 'static
+            {
+                n0_future::stream::unfold(self, |mut recv| async move {
+                    recv.recv().await.transpose().map(|msg| (msg, recv))
+                })
             }
         }
 

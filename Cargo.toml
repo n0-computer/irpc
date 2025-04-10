@@ -40,6 +40,7 @@ anyhow = { workspace = true, optional = true }
 futures-buffered ={ version = "0.2.9", optional = true }
 # for AbortOnDropHandle
 n0-future = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 quinn = { workspace = true, optional = true, features = ["runtime-tokio"] }
@@ -64,7 +65,8 @@ rpc = ["dep:quinn", "dep:postcard", "dep:anyhow", "dep:smallvec", "dep:tracing",
 quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:anyhow", "dep:futures-buffered", "quinn/rustls-ring"]
 # pick up parent span when creating channel messages
 message_spans = []
-default = ["rpc", "quinn_endpoint_setup", "message_spans"]
+stream = ["dep:futures-util"]
+default = ["rpc", "quinn_endpoint_setup", "message_spans", "stream"]
 
 [workspace]
 members = ["irpc-derive", "irpc-iroh"]
@@ -86,4 +88,4 @@ n0-future = { version = "0.1.2", default-features = false }
 tracing-subscriber = { version = "0.3.19" }
 iroh = { version = "0.34" }
 quinn = { package = "iroh-quinn", version = "0.13.0", default-features = false }
-
+futures-util = { version = "0.3", features = ["sink"] }
