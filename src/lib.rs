@@ -507,10 +507,7 @@ pub mod channel {
             ) -> impl n0_future::Stream<Item = std::result::Result<T, RecvError>> + Send + 'static
             {
                 n0_future::stream::unfold(self, |mut recv| async move {
-                    match recv.recv().await.transpose() {
-                        Some(msg) => Some((msg, recv)),
-                        None => None,
-                    }
+                    recv.recv().await.transpose().map(|msg| (msg, recv))
                 })
             }
         }
