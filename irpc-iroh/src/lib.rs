@@ -101,6 +101,9 @@ use tracing::{trace, trace_span, warn, Instrument};
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 use wasm_browser::*;
 
+/// A [`ProtocolHandler`] for an irpc protocol.
+///
+/// Can be added to an [`iroh::router::Router`] to handle incoming connections for an ALPN string.
 pub struct IrohProtocol<R> {
     handler: Handler<R>,
     request_id: AtomicU64,
@@ -133,6 +136,7 @@ impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
     }
 }
 
+/// Handles a single iroh connection with the provided `handler`.
 pub async fn handle_connection<R: DeserializeOwned + 'static>(
     connection: Connection,
     handler: Handler<R>,
