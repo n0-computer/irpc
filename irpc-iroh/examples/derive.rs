@@ -30,7 +30,7 @@ async fn remote() -> Result<()> {
         let endpoint = Endpoint::builder().discovery_n0().bind().await?;
         let api = StorageApi::spawn();
         let router = Router::builder(endpoint.clone())
-            .accept(StorageApi::ALPN.to_vec(), api.expose()?)
+            .accept(StorageApi::ALPN, api.expose()?)
             .spawn()
             .await?;
         let addr = endpoint.node_addr().await?;
