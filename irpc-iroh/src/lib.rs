@@ -116,6 +116,7 @@ impl<T> fmt::Debug for IrohProtocol<T> {
 }
 
 impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
+    /// Creates a new [`IrohProtocol`] for the `handler`.
     pub fn new(handler: Handler<R>) -> Self {
         Self {
             handler,
