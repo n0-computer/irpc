@@ -78,9 +78,12 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 
-use channel::none::NoReceiver;
+use n0_future::boxed::BoxFuture;
 use sealed::Sealed;
 use serde::{de::DeserializeOwned, Serialize};
+
+use self::channel::none::NoReceiver;
+
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod util;
@@ -130,21 +133,6 @@ pub trait Channels<S: Service> {
     type Rx: Receiver;
 }
 
-mod wasm_browser {
-    #![allow(dead_code)]
-    pub(crate) type BoxedFuture<'a, T> =
-        std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
-}
-mod multithreaded {
-    #![allow(dead_code)]
-    pub(crate) type BoxedFuture<'a, T> =
-        std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
-}
-#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
-use multithreaded::*;
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-use wasm_browser::*;
-
 /// Channels that abstract over local or remote sending
 pub mod channel {
     use std::io;
@@ -152,6 +140,8 @@ pub mod channel {
     /// Oneshot channel, similar to tokio's oneshot channel
     pub mod oneshot {
         use std::{fmt::Debug, future::Future, io, pin::Pin, task};
+
+        use n0_future::boxed::BoxFuture;
 
         use super::{RecvError, SendError};
         use crate::util::FusedOneshotReceiver;
@@ -169,9 +159,8 @@ pub mod channel {
         /// Remote senders are always boxed, since for remote communication the boxing
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before sending it.
-        pub type BoxedSender<T> = Box<
-            dyn FnOnce(T) -> crate::BoxedFuture<'static, io::Result<()>> + Send + Sync + 'static,
-        >;
+        pub type BoxedSender<T> =
+            Box<dyn FnOnce(T) -> BoxFuture<io::Result<()>> + Send + Sync + 'static>;
 
         /// A sender that can be wrapped in a `Box<dyn DynSender<T>>`.
         ///
@@ -190,7 +179,7 @@ pub mod channel {
         /// Remote receivers are always boxed, since for remote communication the boxing
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before receiving it.
-        pub type BoxedReceiver<T> = crate::BoxedFuture<'static, io::Result<T>>;
+        pub type BoxedReceiver<T> = crate::BoxFuture<io::Result<T>>;
 
         /// A oneshot sender.
         ///
@@ -1086,7 +1075,7 @@ pub mod rpc {
             RecvError, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
-        BoxedFuture, RequestError, RpcMessage,
+        BoxFuture, RequestError, RpcMessage,
     };
 
     /// Error that can occur when writing the initial message when doing a
@@ -1128,7 +1117,7 @@ pub mod rpc {
         /// Open a bidirectional stream to the remote service.
         fn open_bi(
             &self,
-        ) -> BoxedFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
+        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
     }
 
     /// A connection to a remote service.
@@ -1162,7 +1151,7 @@ pub mod rpc {
 
         fn open_bi(
             &self,
-        ) -> BoxedFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
+        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
         {
             let this = self.0.clone();
             Box::pin(async move {
@@ -1388,7 +1377,7 @@ pub mod rpc {
                 R,
                 quinn::RecvStream,
                 quinn::SendStream,
-            ) -> crate::BoxedFuture<'static, std::result::Result<(), SendError>>
+            ) -> BoxFuture<std::result::Result<(), SendError>>
             + Send
             + Sync
             + 'static,
