@@ -352,6 +352,16 @@ pub mod channel {
                 }
             }
 
+            pub async fn closed(&mut self)
+            where
+                T: RpcMessage,
+            {
+                match self {
+                    Sender::Tokio(tx) => tx.closed().await,
+                    Sender::Boxed(sink) => sink.closed().await,
+                }
+            }
+
             #[cfg(feature = "stream")]
             pub fn into_sink(self) -> impl n0_future::Sink<T, Error = SendError> + Send + 'static
             where
@@ -401,6 +411,9 @@ pub mod channel {
                 &mut self,
                 value: T,
             ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>>;
+
+            /// Await the sender close
+            fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 
             /// True if this is a remote sender
             fn is_rpc(&self) -> bool;
@@ -1379,6 +1392,12 @@ pub mod rpc {
                 self.send.write_all(&self.buffer[n..]).await?;
                 self.buffer.clear();
                 Ok(true)
+            })
+        }
+
+        fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                self.send.stopped().await.ok();
             })
         }
 
