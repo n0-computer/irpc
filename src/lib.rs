@@ -353,7 +353,8 @@ pub mod channel {
             }
 
             pub async fn closed(&mut self)
-                where T: RpcMessage,
+            where
+                T: RpcMessage,
             {
                 match self {
                     Sender::Tokio(tx) => tx.closed().await,
