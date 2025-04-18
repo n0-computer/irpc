@@ -813,73 +813,84 @@ impl<M, R, S> Client<M, R, S> {
     }
 
     /// Performs a request for which the server returns a oneshot receiver.
-    pub async fn rpc<Req, Res>(&self, msg: Req) -> Result<Res, Error>
+    pub fn rpc<Req, Res>(
+        &self,
+        msg: Req,
+    ) -> impl Future<Output = Result<Res, Error>> + Send + 'static
     where
         S: Service,
         M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + 'static,
-        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver>,
+        R: From<Req> + Serialize + Send + Sync + 'static,
+        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
-        let recv: channel::oneshot::Receiver<Res> = match self.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = channel::oneshot::channel();
-                request.send((msg, tx)).await?;
-                rx
-            }
-            #[cfg(not(feature = "rpc"))]
-            Request::Remote(_request) => unreachable!(),
-            #[cfg(feature = "rpc")]
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                rx.into()
-            }
-        };
-        let res = recv.await?;
-        Ok(res)
+        let request = self.request();
+        async move {
+            let recv: channel::oneshot::Receiver<Res> = match request.await? {
+                Request::Local(request) => {
+                    let (tx, rx) = channel::oneshot::channel();
+                    request.send((msg, tx)).await?;
+                    rx
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_request) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let (_tx, rx) = request.write(msg).await?;
+                    rx.into()
+                }
+            };
+            let res = recv.await?;
+            Ok(res)
+        }
     }
 
     /// Performs a request for which the server returns a spsc receiver.
-    pub async fn server_streaming<Req, Res>(
+    pub fn server_streaming<Req, Res>(
         &self,
         msg: Req,
         local_response_cap: usize,
-    ) -> Result<channel::spsc::Receiver<Res>, Error>
+    ) -> impl Future<Output = Result<channel::spsc::Receiver<Res>, Error>> + Send + 'static
     where
         S: Service,
         M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + 'static,
-        Req: Channels<S, Tx = channel::spsc::Sender<Res>, Rx = NoReceiver>,
+        R: From<Req> + Serialize + Send + Sync + 'static,
+        Req: Channels<S, Tx = channel::spsc::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
-        let recv: channel::spsc::Receiver<Res> = match self.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = channel::spsc::channel(local_response_cap);
-                request.send((msg, tx)).await?;
-                rx
-            }
-            #[cfg(not(feature = "rpc"))]
-            Request::Remote(_request) => unreachable!(),
-            #[cfg(feature = "rpc")]
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                rx.into()
-            }
-        };
-        Ok(recv)
+        let request = self.request();
+        async move {
+            let recv: channel::spsc::Receiver<Res> = match request.await? {
+                Request::Local(request) => {
+                    let (tx, rx) = channel::spsc::channel(local_response_cap);
+                    request.send((msg, tx)).await?;
+                    rx
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_request) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let (_tx, rx) = request.write(msg).await?;
+                    rx.into()
+                }
+            };
+            Ok(recv)
+        }
     }
 
     /// Performs a request for which the client can send updates.
-    pub async fn client_streaming<Req, Update, Res>(
+    pub fn client_streaming<Req, Update, Res>(
         &self,
         msg: Req,
         local_update_cap: usize,
-    ) -> Result<
-        (
-            channel::spsc::Sender<Update>,
-            channel::oneshot::Receiver<Res>,
-        ),
-        Error,
+    ) -> impl Future<
+        Output = Result<
+            (
+                channel::spsc::Sender<Update>,
+                channel::oneshot::Receiver<Res>,
+            ),
+            Error,
+        >,
     >
     where
         S: Service,
@@ -889,49 +900,17 @@ impl<M, R, S> Client<M, R, S> {
         Update: RpcMessage,
         Res: RpcMessage,
     {
-        let (update_tx, res_rx): (
-            channel::spsc::Sender<Update>,
-            channel::oneshot::Receiver<Res>,
-        ) = match self.request().await? {
-            Request::Local(request) => {
-                let (req_tx, req_rx) = channel::spsc::channel(local_update_cap);
-                let (res_tx, res_rx) = channel::oneshot::channel();
-                request.send((msg, res_tx, req_rx)).await?;
-                (req_tx, res_rx)
-            }
-            #[cfg(not(feature = "rpc"))]
-            Request::Remote(_request) => unreachable!(),
-            #[cfg(feature = "rpc")]
-            Request::Remote(request) => {
-                let (tx, rx) = request.write(msg).await?;
-                (tx.into(), rx.into())
-            }
-        };
-        Ok((update_tx, res_rx))
-    }
-
-    /// Performs a request for which the client can send updates, and the server returns a spsc receiver.
-    pub async fn bidi_streaming<Req, Update, Res>(
-        &self,
-        msg: Req,
-        local_update_cap: usize,
-        local_response_cap: usize,
-    ) -> Result<(channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>), Error>
-    where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + 'static,
-        Req: Channels<S, Tx = channel::spsc::Sender<Res>, Rx = channel::spsc::Receiver<Update>>,
-        Update: RpcMessage,
-        Res: RpcMessage,
-    {
-        let (update_tx, res_rx): (channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>) =
-            match self.request().await? {
+        let request = self.request();
+        async move {
+            let (update_tx, res_rx): (
+                channel::spsc::Sender<Update>,
+                channel::oneshot::Receiver<Res>,
+            ) = match request.await? {
                 Request::Local(request) => {
-                    let (update_tx, update_rx) = channel::spsc::channel(local_update_cap);
-                    let (res_tx, res_rx) = channel::spsc::channel(local_response_cap);
-                    request.send((msg, res_tx, update_rx)).await?;
-                    (update_tx, res_rx)
+                    let (req_tx, req_rx) = channel::spsc::channel(local_update_cap);
+                    let (res_tx, res_rx) = channel::oneshot::channel();
+                    request.send((msg, res_tx, req_rx)).await?;
+                    (req_tx, res_rx)
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
@@ -941,7 +920,50 @@ impl<M, R, S> Client<M, R, S> {
                     (tx.into(), rx.into())
                 }
             };
-        Ok((update_tx, res_rx))
+            Ok((update_tx, res_rx))
+        }
+    }
+
+    /// Performs a request for which the client can send updates, and the server returns a spsc receiver.
+    pub fn bidi_streaming<Req, Update, Res>(
+        &self,
+        msg: Req,
+        local_update_cap: usize,
+        local_response_cap: usize,
+    ) -> impl Future<
+        Output = Result<(channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>), Error>,
+    > + Send
+           + 'static
+    where
+        S: Service,
+        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        R: From<Req> + Serialize + Send + 'static,
+        Req: Channels<S, Tx = channel::spsc::Sender<Res>, Rx = channel::spsc::Receiver<Update>>
+            + Send
+            + 'static,
+        Update: RpcMessage,
+        Res: RpcMessage,
+    {
+        let request = self.request();
+        async move {
+            let (update_tx, res_rx): (channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>) =
+                match request.await? {
+                    Request::Local(request) => {
+                        let (update_tx, update_rx) = channel::spsc::channel(local_update_cap);
+                        let (res_tx, res_rx) = channel::spsc::channel(local_response_cap);
+                        request.send((msg, res_tx, update_rx)).await?;
+                        (update_tx, res_rx)
+                    }
+                    #[cfg(not(feature = "rpc"))]
+                    Request::Remote(_request) => unreachable!(),
+                    #[cfg(feature = "rpc")]
+                    Request::Remote(request) => {
+                        let (tx, rx) = request.write(msg).await?;
+                        (tx.into(), rx.into())
+                    }
+                };
+            Ok((update_tx, res_rx))
+        }
     }
 }
 
