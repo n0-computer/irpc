@@ -12,7 +12,7 @@ use irpc::{
     util::AsyncReadVarintExt,
     RequestError,
 };
-use n0_future::boxed::BoxFuture;
+use n0_future::{boxed::BoxFuture, TryFutureExt};
 use serde::de::DeserializeOwned;
 use tracing::{trace, trace_span, warn, Instrument};
 
@@ -85,10 +85,6 @@ async fn connect_and_open_bi(
     *guard = Some(conn);
     Ok((send, recv))
 }
-
-use n0_future::TryFutureExt;
-use serde::de::DeserializeOwned;
-use tracing::{trace, trace_span, warn, Instrument};
 
 /// A [`ProtocolHandler`] for an irpc protocol.
 ///
