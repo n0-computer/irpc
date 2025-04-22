@@ -12,6 +12,9 @@ use irpc::{
     util::AsyncReadVarintExt,
     RequestError,
 };
+use n0_future::boxed::BoxFuture;
+use serde::de::DeserializeOwned;
+use tracing::{trace, trace_span, warn, Instrument};
 
 /// A connection to a remote service.
 ///
@@ -44,7 +47,7 @@ impl RemoteConnection for IrohRemoteConnection {
         Box::new(self.clone())
     }
 
-    fn open_bi(&self) -> BoxedFuture<std::result::Result<(SendStream, RecvStream), RequestError>> {
+    fn open_bi(&self) -> BoxFuture<std::result::Result<(SendStream, RecvStream), RequestError>> {
         let this = self.0.clone();
         Box::pin(async move {
             let mut guard = this.connection.lock().await;
@@ -83,23 +86,9 @@ async fn connect_and_open_bi(
     Ok((send, recv))
 }
 
-mod wasm_browser {
-    #![allow(dead_code)]
-    pub(crate) type BoxedFuture<'a, T> =
-        std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
-}
-mod multithreaded {
-    #![allow(dead_code)]
-    pub(crate) type BoxedFuture<'a, T> =
-        std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
-}
-#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
-use multithreaded::*;
 use n0_future::TryFutureExt;
 use serde::de::DeserializeOwned;
 use tracing::{trace, trace_span, warn, Instrument};
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-use wasm_browser::*;
 
 /// A [`ProtocolHandler`] for an irpc protocol.
 ///

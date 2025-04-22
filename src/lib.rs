@@ -78,9 +78,12 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 
-use channel::none::NoReceiver;
+use n0_future::boxed::BoxFuture;
 use sealed::Sealed;
 use serde::{de::DeserializeOwned, Serialize};
+
+use self::channel::none::NoReceiver;
+
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod util;
@@ -130,21 +133,6 @@ pub trait Channels<S: Service> {
     type Rx: Receiver;
 }
 
-mod wasm_browser {
-    #![allow(dead_code)]
-    pub(crate) type BoxedFuture<'a, T> =
-        std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
-}
-mod multithreaded {
-    #![allow(dead_code)]
-    pub(crate) type BoxedFuture<'a, T> =
-        std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
-}
-#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
-use multithreaded::*;
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-use wasm_browser::*;
-
 /// Channels that abstract over local or remote sending
 pub mod channel {
     use std::io;
@@ -152,6 +140,8 @@ pub mod channel {
     /// Oneshot channel, similar to tokio's oneshot channel
     pub mod oneshot {
         use std::{fmt::Debug, future::Future, io, pin::Pin, task};
+
+        use n0_future::boxed::BoxFuture;
 
         use super::{RecvError, SendError};
         use crate::util::FusedOneshotReceiver;
@@ -169,9 +159,8 @@ pub mod channel {
         /// Remote senders are always boxed, since for remote communication the boxing
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before sending it.
-        pub type BoxedSender<T> = Box<
-            dyn FnOnce(T) -> crate::BoxedFuture<'static, io::Result<()>> + Send + Sync + 'static,
-        >;
+        pub type BoxedSender<T> =
+            Box<dyn FnOnce(T) -> BoxFuture<io::Result<()>> + Send + Sync + 'static>;
 
         /// A sender that can be wrapped in a `Box<dyn DynSender<T>>`.
         ///
@@ -190,7 +179,7 @@ pub mod channel {
         /// Remote receivers are always boxed, since for remote communication the boxing
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before receiving it.
-        pub type BoxedReceiver<T> = crate::BoxedFuture<'static, io::Result<T>>;
+        pub type BoxedReceiver<T> = crate::BoxFuture<io::Result<T>>;
 
         /// A oneshot sender.
         ///
@@ -363,6 +352,16 @@ pub mod channel {
                 }
             }
 
+            pub async fn closed(&mut self)
+            where
+                T: RpcMessage,
+            {
+                match self {
+                    Sender::Tokio(tx) => tx.closed().await,
+                    Sender::Boxed(sink) => sink.closed().await,
+                }
+            }
+
             #[cfg(feature = "stream")]
             pub fn into_sink(self) -> impl n0_future::Sink<T, Error = SendError> + Send + 'static
             where
@@ -412,6 +411,9 @@ pub mod channel {
                 &mut self,
                 value: T,
             ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>>;
+
+            /// Await the sender close
+            fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 
             /// True if this is a remote sender
             fn is_rpc(&self) -> bool;
@@ -824,73 +826,84 @@ impl<M, R, S> Client<M, R, S> {
     }
 
     /// Performs a request for which the server returns a oneshot receiver.
-    pub async fn rpc<Req, Res>(&self, msg: Req) -> Result<Res, Error>
+    pub fn rpc<Req, Res>(
+        &self,
+        msg: Req,
+    ) -> impl Future<Output = Result<Res, Error>> + Send + 'static
     where
         S: Service,
         M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + 'static,
-        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver>,
+        R: From<Req> + Serialize + Send + Sync + 'static,
+        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
-        let recv: channel::oneshot::Receiver<Res> = match self.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = channel::oneshot::channel();
-                request.send((msg, tx)).await?;
-                rx
-            }
-            #[cfg(not(feature = "rpc"))]
-            Request::Remote(_request) => unreachable!(),
-            #[cfg(feature = "rpc")]
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                rx.into()
-            }
-        };
-        let res = recv.await?;
-        Ok(res)
+        let request = self.request();
+        async move {
+            let recv: channel::oneshot::Receiver<Res> = match request.await? {
+                Request::Local(request) => {
+                    let (tx, rx) = channel::oneshot::channel();
+                    request.send((msg, tx)).await?;
+                    rx
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_request) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let (_tx, rx) = request.write(msg).await?;
+                    rx.into()
+                }
+            };
+            let res = recv.await?;
+            Ok(res)
+        }
     }
 
     /// Performs a request for which the server returns a spsc receiver.
-    pub async fn server_streaming<Req, Res>(
+    pub fn server_streaming<Req, Res>(
         &self,
         msg: Req,
         local_response_cap: usize,
-    ) -> Result<channel::spsc::Receiver<Res>, Error>
+    ) -> impl Future<Output = Result<channel::spsc::Receiver<Res>, Error>> + Send + 'static
     where
         S: Service,
         M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + 'static,
-        Req: Channels<S, Tx = channel::spsc::Sender<Res>, Rx = NoReceiver>,
+        R: From<Req> + Serialize + Send + Sync + 'static,
+        Req: Channels<S, Tx = channel::spsc::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
-        let recv: channel::spsc::Receiver<Res> = match self.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = channel::spsc::channel(local_response_cap);
-                request.send((msg, tx)).await?;
-                rx
-            }
-            #[cfg(not(feature = "rpc"))]
-            Request::Remote(_request) => unreachable!(),
-            #[cfg(feature = "rpc")]
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                rx.into()
-            }
-        };
-        Ok(recv)
+        let request = self.request();
+        async move {
+            let recv: channel::spsc::Receiver<Res> = match request.await? {
+                Request::Local(request) => {
+                    let (tx, rx) = channel::spsc::channel(local_response_cap);
+                    request.send((msg, tx)).await?;
+                    rx
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_request) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let (_tx, rx) = request.write(msg).await?;
+                    rx.into()
+                }
+            };
+            Ok(recv)
+        }
     }
 
     /// Performs a request for which the client can send updates.
-    pub async fn client_streaming<Req, Update, Res>(
+    pub fn client_streaming<Req, Update, Res>(
         &self,
         msg: Req,
         local_update_cap: usize,
-    ) -> Result<
-        (
-            channel::spsc::Sender<Update>,
-            channel::oneshot::Receiver<Res>,
-        ),
-        Error,
+    ) -> impl Future<
+        Output = Result<
+            (
+                channel::spsc::Sender<Update>,
+                channel::oneshot::Receiver<Res>,
+            ),
+            Error,
+        >,
     >
     where
         S: Service,
@@ -900,49 +913,17 @@ impl<M, R, S> Client<M, R, S> {
         Update: RpcMessage,
         Res: RpcMessage,
     {
-        let (update_tx, res_rx): (
-            channel::spsc::Sender<Update>,
-            channel::oneshot::Receiver<Res>,
-        ) = match self.request().await? {
-            Request::Local(request) => {
-                let (req_tx, req_rx) = channel::spsc::channel(local_update_cap);
-                let (res_tx, res_rx) = channel::oneshot::channel();
-                request.send((msg, res_tx, req_rx)).await?;
-                (req_tx, res_rx)
-            }
-            #[cfg(not(feature = "rpc"))]
-            Request::Remote(_request) => unreachable!(),
-            #[cfg(feature = "rpc")]
-            Request::Remote(request) => {
-                let (tx, rx) = request.write(msg).await?;
-                (tx.into(), rx.into())
-            }
-        };
-        Ok((update_tx, res_rx))
-    }
-
-    /// Performs a request for which the client can send updates, and the server returns a spsc receiver.
-    pub async fn bidi_streaming<Req, Update, Res>(
-        &self,
-        msg: Req,
-        local_update_cap: usize,
-        local_response_cap: usize,
-    ) -> Result<(channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>), Error>
-    where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + 'static,
-        Req: Channels<S, Tx = channel::spsc::Sender<Res>, Rx = channel::spsc::Receiver<Update>>,
-        Update: RpcMessage,
-        Res: RpcMessage,
-    {
-        let (update_tx, res_rx): (channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>) =
-            match self.request().await? {
+        let request = self.request();
+        async move {
+            let (update_tx, res_rx): (
+                channel::spsc::Sender<Update>,
+                channel::oneshot::Receiver<Res>,
+            ) = match request.await? {
                 Request::Local(request) => {
-                    let (update_tx, update_rx) = channel::spsc::channel(local_update_cap);
-                    let (res_tx, res_rx) = channel::spsc::channel(local_response_cap);
-                    request.send((msg, res_tx, update_rx)).await?;
-                    (update_tx, res_rx)
+                    let (req_tx, req_rx) = channel::spsc::channel(local_update_cap);
+                    let (res_tx, res_rx) = channel::oneshot::channel();
+                    request.send((msg, res_tx, req_rx)).await?;
+                    (req_tx, res_rx)
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
@@ -952,7 +933,50 @@ impl<M, R, S> Client<M, R, S> {
                     (tx.into(), rx.into())
                 }
             };
-        Ok((update_tx, res_rx))
+            Ok((update_tx, res_rx))
+        }
+    }
+
+    /// Performs a request for which the client can send updates, and the server returns a spsc receiver.
+    pub fn bidi_streaming<Req, Update, Res>(
+        &self,
+        msg: Req,
+        local_update_cap: usize,
+        local_response_cap: usize,
+    ) -> impl Future<
+        Output = Result<(channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>), Error>,
+    > + Send
+           + 'static
+    where
+        S: Service,
+        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        R: From<Req> + Serialize + Send + 'static,
+        Req: Channels<S, Tx = channel::spsc::Sender<Res>, Rx = channel::spsc::Receiver<Update>>
+            + Send
+            + 'static,
+        Update: RpcMessage,
+        Res: RpcMessage,
+    {
+        let request = self.request();
+        async move {
+            let (update_tx, res_rx): (channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>) =
+                match request.await? {
+                    Request::Local(request) => {
+                        let (update_tx, update_rx) = channel::spsc::channel(local_update_cap);
+                        let (res_tx, res_rx) = channel::spsc::channel(local_response_cap);
+                        request.send((msg, res_tx, update_rx)).await?;
+                        (update_tx, res_rx)
+                    }
+                    #[cfg(not(feature = "rpc"))]
+                    Request::Remote(_request) => unreachable!(),
+                    #[cfg(feature = "rpc")]
+                    Request::Remote(request) => {
+                        let (tx, rx) = request.write(msg).await?;
+                        (tx.into(), rx.into())
+                    }
+                };
+            Ok((update_tx, res_rx))
+        }
     }
 }
 
@@ -1086,7 +1110,7 @@ pub mod rpc {
             RecvError, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
-        BoxedFuture, RequestError, RpcMessage,
+        BoxFuture, RequestError, RpcMessage,
     };
 
     /// Error that can occur when writing the initial message when doing a
@@ -1128,7 +1152,7 @@ pub mod rpc {
         /// Open a bidirectional stream to the remote service.
         fn open_bi(
             &self,
-        ) -> BoxedFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
+        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
     }
 
     /// A connection to a remote service.
@@ -1162,7 +1186,7 @@ pub mod rpc {
 
         fn open_bi(
             &self,
-        ) -> BoxedFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
+        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
         {
             let this = self.0.clone();
             Box::pin(async move {
@@ -1371,6 +1395,12 @@ pub mod rpc {
             })
         }
 
+        fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                self.send.stopped().await.ok();
+            })
+        }
+
         fn is_rpc(&self) -> bool {
             true
         }
@@ -1388,7 +1418,7 @@ pub mod rpc {
                 R,
                 quinn::RecvStream,
                 quinn::SendStream,
-            ) -> crate::BoxedFuture<'static, std::result::Result<(), SendError>>
+            ) -> BoxFuture<std::result::Result<(), SendError>>
             + Send
             + Sync
             + 'static,
