@@ -1,6 +1,12 @@
-use std::{io, sync::Arc};
+use std::{
+    fmt, io,
+    sync::{atomic::AtomicU64, Arc},
+};
 
-use iroh::endpoint::{ConnectionError, RecvStream, SendStream};
+use iroh::{
+    endpoint::{Connection, ConnectionError, RecvStream, SendStream},
+    protocol::ProtocolHandler,
+};
 use irpc::{
     rpc::{Handler, RemoteConnection},
     util::AsyncReadVarintExt,
@@ -21,7 +27,7 @@ pub struct IrohRemoteConnection(Arc<IrohRemoteConnectionInner>);
 struct IrohRemoteConnectionInner {
     endpoint: iroh::Endpoint,
     addr: iroh::NodeAddr,
-    connection: tokio::sync::Mutex<Option<iroh::endpoint::Connection>>,
+    connection: tokio::sync::Mutex<Option<Connection>>,
     alpn: Vec<u8>,
 }
 
@@ -72,12 +78,87 @@ async fn connect_and_open_bi(
     endpoint: &iroh::Endpoint,
     addr: &iroh::NodeAddr,
     alpn: &[u8],
-    mut guard: tokio::sync::MutexGuard<'_, Option<iroh::endpoint::Connection>>,
+    mut guard: tokio::sync::MutexGuard<'_, Option<Connection>>,
 ) -> anyhow::Result<(SendStream, RecvStream)> {
     let conn = endpoint.connect(addr.clone(), alpn).await?;
     let (send, recv) = conn.open_bi().await?;
     *guard = Some(conn);
     Ok((send, recv))
+}
+
+use n0_future::TryFutureExt;
+use serde::de::DeserializeOwned;
+use tracing::{trace, trace_span, warn, Instrument};
+
+/// A [`ProtocolHandler`] for an irpc protocol.
+///
+/// Can be added to an [`iroh::router::Router`] to handle incoming connections for an ALPN string.
+pub struct IrohProtocol<R> {
+    handler: Handler<R>,
+    request_id: AtomicU64,
+}
+
+impl<T> fmt::Debug for IrohProtocol<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RpcProtocol")
+    }
+}
+
+impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
+    /// Creates a new [`IrohProtocol`] for the `handler`.
+    pub fn new(handler: Handler<R>) -> Self {
+        Self {
+            handler,
+            request_id: Default::default(),
+        }
+    }
+}
+
+impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
+    fn accept(&self, connection: Connection) -> n0_future::future::Boxed<anyhow::Result<()>> {
+        let handler = self.handler.clone();
+        let request_id = self
+            .request_id
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let fut = handle_connection(connection, handler).map_err(anyhow::Error::from);
+        let span = trace_span!("rpc", id = request_id);
+        Box::pin(fut.instrument(span))
+    }
+}
+
+/// Handles a single iroh connection with the provided `handler`.
+pub async fn handle_connection<R: DeserializeOwned + 'static>(
+    connection: Connection,
+    handler: Handler<R>,
+) -> io::Result<()> {
+    loop {
+        let (send, mut recv) = match connection.accept_bi().await {
+            Ok((s, r)) => (s, r),
+            Err(ConnectionError::ApplicationClosed(cause))
+                if cause.error_code.into_inner() == 0 =>
+            {
+                trace!("remote side closed connection {cause:?}");
+                return Ok(());
+            }
+            Err(cause) => {
+                warn!("failed to accept bi stream {cause:?}");
+                return Err(cause.into());
+            }
+        };
+        let size = recv
+            .read_varint_u64()
+            .await?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
+        let mut buf = vec![0; size as usize];
+        recv.read_exact(&mut buf)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
+        let msg: R = postcard::from_bytes(&buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let rx = recv;
+        let tx = send;
+        handler(msg, rx, tx).await?;
+    }
 }
 
 /// Utility function to listen for incoming connections and handle them with the provided handler
@@ -94,33 +175,7 @@ pub async fn listen<R: DeserializeOwned + 'static>(endpoint: iroh::Endpoint, han
                     return io::Result::Ok(());
                 }
             };
-            loop {
-                let (send, mut recv) = match connection.accept_bi().await {
-                    Ok((s, r)) => (s, r),
-                    Err(ConnectionError::ApplicationClosed(cause))
-                        if cause.error_code.into_inner() == 0 =>
-                    {
-                        trace!("remote side closed connection {cause:?}");
-                        return Ok(());
-                    }
-                    Err(cause) => {
-                        warn!("failed to accept bi stream {cause:?}");
-                        return Err(cause.into());
-                    }
-                };
-                let size = recv.read_varint_u64().await?.ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size")
-                })?;
-                let mut buf = vec![0; size as usize];
-                recv.read_exact(&mut buf)
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-                let msg: R = postcard::from_bytes(&buf)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let rx = recv;
-                let tx = send;
-                handler(msg, rx, tx).await?;
-            }
+            handle_connection(connection, handler).await
         };
         let span = trace_span!("rpc", id = request_id);
         tasks.spawn(fut.instrument(span));
