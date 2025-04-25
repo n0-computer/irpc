@@ -7,14 +7,23 @@ use iroh::{
     endpoint::{Connection, ConnectionError, RecvStream, SendStream},
     protocol::ProtocolHandler,
 };
-use irpc::{
-    rpc::{Handler, RemoteConnection},
-    util::AsyncReadVarintExt,
-    RequestError,
-};
+use irpc::{rpc::RemoteConnection, util::AsyncReadVarintExt, RequestError};
 use n0_future::{boxed::BoxFuture, TryFutureExt};
 use serde::de::DeserializeOwned;
 use tracing::{trace, trace_span, warn, Instrument};
+
+/// Type alias for a handler fn for remote requests
+pub type Handler<R> = Arc<
+    dyn Fn(
+            Connection,
+            R,
+            iroh::endpoint::RecvStream,
+            iroh::endpoint::SendStream,
+        ) -> BoxFuture<std::result::Result<(), irpc::channel::SendError>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// A connection to a remote service.
 ///
@@ -90,7 +99,7 @@ async fn connect_and_open_bi(
 ///
 /// Can be added to an [`iroh::router::Router`] to handle incoming connections for an ALPN string.
 pub struct IrohProtocol<R> {
-    handler: Handler<R>,
+    create_handler: Box<dyn Fn() -> Handler<R> + Send + Sync + 'static>,
     request_id: AtomicU64,
 }
 
@@ -102,9 +111,9 @@ impl<T> fmt::Debug for IrohProtocol<T> {
 
 impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
     /// Creates a new [`IrohProtocol`] for the `handler`.
-    pub fn new(handler: Handler<R>) -> Self {
+    pub fn new(create_handler: impl Fn() -> Handler<R> + Send + Sync + 'static) -> Self {
         Self {
-            handler,
+            create_handler: Box::new(create_handler),
             request_id: Default::default(),
         }
     }
@@ -112,7 +121,7 @@ impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
 
 impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
     fn accept(&self, connection: Connection) -> n0_future::future::Boxed<anyhow::Result<()>> {
-        let handler = self.handler.clone();
+        let handler = (self.create_handler)();
         let request_id = self
             .request_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -153,7 +162,7 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let rx = recv;
         let tx = send;
-        handler(msg, rx, tx).await?;
+        handler(connection.clone(), msg, rx, tx).await?;
     }
 }
 
