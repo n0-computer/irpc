@@ -464,19 +464,16 @@ pub mod channel {
             /// all.
             ///
             /// Returns true if the message was sent.
-            pub async fn try_send(&mut self, value: T) -> std::result::Result<(), SendError> {
+            pub async fn try_send(&mut self, value: T) -> std::result::Result<bool, SendError> {
                 match self {
                     Sender::Tokio(tx) => match tx.try_send(value) {
-                        Ok(()) => Ok(()),
+                        Ok(()) => Ok(true),
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                             Err(SendError::ReceiverClosed)
                         }
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(false),
                     },
-                    Sender::Boxed(sink) => {
-                        sink.try_send(value).await.map_err(SendError::from)?;
-                        Ok(())
-                    }
+                    Sender::Boxed(sink) => sink.try_send(value).await.map_err(SendError::from),
                 }
             }
         }
