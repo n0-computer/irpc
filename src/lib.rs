@@ -78,7 +78,6 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 
-use n0_future::boxed::BoxFuture;
 use sealed::Sealed;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -141,7 +140,7 @@ pub mod channel {
     pub mod oneshot {
         use std::{fmt::Debug, future::Future, io, pin::Pin, task};
 
-        use n0_future::boxed::BoxFuture;
+        use n0_future::future::Boxed as BoxFuture;
 
         use super::{RecvError, SendError};
         use crate::util::FusedOneshotReceiver;
@@ -179,7 +178,7 @@ pub mod channel {
         /// Remote receivers are always boxed, since for remote communication the boxing
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before receiving it.
-        pub type BoxedReceiver<T> = crate::BoxFuture<io::Result<T>>;
+        pub type BoxedReceiver<T> = BoxFuture<io::Result<T>>;
 
         /// A oneshot sender.
         ///
@@ -1093,7 +1092,7 @@ pub mod rpc {
     //! Module for cross-process RPC using [`quinn`].
     use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::Arc};
 
-    use n0_future::task::JoinSet;
+    use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
     use quinn::ConnectionError;
     use serde::{de::DeserializeOwned, Serialize};
     use smallvec::SmallVec;
@@ -1107,7 +1106,7 @@ pub mod rpc {
             RecvError, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
-        BoxFuture, RequestError, RpcMessage,
+        RequestError, RpcMessage,
     };
 
     /// Error that can occur when writing the initial message when doing a
