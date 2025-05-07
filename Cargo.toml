@@ -1,6 +1,6 @@
 [package]
 name = "irpc"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>", "n0 team"]
 keywords = ["api", "protocol", "network", "rpc"]
@@ -48,7 +48,7 @@ quinn = { workspace = true, optional = true, features = ["runtime-tokio"] }
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 # used in the derive example. This must not be a main crate dep or else it will be circular!
-irpc-derive = { version = "0.2.2", path = "./irpc-derive" }
+irpc-derive = { version = "0.2.3", path = "./irpc-derive" }
 # just convenient for the enum definitions, in the manual example
 derive_more = { version = "2", features = ["from"] }
 # we need full for example main etc.
