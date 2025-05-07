@@ -9,7 +9,6 @@ on:
     branches:
       - main
 
-
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -58,8 +57,16 @@ jobs:
           toolchain: ${{ matrix.channel }}
           targets: ${{ matrix.target.toolchain }}
       - uses: swatinem/rust-cache@v2
-      - name: cargo test
+      - name: cargo test (all features)
         run: cargo test --locked --workspace --all-features --bins --tests --examples
+      - name: cargo test (default features)
+        run: cargo test --locked --workspace --bins --tests --examples
+      - name: cargo test (no default features)
+        run: cargo test --locked --workspace --no-default-features --bins --tests --examples
+      - name: cargo check (feature message_spans)
+        run: cargo check --no-default-features --features message_spans
+      - name: cargo check (feature rpc)
+        run: cargo check --no-default-features --features rpc
 
   test-release:
     runs-on: ${{ matrix.target.os }}
@@ -91,6 +98,26 @@ jobs:
       - uses: swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --release --locked --workspace --all-features --bins --tests --examples
+
+  wasm_build:
+    name: Build wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-tools
+        uses: bytecodealliance/actions/wasm-tools/setup@v1
+      - name: wasm32 build
+        run: cargo build --target wasm32-unknown-unknown
+      # If the Wasm file contains any 'import "env"' declarations, then
+      # some non-Wasm-compatible code made it into the final code.
+      - name: Ensure no 'import "env"' in iroh-relay Wasm
+        run: |
+          ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/irpc.wasm | grep 'import "env"'
 
   # Checks correct runtime deps and features are requested by not including dev-dependencies.
   check-deps:
