@@ -10,9 +10,9 @@ use iroh::{
 use irpc::{
     rpc::{Handler, RemoteConnection},
     util::AsyncReadVarintExt,
-    RequestError,
+    RequestError, StaticBoxFuture,
 };
-use n0_future::{boxed::BoxFuture, TryFutureExt};
+use n0_future::TryFutureExt;
 use serde::de::DeserializeOwned;
 use tracing::{trace, trace_span, warn, Instrument};
 
@@ -47,7 +47,9 @@ impl RemoteConnection for IrohRemoteConnection {
         Box::new(self.clone())
     }
 
-    fn open_bi(&self) -> BoxFuture<std::result::Result<(SendStream, RecvStream), RequestError>> {
+    fn open_bi(
+        &self,
+    ) -> StaticBoxFuture<std::result::Result<(SendStream, RecvStream), RequestError>> {
         let this = self.0.clone();
         Box::pin(async move {
             let mut guard = this.connection.lock().await;

@@ -76,7 +76,7 @@
 //! quic-rpc, this crate does not abstract over the stream type and is focused
 //! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [iroh quinn fork](https://docs.rs/iroh-quinn/latest/iroh-quinn/index.html).
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
-use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
+use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, pin::Pin};
 
 use sealed::Sealed;
 use serde::{de::DeserializeOwned, Serialize};
@@ -132,6 +132,12 @@ pub trait Channels<S: Service> {
     type Rx: Receiver;
 }
 
+/// A boxed future, with `Send + Sync` bounds and a generic lifetime.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + Sync + 'a>>;
+
+/// A boxed future, with `Send + Sync + 'static` bounds.
+pub type StaticBoxFuture<T> = BoxFuture<'static, T>;
+
 /// Channels that abstract over local or remote sending
 pub mod channel {
     use std::io;
@@ -140,10 +146,8 @@ pub mod channel {
     pub mod oneshot {
         use std::{fmt::Debug, future::Future, io, pin::Pin, task};
 
-        use n0_future::future::Boxed as BoxFuture;
-
         use super::{RecvError, SendError};
-        use crate::util::FusedOneshotReceiver;
+        use crate::{util::FusedOneshotReceiver, StaticBoxFuture};
 
         /// Create a local oneshot sender and receiver pair.
         ///
@@ -159,7 +163,7 @@ pub mod channel {
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before sending it.
         pub type BoxedSender<T> =
-            Box<dyn FnOnce(T) -> BoxFuture<io::Result<()>> + Send + Sync + 'static>;
+            Box<dyn FnOnce(T) -> StaticBoxFuture<io::Result<()>> + Send + Sync + 'static>;
 
         /// A sender that can be wrapped in a `Box<dyn DynSender<T>>`.
         ///
@@ -178,7 +182,7 @@ pub mod channel {
         /// Remote receivers are always boxed, since for remote communication the boxing
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before receiving it.
-        pub type BoxedReceiver<T> = BoxFuture<io::Result<T>>;
+        pub type BoxedReceiver<T> = StaticBoxFuture<io::Result<T>>;
 
         /// A oneshot sender.
         ///
@@ -290,7 +294,7 @@ pub mod channel {
         impl<T, F, Fut> From<F> for Receiver<T>
         where
             F: FnOnce() -> Fut,
-            Fut: Future<Output = io::Result<T>> + Send + 'static,
+            Fut: Future<Output = io::Result<T>> + Send + Sync + 'static,
         {
             fn from(f: F) -> Self {
                 Self::Boxed(Box::pin(f()))
@@ -314,10 +318,10 @@ pub mod channel {
     ///
     /// For the rpc case, the send side can not be cloned, hence spsc instead of mpsc.
     pub mod spsc {
-        use std::{fmt::Debug, future::Future, io, pin::Pin};
+        use std::{fmt::Debug, io};
 
         use super::{RecvError, SendError};
-        use crate::RpcMessage;
+        use crate::{BoxFuture, RpcMessage};
 
         /// Create a local spsc sender and receiver pair, with the given buffer size.
         ///
@@ -396,23 +400,17 @@ pub mod channel {
             ///
             /// For the remote case, if the message can not be completely sent,
             /// this must return an error and disable the channel.
-            fn send(
-                &mut self,
-                value: T,
-            ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+            fn send(&mut self, value: T) -> BoxFuture<io::Result<()>>;
 
             /// Try to send a message, returning as fast as possible if sending
             /// is not currently possible.
             ///
             /// For the remote case, it must be guaranteed that the message is
             /// either completely sent or not at all.
-            fn try_send(
-                &mut self,
-                value: T,
-            ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>>;
+            fn try_send(&mut self, value: T) -> BoxFuture<'_, io::Result<bool>>;
 
             /// Await the sender close
-            fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+            fn closed(&mut self) -> BoxFuture<'_, ()>;
 
             /// True if this is a remote sender
             fn is_rpc(&self) -> bool;
@@ -420,9 +418,7 @@ pub mod channel {
 
         /// A receiver that can be wrapped in a `Box<dyn DynReceiver<T>>`.
         pub trait DynReceiver<T>: Debug + Send + Sync + 'static {
-            fn recv(
-                &mut self,
-            ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<T>, RecvError>> + Send + '_>>;
+            fn recv(&mut self) -> BoxFuture<'_, std::result::Result<Option<T>, RecvError>>;
         }
 
         impl<T> Debug for Sender<T> {
@@ -502,7 +498,7 @@ pub mod channel {
             #[cfg(feature = "stream")]
             pub fn into_stream(
                 self,
-            ) -> impl n0_future::Stream<Item = std::result::Result<T, RecvError>> + Send + 'static
+            ) -> impl n0_future::Stream<Item = std::result::Result<T, RecvError>> + Send + Sync + 'static
             {
                 n0_future::stream::unfold(self, |mut recv| async move {
                     recv.recv().await.transpose().map(|msg| (msg, recv))
@@ -1090,9 +1086,9 @@ pub mod rpc {
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod rpc {
     //! Module for cross-process RPC using [`quinn`].
-    use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::Arc};
+    use std::{fmt::Debug, io, marker::PhantomData, sync::Arc};
 
-    use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
+    use n0_future::task::JoinSet;
     use quinn::ConnectionError;
     use serde::{de::DeserializeOwned, Serialize};
     use smallvec::SmallVec;
@@ -1106,7 +1102,7 @@ pub mod rpc {
             RecvError, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
-        RequestError, RpcMessage,
+        BoxFuture, RequestError, RpcMessage, StaticBoxFuture,
     };
 
     /// Error that can occur when writing the initial message when doing a
@@ -1148,7 +1144,9 @@ pub mod rpc {
         /// Open a bidirectional stream to the remote service.
         fn open_bi(
             &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
+        ) -> StaticBoxFuture<
+            std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>,
+        >;
     }
 
     /// A connection to a remote service.
@@ -1182,8 +1180,9 @@ pub mod rpc {
 
         fn open_bi(
             &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
-        {
+        ) -> StaticBoxFuture<
+            std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>,
+        > {
             let this = self.0.clone();
             Box::pin(async move {
                 let mut guard = this.connection.lock().await;
@@ -1324,10 +1323,7 @@ pub mod rpc {
     }
 
     impl<T: RpcMessage> DynReceiver<T> for QuinnReceiver<T> {
-        fn recv(
-            &mut self,
-        ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<T>, RecvError>> + Send + '_>>
-        {
+        fn recv(&mut self) -> BoxFuture<'_, std::result::Result<Option<T>, RecvError>> {
             Box::pin(async {
                 let read = &mut self.recv;
                 let Some(size) = read.read_varint_u64().await? else {
@@ -1361,7 +1357,7 @@ pub mod rpc {
     }
 
     impl<T: RpcMessage> DynSender<T> for QuinnSender<T> {
-        fn send(&mut self, value: T) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        fn send(&mut self, value: T) -> BoxFuture<'_, io::Result<()>> {
             Box::pin(async {
                 let value = value;
                 self.buffer.clear();
@@ -1372,10 +1368,7 @@ pub mod rpc {
             })
         }
 
-        fn try_send(
-            &mut self,
-            value: T,
-        ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
+        fn try_send(&mut self, value: T) -> BoxFuture<'_, io::Result<bool>> {
             Box::pin(async {
                 // todo: move the non-async part out of the box. Will require a new return type.
                 let value = value;
@@ -1391,7 +1384,7 @@ pub mod rpc {
             })
         }
 
-        fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        fn closed(&mut self) -> BoxFuture<'_, ()> {
             Box::pin(async move {
                 self.send.stopped().await.ok();
             })
@@ -1414,7 +1407,7 @@ pub mod rpc {
                 R,
                 quinn::RecvStream,
                 quinn::SendStream,
-            ) -> BoxFuture<std::result::Result<(), SendError>>
+            ) -> StaticBoxFuture<std::result::Result<(), SendError>>
             + Send
             + Sync
             + 'static,
