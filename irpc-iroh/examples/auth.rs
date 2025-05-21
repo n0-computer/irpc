@@ -22,8 +22,7 @@ async fn remote() -> Result<()> {
         let server = StorageServer::new("secret".to_string());
         let router = Router::builder(endpoint.clone())
             .accept(StorageServer::ALPN, server.clone())
-            .spawn()
-            .await?;
+            .spawn();
         let addr = endpoint.node_addr().await?;
         (router, addr)
     };
