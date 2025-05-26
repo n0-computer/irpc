@@ -1,4 +1,4 @@
-use irpc_derive::rpc_requests;
+use irpc::rpc_requests;
 
 #[rpc_requests(Service, Msg)]
 enum Enum {

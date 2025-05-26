@@ -1,5 +1,5 @@
 use irpc::channel::{none::NoSender, oneshot};
-use irpc_derive::rpc_requests;
+use irpc::rpc_requests;
 use serde::{Deserialize, Serialize};
 
 #[test]

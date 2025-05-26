@@ -41,14 +41,14 @@ futures-buffered ={ version = "0.2.9", optional = true }
 # for AbortOnDropHandle
 n0-future = { workspace = true }
 futures-util = { workspace = true, optional = true }
+# for the derive reexport/feature
+irpc-derive = { version = "0.2.3", path = "./irpc-derive", optional = true }
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 quinn = { workspace = true, optional = true, features = ["runtime-tokio"] }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["fmt"] }
-# used in the derive example. This must not be a main crate dep or else it will be circular!
-irpc-derive = { version = "0.2.3", path = "./irpc-derive" }
 # just convenient for the enum definitions, in the manual example
 derive_more = { version = "2", features = ["from"] }
 # we need full for example main etc.
@@ -66,7 +66,8 @@ quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:anyhow", "dep:fut
 # pick up parent span when creating channel messages
 message_spans = ["dep:tracing"]
 stream = ["dep:futures-util"]
-default = ["rpc", "quinn_endpoint_setup", "message_spans", "stream"]
+derive = ["dep:irpc-derive"]
+default = ["rpc", "quinn_endpoint_setup", "message_spans", "stream", "derive"]
 
 [workspace]
 members = ["irpc-derive", "irpc-iroh"]

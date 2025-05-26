@@ -78,6 +78,9 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 
+#[cfg(feature = "derive")]
+#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
+pub use irpc_derive::rpc_requests;
 use sealed::Sealed;
 use serde::{de::DeserializeOwned, Serialize};
 
