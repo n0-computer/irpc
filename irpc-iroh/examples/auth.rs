@@ -27,6 +27,7 @@ async fn remote() -> Result<()> {
         (router, addr)
     };
 
+    // correct authentication
     let client_endpoint = Endpoint::builder().bind().await?;
     let api = StorageClient::connect(client_endpoint, server_addr.clone());
     api.auth("secret").await?;
@@ -39,11 +40,13 @@ async fn remote() -> Result<()> {
         println!("list value = {:?}", value);
     }
 
+    // invalid authentication
     let client_endpoint = Endpoint::builder().bind().await?;
     let api = StorageClient::connect(client_endpoint, server_addr.clone());
     assert!(api.auth("bad").await.is_err());
     assert!(api.get("hello".to_string()).await.is_err());
 
+    // no authentication
     let client_endpoint = Endpoint::builder().bind().await?;
     let api = StorageClient::connect(client_endpoint, server_addr);
     assert!(api.get("hello".to_string()).await.is_err());
@@ -63,7 +66,11 @@ mod storage {
     };
 
     use anyhow::Result;
-    use iroh::{endpoint::Connection, protocol::ProtocolHandler, Endpoint};
+    use iroh::{
+        endpoint::{Connection, RecvStream, SendStream},
+        protocol::ProtocolHandler,
+        Endpoint,
+    };
     use irpc::{
         channel::{oneshot, spsc},
         Client, Service, WithChannels,
@@ -127,33 +134,35 @@ mod storage {
         auth_token: String,
     }
 
-    #[derive(Default)]
-    struct PeerState {
-        authed: bool,
-    }
-
     impl ProtocolHandler for StorageServer {
         fn accept(&self, conn: Connection) -> n0_future::future::Boxed<Result<()>> {
             let this = self.clone();
             Box::pin(async move {
-                let mut peer_state = PeerState::default();
+                let mut authed = false;
                 while let Some((msg, rx, tx)) = read_request(&conn).await? {
-                    // Upcast the send/receive streams to the channel types each message needs.
-                    let msg: StorageMessage = match msg {
-                        StorageProtocol::Auth(msg) => WithChannels::from((msg, tx, rx)).into(),
-                        StorageProtocol::Get(msg) => WithChannels::from((msg, tx, rx)).into(),
-                        StorageProtocol::Set(msg) => WithChannels::from((msg, tx, rx)).into(),
-                        StorageProtocol::SetMany(msg) => WithChannels::from((msg, tx, rx)).into(),
-                        StorageProtocol::List(msg) => WithChannels::from((msg, tx, rx)).into(),
-                    };
-
-                    // Handle the message
-                    if let Err(err) = this.handle(&mut peer_state, msg).await {
-                        match err {
-                            Error::Unauthorized => conn.close(401u32.into(), b"unauthorized"),
-                            Error::InvalidMessage => conn.close(400u32.into(), b"invalid message"),
+                    let msg_with_channels = upcast_message(msg, rx, tx);
+                    match msg_with_channels {
+                        StorageMessage::Auth(msg) => {
+                            let WithChannels { inner, tx, .. } = msg;
+                            if authed {
+                                conn.close(1u32.into(), b"invalid message");
+                                break;
+                            } else if inner.token != this.auth_token {
+                                conn.close(1u32.into(), b"permission denied");
+                                break;
+                            } else {
+                                authed = true;
+                                tx.send(Ok(())).await.ok();
+                            }
                         }
-                        break;
+                        msg_with_channels @ _ => {
+                            if !authed {
+                                conn.close(1u32.into(), b"permission denied");
+                                break;
+                            } else {
+                                this.handle_authenticated(msg_with_channels).await;
+                            }
+                        }
                     }
                 }
                 conn.closed().await;
@@ -162,9 +171,14 @@ mod storage {
         }
     }
 
-    enum Error {
-        Unauthorized,
-        InvalidMessage,
+    fn upcast_message(msg: StorageProtocol, rx: RecvStream, tx: SendStream) -> StorageMessage {
+        match msg {
+            StorageProtocol::Auth(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::Get(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::Set(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::SetMany(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::List(msg) => WithChannels::from((msg, tx, rx)).into(),
+        }
     }
 
     impl StorageServer {
@@ -177,26 +191,9 @@ mod storage {
             }
         }
 
-        async fn handle(
-            &self,
-            peer_state: &mut PeerState,
-            msg: StorageMessage,
-        ) -> Result<(), Error> {
-            if !peer_state.authed && !matches!(msg, StorageMessage::Auth(_)) {
-                return Err(Error::InvalidMessage);
-            }
+        async fn handle_authenticated(&self, msg: StorageMessage) {
             match msg {
-                StorageMessage::Auth(auth) => {
-                    let WithChannels { tx, inner, .. } = auth;
-                    if peer_state.authed {
-                        return Err(Error::InvalidMessage);
-                    } else if inner.token != self.auth_token {
-                        return Err(Error::Unauthorized);
-                    } else {
-                        peer_state.authed = true;
-                        tx.send(Ok(())).await.ok();
-                    }
-                }
+                StorageMessage::Auth(_) => unreachable!("handled in ProtocolHandler::accept"),
                 StorageMessage::Get(get) => {
                     info!("get {:?}", get);
                     let WithChannels { tx, inner, .. } = get;
@@ -238,7 +235,6 @@ mod storage {
                     }
                 }
             }
-            Ok(())
         }
     }
 
