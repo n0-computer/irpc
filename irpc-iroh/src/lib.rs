@@ -135,6 +135,13 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     }
 }
 
+/// Reads a single request from the connection.
+///
+/// This accepts a bi-directional stream from the connection and reads and parses the request.
+///
+/// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
+/// Returns None if the remote closed the connection with error code `0`.
+/// Returns an error for all other failure cases.
 pub async fn read_request<R: DeserializeOwned + 'static>(
     connection: &Connection,
 ) -> std::io::Result<Option<(R, RecvStream, SendStream)>> {
