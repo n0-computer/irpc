@@ -11,8 +11,8 @@ use irpc::{
     rpc::{listen, Handler},
     util::{make_client_endpoint, make_server_endpoint},
     Client, LocalSender, Request, Service, WithChannels,
+    rpc_requests,
 };
-use irpc_derive::rpc_requests;
 use n0_future::{
     stream::StreamExt,
     task::{self, AbortOnDropHandle},

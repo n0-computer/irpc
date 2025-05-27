@@ -63,9 +63,9 @@ mod storage {
         channel::{oneshot, spsc},
         rpc::Handler,
         Client, LocalSender, Service, WithChannels,
+        rpc_requests,
     };
     // Import the macro
-    use irpc_derive::rpc_requests;
     use irpc_iroh::{IrohProtocol, IrohRemoteConnection};
     use serde::{Deserialize, Serialize};
     use tracing::info;

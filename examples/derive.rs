@@ -8,11 +8,11 @@ use anyhow::{Context, Result};
 use irpc::{
     channel::{oneshot, spsc},
     rpc::Handler,
+    rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
     Client, Error, LocalSender, Service, WithChannels,
 };
 // Import the macro
-use irpc_derive::rpc_requests;
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
