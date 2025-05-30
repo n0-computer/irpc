@@ -76,7 +76,7 @@
 //! quic-rpc, this crate does not abstract over the stream type and is focused
 //! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [iroh quinn fork](https://docs.rs/iroh-quinn/latest/iroh-quinn/index.html).
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
-use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
+use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
 #[cfg(feature = "derive")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
@@ -791,7 +791,7 @@ impl<M, R, S> Client<M, R, S> {
     pub fn request(
         &self,
     ) -> impl Future<
-        Output = Result<Request<LocalSender<M, S>, rpc::RemoteSender<R, S>>, RequestError>,
+        Output = result::Result<Request<LocalSender<M, S>, rpc::RemoteSender<R, S>>, RequestError>,
     > + 'static
     where
         S: Service,
@@ -825,10 +825,7 @@ impl<M, R, S> Client<M, R, S> {
     }
 
     /// Performs a request for which the server returns a oneshot receiver.
-    pub fn rpc<Req, Res>(
-        &self,
-        msg: Req,
-    ) -> impl Future<Output = Result<Res, Error>> + Send + 'static
+    pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
     where
         S: Service,
         M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
@@ -862,7 +859,7 @@ impl<M, R, S> Client<M, R, S> {
         &self,
         msg: Req,
         local_response_cap: usize,
-    ) -> impl Future<Output = Result<channel::spsc::Receiver<Res>, Error>> + Send + 'static
+    ) -> impl Future<Output = Result<channel::spsc::Receiver<Res>>> + Send + 'static
     where
         S: Service,
         M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
@@ -896,13 +893,10 @@ impl<M, R, S> Client<M, R, S> {
         msg: Req,
         local_update_cap: usize,
     ) -> impl Future<
-        Output = Result<
-            (
-                channel::spsc::Sender<Update>,
-                channel::oneshot::Receiver<Res>,
-            ),
-            Error,
-        >,
+        Output = Result<(
+            channel::spsc::Sender<Update>,
+            channel::oneshot::Receiver<Res>,
+        )>,
     >
     where
         S: Service,
@@ -942,9 +936,8 @@ impl<M, R, S> Client<M, R, S> {
         msg: Req,
         local_update_cap: usize,
         local_response_cap: usize,
-    ) -> impl Future<
-        Output = Result<(channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>), Error>,
-    > + Send
+    ) -> impl Future<Output = Result<(channel::spsc::Sender<Update>, channel::spsc::Receiver<Res>)>>
+           + Send
            + 'static
     where
         S: Service,
@@ -1037,6 +1030,9 @@ pub enum Error {
     #[error("recv error: {0}")]
     Write(#[from] rpc::WriteError),
 }
+
+/// Type alias for a result with an irpc error type.
+pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<Error> for io::Error {
     fn from(e: Error) -> Self {

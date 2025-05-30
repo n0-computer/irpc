@@ -10,7 +10,7 @@ use irpc::{
     rpc::Handler,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, Error, LocalSender, Service, WithChannels,
+    Client, LocalSender, Service, WithChannels,
 };
 // Import the macro
 use n0_future::task::{self, AbortOnDropHandle};
@@ -148,21 +148,21 @@ impl StorageApi {
         Ok(AbortOnDropHandle::new(join_handle))
     }
 
-    pub async fn get(&self, key: String) -> Result<Option<String>, Error> {
+    pub async fn get(&self, key: String) -> irpc::Result<Option<String>> {
         self.inner.rpc(Get { key }).await
     }
 
-    pub async fn list(&self) -> Result<spsc::Receiver<String>, Error> {
+    pub async fn list(&self) -> irpc::Result<spsc::Receiver<String>> {
         self.inner.server_streaming(List, 16).await
     }
 
-    pub async fn set(&self, key: String, value: String) -> Result<(), Error> {
+    pub async fn set(&self, key: String, value: String) -> irpc::Result<()> {
         self.inner.rpc(Set { key, value }).await
     }
 
     pub async fn set_many(
         &self,
-    ) -> Result<(spsc::Sender<(String, String)>, oneshot::Receiver<u64>), Error> {
+    ) -> irpc::Result<(spsc::Sender<(String, String)>, oneshot::Receiver<u64>)> {
         self.inner.client_streaming(SetMany, 4).await
     }
 }

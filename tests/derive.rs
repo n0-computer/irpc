@@ -1,5 +1,7 @@
-use irpc::channel::{none::NoSender, oneshot};
-use irpc::rpc_requests;
+use irpc::{
+    channel::{none::NoSender, oneshot},
+    rpc_requests,
+};
 use serde::{Deserialize, Serialize};
 
 #[test]

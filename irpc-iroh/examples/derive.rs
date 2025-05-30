@@ -62,8 +62,7 @@ mod storage {
     use irpc::{
         channel::{oneshot, spsc},
         rpc::Handler,
-        Client, LocalSender, Service, WithChannels,
-        rpc_requests,
+        rpc_requests, Client, LocalSender, Service, WithChannels,
     };
     // Import the macro
     use irpc_iroh::{IrohProtocol, IrohRemoteConnection};
@@ -187,15 +186,15 @@ mod storage {
             Ok(IrohProtocol::new(handler))
         }
 
-        pub async fn get(&self, key: String) -> Result<Option<String>, irpc::Error> {
+        pub async fn get(&self, key: String) -> irpc::Result<Option<String>> {
             self.inner.rpc(Get { key }).await
         }
 
-        pub async fn list(&self) -> Result<spsc::Receiver<String>, irpc::Error> {
+        pub async fn list(&self) -> irpc::Result<spsc::Receiver<String>> {
             self.inner.server_streaming(List, 10).await
         }
 
-        pub async fn set(&self, key: String, value: String) -> Result<(), irpc::Error> {
+        pub async fn set(&self, key: String, value: String) -> irpc::Result<()> {
             let msg = Set { key, value };
             self.inner.rpc(msg).await
         }
