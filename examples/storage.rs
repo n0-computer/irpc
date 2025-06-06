@@ -104,7 +104,7 @@ impl StorageActor {
             }
             StorageMessage::List(list) => {
                 info!("list {:?}", list);
-                let WithChannels { mut tx, .. } = list;
+                let WithChannels { tx, .. } = list;
                 for (key, value) in &self.state {
                     if tx.send(format!("{key}={value}")).await.is_err() {
                         break;
