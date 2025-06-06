@@ -395,7 +395,10 @@ pub mod channel {
             ///
             /// For the remote case, if the message can not be completely sent,
             /// this must return an error and disable the channel.
-            fn send(&self, value: T) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+            fn send(
+                &self,
+                value: T,
+            ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + Sync + '_>>;
 
             /// Try to send a message, returning as fast as possible if sending
             /// is not currently possible.
@@ -405,10 +408,10 @@ pub mod channel {
             fn try_send(
                 &self,
                 value: T,
-            ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>>;
+            ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + Sync + '_>>;
 
             /// Await the sender close
-            fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+            fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>>;
 
             /// True if this is a remote sender
             fn is_rpc(&self) -> bool;
@@ -1357,7 +1360,10 @@ pub mod rpc {
     }
 
     impl<T: RpcMessage> QuinnSenderInner<T> {
-        fn send(&mut self, value: T) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        fn send(
+            &mut self,
+            value: T,
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + Sync + '_>> {
             Box::pin(async {
                 let value = value;
                 self.buffer.clear();
@@ -1371,7 +1377,7 @@ pub mod rpc {
         fn try_send(
             &mut self,
             value: T,
-        ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + Sync + '_>> {
             Box::pin(async {
                 // todo: move the non-async part out of the box. Will require a new return type.
                 let value = value;
@@ -1387,7 +1393,7 @@ pub mod rpc {
             })
         }
 
-        fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
             Box::pin(async move {
                 self.send.stopped().await.ok();
             })
@@ -1403,18 +1409,21 @@ pub mod rpc {
     }
 
     impl<T: RpcMessage> DynSender<T> for QuinnSender<T> {
-        fn send(&self, value: T) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        fn send(
+            &self,
+            value: T,
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + Sync + '_>> {
             Box::pin(async { self.0.lock().await.send(value).await })
         }
 
         fn try_send(
             &self,
             value: T,
-        ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + Sync + '_>> {
             Box::pin(async { self.0.lock().await.try_send(value).await })
         }
 
-        fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
             Box::pin(async { self.0.lock().await.closed().await })
         }
 
