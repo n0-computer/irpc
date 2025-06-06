@@ -123,7 +123,7 @@ impl ComputeActor {
                     tx, inner, span, ..
                 } = fib;
                 let _entered = span.enter();
-                let mut sender = tx;
+                let sender = tx;
                 let mut a = 0u64;
                 let mut b = 1u64;
                 while a <= inner.max {
@@ -144,7 +144,7 @@ impl ComputeActor {
                 } = mult;
                 let _entered = span.enter();
                 let mut receiver = rx;
-                let mut sender = tx;
+                let sender = tx;
                 let multiplier = inner.initial;
                 while let Some(num) = receiver.recv().await? {
                     sender.send(multiplier * num).await?;
@@ -260,7 +260,7 @@ async fn local() -> anyhow::Result<()> {
     println!("Local: 5^2 = {}", rx.await?);
 
     // Test Sum
-    let (mut tx, rx) = api.sum().await?;
+    let (tx, rx) = api.sum().await?;
     tx.send(1).await?;
     tx.send(2).await?;
     tx.send(3).await?;
@@ -276,7 +276,7 @@ async fn local() -> anyhow::Result<()> {
     println!();
 
     // Test Multiply
-    let (mut in_tx, mut out_rx) = api.multiply(3).await?;
+    let (in_tx, mut out_rx) = api.multiply(3).await?;
     in_tx.send(2).await?;
     in_tx.send(4).await?;
     in_tx.send(6).await?;
@@ -311,7 +311,7 @@ async fn remote() -> anyhow::Result<()> {
     println!("Remote: 4^2 = {}", rx.await?);
 
     // Test Sum
-    let (mut tx, rx) = api.sum().await?;
+    let (tx, rx) = api.sum().await?;
     tx.send(4).await?;
     tx.send(5).await?;
     tx.send(6).await?;
@@ -327,7 +327,7 @@ async fn remote() -> anyhow::Result<()> {
     println!();
 
     // Test Multiply
-    let (mut in_tx, mut out_rx) = api.multiply(5).await?;
+    let (in_tx, mut out_rx) = api.multiply(5).await?;
     in_tx.send(1).await?;
     in_tx.send(2).await?;
     in_tx.send(3).await?;
@@ -380,7 +380,7 @@ async fn bench(api: ComputeApi, n: u64) -> anyhow::Result<()> {
     // Sequential streaming (using Multiply instead of MultiplyUpdate)
     {
         let t0 = std::time::Instant::now();
-        let (mut send, mut recv) = api.multiply(2).await?;
+        let (send, mut recv) = api.multiply(2).await?;
         let handle = tokio::task::spawn(async move {
             for i in 0..n {
                 send.send(i).await?;
