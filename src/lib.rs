@@ -425,7 +425,14 @@ pub mod channel {
         pub trait DynReceiver<T>: Debug + Send + Sync + 'static {
             fn recv(
                 &mut self,
-            ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<T>, RecvError>> + Send + '_>>;
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = std::result::Result<Option<T>, RecvError>>
+                        + Send
+                        + Sync
+                        + '_,
+                >,
+            >;
         }
 
         impl<T> Debug for Sender<T> {
@@ -505,7 +512,7 @@ pub mod channel {
             #[cfg(feature = "stream")]
             pub fn into_stream(
                 self,
-            ) -> impl n0_future::Stream<Item = std::result::Result<T, RecvError>> + Send + 'static
+            ) -> impl n0_future::Stream<Item = std::result::Result<T, RecvError>> + Send + Sync + 'static
             {
                 n0_future::stream::unfold(self, |mut recv| async move {
                     recv.recv().await.transpose().map(|msg| (msg, recv))
@@ -1325,8 +1332,9 @@ pub mod rpc {
     impl<T: RpcMessage> DynReceiver<T> for QuinnReceiver<T> {
         fn recv(
             &mut self,
-        ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<T>, RecvError>> + Send + '_>>
-        {
+        ) -> Pin<
+            Box<dyn Future<Output = std::result::Result<Option<T>, RecvError>> + Send + Sync + '_>,
+        > {
             Box::pin(async {
                 let read = &mut self.recv;
                 let Some(size) = read.read_varint_u64().await? else {
