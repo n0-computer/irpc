@@ -1432,12 +1432,6 @@ pub mod rpc {
         }
     }
 
-    // impl<T> Drop for QuinnSender<T> {
-    //     fn drop(&mut self) {
-    //         self.send.finish().ok();
-    //     }
-    // }
-
     /// Type alias for a handler fn for remote requests
     pub type Handler<R> = Arc<
         dyn Fn(
