@@ -290,8 +290,7 @@ async fn local() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Remote usage example
-async fn remote() -> anyhow::Result<()> {
+fn remote_api() -> anyhow::Result<(ComputeApi, AbortOnDropHandle<()>)> {
     let port = 10114;
     let (server, cert) =
         make_server_endpoint(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
@@ -300,6 +299,12 @@ async fn remote() -> anyhow::Result<()> {
     let compute = ComputeActor::local();
     let handle = compute.listen(server)?;
     let api = ComputeApi::connect(client, SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into())?;
+    Ok((api, handle))
+}
+
+// Remote usage example
+async fn remote() -> anyhow::Result<()> {
+    let (api, handle) = remote_api()?;
 
     // Test Sqr
     let rx = api.sqr(4).await?;
@@ -474,9 +479,16 @@ async fn main() -> anyhow::Result<()> {
     println!("Remote use");
     remote().await?;
 
+    println!("Local bench");
     let api = ComputeActor::local();
-    bench(api, 1000000).await?;
+    bench(api, 100000).await?;
 
-    reference_bench(1000000).await?;
+    let (api, handle) = remote_api()?;
+    println!("Remote bench");
+    bench(api, 100000).await?;
+    drop(handle);
+
+    println!("Reference bench");
+    reference_bench(100000).await?;
     Ok(())
 }
