@@ -111,7 +111,7 @@ impl StorageActor {
             }
             StorageMessage::List(list) => {
                 info!("list {:?}", list);
-                let WithChannels { mut tx, .. } = list;
+                let WithChannels { tx, .. } = list;
                 for (key, value) in &self.state {
                     if tx.send(format!("{key}={value}")).await.is_err() {
                         break;
@@ -172,7 +172,7 @@ async fn client_demo(api: StorageApi) -> Result<()> {
     let value = api.get("hello".to_string()).await?;
     println!("get: hello = {:?}", value);
 
-    let (mut tx, rx) = api.set_many().await?;
+    let (tx, rx) = api.set_many().await?;
     for i in 0..3 {
         tx.send((format!("key{i}"), format!("value{i}"))).await?;
     }
