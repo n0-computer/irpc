@@ -72,12 +72,12 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
 async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     // accept a single bidi stream on a single connection, then read indefinitely
-    // until we get an error
+    // until we get an error or the stream is finished
     let server = tokio::spawn(async move {
         let conn = server.accept().await.unwrap().await?;
         let (_, mut recv) = conn.accept_bi().await?;
         let mut buf = vec![0u8; 1024];
-        while recv.read(&mut buf).await.is_ok() {}
+        while let Ok(Some(_)) = recv.read(&mut buf).await {}
         TestResult::Ok(())
     });
     let conn = client.connect(server_addr, "localhost")?.await?;
@@ -87,9 +87,6 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
     let send3 = send1.clone();
     let second_client = tokio::spawn(async move {
         send2.closed().await;
-        // why do I have to do this?
-        // Shouldn't dropping the quinn:SendStream call finish, so the server would get an io error?
-        conn.close(1u8.into(), b"");
     });
     let third_client = tokio::spawn(async move {
         // this should fail with an io error, since the stream was stopped
