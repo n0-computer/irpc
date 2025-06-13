@@ -1433,10 +1433,7 @@ pub mod rpc {
                         }
                         res
                     }
-                    QuinnSenderState::Closed => Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        SendError::ReceiverClosed,
-                    )),
+                    QuinnSenderState::Closed => Err(io::ErrorKind::BrokenPipe.into()),
                 }
             })
         }
@@ -1456,10 +1453,7 @@ pub mod rpc {
                         }
                         res
                     }
-                    QuinnSenderState::Closed => Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        SendError::ReceiverClosed,
-                    )),
+                    QuinnSenderState::Closed => Err(io::ErrorKind::BrokenPipe.into()),
                 }
             })
         }

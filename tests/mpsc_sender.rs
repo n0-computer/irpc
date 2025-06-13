@@ -1,10 +1,11 @@
 use std::{
+    io::ErrorKind,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     time::Duration,
 };
 
 use irpc::{
-    channel::spsc,
+    channel::{spsc, SendError},
     util::{make_client_endpoint, make_server_endpoint},
 };
 use quinn::Endpoint;
@@ -24,6 +25,7 @@ fn create_connected_endpoints() -> TestResult<(Endpoint, Endpoint, SocketAddr)> 
 /// a send fails with an io error.
 #[tokio::test]
 async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
+    tracing_subscriber::fmt::try_init().ok();
     let (server, client, server_addr) = create_connected_endpoints()?;
     // accept a single bidi stream on a single connection, then immediately stop it
     let server = tokio::spawn(async move {
@@ -36,13 +38,29 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
     let (send, _) = conn.open_bi().await?;
     let send1 = spsc::Sender::<Vec<u8>>::from(send);
     let send2 = send1.clone();
+    let send3 = send1.clone();
     let second_client = tokio::spawn(async move {
         send2.closed().await;
     });
+    let third_client = tokio::spawn(async move {
+        // this should fail with an io error, since the stream was stopped
+        loop {
+            match send3.send(vec![1, 2, 3]).await {
+                Err(SendError::Io(e)) if e.kind() == ErrorKind::BrokenPipe => break,
+                _ => {}
+            };
+        }
+    });
     // send until we get an error because the remote side stopped the stream
     while send1.send(vec![1, 2, 3]).await.is_ok() {}
-    // check that closed signal was received by the other sender
+    match send1.send(vec![4, 5, 6]).await {
+        Err(SendError::Io(e)) if e.kind() == ErrorKind::BrokenPipe => {}
+        e => panic!("Expected SendError::Io with kind BrokenPipe, got {:?}", e),
+    };
+    // check that closed signal was received by the second sender
     second_client.await?;
+    // check that the third sender will get the right kind of io error eventually
+    third_client.await?;
     // server should finish without errors
     server.await??;
     Ok(())
@@ -66,11 +84,21 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
     let (send, _) = conn.open_bi().await?;
     let send1 = spsc::Sender::<Vec<u8>>::from(send);
     let send2 = send1.clone();
+    let send3 = send1.clone();
     let second_client = tokio::spawn(async move {
         send2.closed().await;
         // why do I have to do this?
         // Shouldn't dropping the quinn:SendStream call finish, so the server would get an io error?
         conn.close(1u8.into(), b"");
+    });
+    let third_client = tokio::spawn(async move {
+        // this should fail with an io error, since the stream was stopped
+        loop {
+            match send3.send(vec![1, 2, 3]).await {
+                Err(SendError::Io(e)) if e.kind() == ErrorKind::BrokenPipe => break,
+                _ => {}
+            };
+        }
     });
     // send a lot of data with a tiny timeout, this will cause the send future to be dropped
     loop {
@@ -87,5 +115,6 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
     }
     server.await??;
     second_client.await?;
+    third_client.await?;
     Ok(())
 }
