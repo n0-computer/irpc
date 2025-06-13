@@ -57,6 +57,7 @@ tokio = { workspace = true, features = ["full"] }
 thousands = "0.2.0"
 # macro tests
 trybuild = "1.0.104"
+testresult = "0.4.1"
 
 [features]
 # enable the remote transport
