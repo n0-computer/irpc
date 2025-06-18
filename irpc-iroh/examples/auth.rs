@@ -155,7 +155,7 @@ mod storage {
                                 tx.send(Ok(())).await.ok();
                             }
                         }
-                        msg_with_channels @ _ => {
+                        _ => {
                             if !authed {
                                 conn.close(1u32.into(), b"permission denied");
                                 break;
