@@ -128,33 +128,47 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     handler: Handler<R>,
 ) -> io::Result<()> {
     loop {
-        let (send, mut recv) = match connection.accept_bi().await {
-            Ok((s, r)) => (s, r),
-            Err(ConnectionError::ApplicationClosed(cause))
-                if cause.error_code.into_inner() == 0 =>
-            {
-                trace!("remote side closed connection {cause:?}");
-                return Ok(());
-            }
-            Err(cause) => {
-                warn!("failed to accept bi stream {cause:?}");
-                return Err(cause.into());
-            }
+        let Some((msg, rx, tx)) = read_request(&connection).await? else {
+            return Ok(());
         };
-        let size = recv
-            .read_varint_u64()
-            .await?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
-        let mut buf = vec![0; size as usize];
-        recv.read_exact(&mut buf)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-        let msg: R = postcard::from_bytes(&buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let rx = recv;
-        let tx = send;
         handler(msg, rx, tx).await?;
     }
+}
+
+/// Reads a single request from the connection.
+///
+/// This accepts a bi-directional stream from the connection and reads and parses the request.
+///
+/// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
+/// Returns None if the remote closed the connection with error code `0`.
+/// Returns an error for all other failure cases.
+pub async fn read_request<R: DeserializeOwned + 'static>(
+    connection: &Connection,
+) -> std::io::Result<Option<(R, RecvStream, SendStream)>> {
+    let (send, mut recv) = match connection.accept_bi().await {
+        Ok((s, r)) => (s, r),
+        Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
+            trace!("remote side closed connection {cause:?}");
+            return Ok(None);
+        }
+        Err(cause) => {
+            warn!("failed to accept bi stream {cause:?}");
+            return Err(cause.into());
+        }
+    };
+    let size = recv
+        .read_varint_u64()
+        .await?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
+    let mut buf = vec![0; size as usize];
+    recv.read_exact(&mut buf)
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
+    let msg: R =
+        postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let rx = recv;
+    let tx = send;
+    Ok(Some((msg, rx, tx)))
 }
 
 /// Utility function to listen for incoming connections and handle them with the provided handler
