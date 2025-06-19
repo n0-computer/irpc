@@ -128,10 +128,10 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     handler: Handler<R>,
 ) -> io::Result<()> {
     loop {
-        let Some((msg, rx, tx)) = read_request(&connection).await? else {
+        let Some((msg, updates, reply)) = read_request(&connection).await? else {
             return Ok(());
         };
-        handler(msg, rx, tx).await?;
+        handler(msg, updates, reply).await?;
     }
 }
 
@@ -166,9 +166,9 @@ pub async fn read_request<R: DeserializeOwned + 'static>(
         .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
     let msg: R =
         postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let rx = recv;
-    let tx = send;
-    Ok(Some((msg, rx, tx)))
+    let updates = recv;
+    let reply = send;
+    Ok(Some((msg, updates, reply)))
 }
 
 /// Utility function to listen for incoming connections and handle them with the provided handler

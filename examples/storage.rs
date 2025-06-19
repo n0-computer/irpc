@@ -9,7 +9,7 @@ use irpc::{
     channel::{mpsc, none::NoReceiver, oneshot},
     rpc::{listen, Handler},
     util::{make_client_endpoint, make_server_endpoint},
-    Channels, Client, LocalSender, Request, Service, WithChannels,
+    Channels, Client, LocalSender, Request, RequestSender, Service,
 };
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
@@ -27,16 +27,16 @@ struct Get {
 }
 
 impl Channels<StorageService> for Get {
-    type Rx = NoReceiver;
-    type Tx = oneshot::Sender<Option<String>>;
+    type Updates = NoReceiver;
+    type Reply = oneshot::Sender<Option<String>>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct List;
 
 impl Channels<StorageService> for List {
-    type Rx = NoReceiver;
-    type Tx = mpsc::Sender<String>;
+    type Updates = NoReceiver;
+    type Reply = mpsc::Sender<String>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,8 +46,8 @@ struct Set {
 }
 
 impl Channels<StorageService> for Set {
-    type Rx = NoReceiver;
-    type Tx = oneshot::Sender<()>;
+    type Updates = NoReceiver;
+    type Reply = oneshot::Sender<()>;
 }
 
 #[derive(derive_more::From, Serialize, Deserialize)]
@@ -59,9 +59,9 @@ enum StorageProtocol {
 
 #[derive(derive_more::From)]
 enum StorageMessage {
-    Get(WithChannels<Get, StorageService>),
-    Set(WithChannels<Set, StorageService>),
-    List(WithChannels<List, StorageService>),
+    Get(Request<Get, StorageService>),
+    Set(Request<Set, StorageService>),
+    List(Request<List, StorageService>),
 }
 
 struct StorageActor {
@@ -71,13 +71,13 @@ struct StorageActor {
 
 impl StorageActor {
     pub fn local() -> StorageApi {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (reply, request) = tokio::sync::mpsc::channel(1);
         let actor = Self {
-            recv: rx,
+            recv: request,
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<StorageMessage, StorageService>::from(tx);
+        let local = LocalSender::<StorageMessage, StorageService>::from(reply);
         StorageApi {
             inner: local.into(),
         }
@@ -93,20 +93,20 @@ impl StorageActor {
         match msg {
             StorageMessage::Get(get) => {
                 info!("get {:?}", get);
-                let WithChannels { tx, inner, .. } = get;
-                tx.send(self.state.get(&inner.key).cloned()).await.ok();
+                let Request { reply, message, .. } = get;
+                reply.send(self.state.get(&message.key).cloned()).await.ok();
             }
             StorageMessage::Set(set) => {
                 info!("set {:?}", set);
-                let WithChannels { tx, inner, .. } = set;
-                self.state.insert(inner.key, inner.value);
-                tx.send(()).await.ok();
+                let Request { reply, message, .. } = set;
+                self.state.insert(message.key, message.value);
+                reply.send(()).await.ok();
             }
             StorageMessage::List(list) => {
                 info!("list {:?}", list);
-                let WithChannels { tx, .. } = list;
+                let Request { reply, .. } = list;
                 for (key, value) in &self.state {
-                    if tx.send(format!("{key}={value}")).await.is_err() {
+                    if reply.send(format!("{key}={value}")).await.is_err() {
                         break;
                     }
                 }
@@ -129,12 +129,12 @@ impl StorageApi {
         let Some(local) = self.inner.local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler: Handler<StorageProtocol> = Arc::new(move |msg, _rx, tx| {
+        let handler: Handler<StorageProtocol> = Arc::new(move |msg, _request, reply| {
             let local = local.clone();
             Box::pin(match msg {
-                StorageProtocol::Get(msg) => local.send((msg, tx)),
-                StorageProtocol::Set(msg) => local.send((msg, tx)),
-                StorageProtocol::List(msg) => local.send((msg, tx)),
+                StorageProtocol::Get(msg) => local.send((msg, reply)),
+                StorageProtocol::Set(msg) => local.send((msg, reply)),
+                StorageProtocol::List(msg) => local.send((msg, reply)),
             })
         });
         Ok(AbortOnDropHandle::new(task::spawn(listen(
@@ -145,14 +145,14 @@ impl StorageApi {
     pub async fn get(&self, key: String) -> anyhow::Result<oneshot::Receiver<Option<String>>> {
         let msg = Get { key };
         match self.inner.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = oneshot::channel();
-                request.send((msg, tx)).await?;
-                Ok(rx)
+            RequestSender::Local(sender) => {
+                let (reply, request) = oneshot::channel();
+                sender.send((msg, reply)).await?;
+                Ok(request)
             }
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                Ok(rx.into())
+            RequestSender::Remote(sender) => {
+                let (_reply, request) = sender.write(msg).await?;
+                Ok(request.into())
             }
         }
     }
@@ -160,14 +160,14 @@ impl StorageApi {
     pub async fn list(&self) -> anyhow::Result<mpsc::Receiver<String>> {
         let msg = List;
         match self.inner.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = mpsc::channel(10);
-                request.send((msg, tx)).await?;
-                Ok(rx)
+            RequestSender::Local(sender) => {
+                let (reply, request) = mpsc::channel(10);
+                sender.send((msg, reply)).await?;
+                Ok(request)
             }
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                Ok(rx.into())
+            RequestSender::Remote(sender) => {
+                let (_reply, request) = sender.write(msg).await?;
+                Ok(request.into())
             }
         }
     }
@@ -175,14 +175,14 @@ impl StorageApi {
     pub async fn set(&self, key: String, value: String) -> anyhow::Result<oneshot::Receiver<()>> {
         let msg = Set { key, value };
         match self.inner.request().await? {
-            Request::Local(request) => {
-                let (tx, rx) = oneshot::channel();
-                request.send((msg, tx)).await?;
-                Ok(rx)
+            RequestSender::Local(sender) => {
+                let (reply, request) = oneshot::channel();
+                sender.send((msg, reply)).await?;
+                Ok(request)
             }
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
-                Ok(rx.into())
+            RequestSender::Remote(sender) => {
+                let (_reply, request) = sender.write(msg).await?;
+                Ok(request.into())
             }
         }
     }

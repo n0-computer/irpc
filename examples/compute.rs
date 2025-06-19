@@ -11,7 +11,7 @@ use irpc::{
     rpc::{listen, Handler},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, Request, Service, WithChannels,
+    Client, LocalSender, Request, RequestSender, Service,
 };
 use n0_future::{
     stream::StreamExt,
@@ -59,13 +59,13 @@ enum ComputeRequest {
 #[rpc_requests(ComputeService, message = ComputeMessage)]
 #[derive(Serialize, Deserialize)]
 enum ComputeProtocol {
-    #[rpc(tx=oneshot::Sender<u128>)]
+    #[rpc(reply=oneshot::Sender<u128>)]
     Sqr(Sqr),
-    #[rpc(rx=mpsc::Receiver<i64>, tx=oneshot::Sender<i64>)]
+    #[rpc(updates=mpsc::Receiver<i64>, reply=oneshot::Sender<i64>)]
     Sum(Sum),
-    #[rpc(tx=mpsc::Sender<u64>)]
+    #[rpc(reply=mpsc::Sender<u64>)]
     Fibonacci(Fibonacci),
-    #[rpc(rx=mpsc::Receiver<u64>, tx=mpsc::Sender<u64>)]
+    #[rpc(updates=mpsc::Receiver<u64>, reply=mpsc::Sender<u64>)]
     Multiply(Multiply),
 }
 
@@ -76,10 +76,10 @@ struct ComputeActor {
 
 impl ComputeActor {
     pub fn local() -> ComputeApi {
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
-        let actor = Self { recv: rx };
+        let (reply, request) = tokio::sync::mpsc::channel(128);
+        let actor = Self { recv: request };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<ComputeMessage, ComputeService>::from(tx);
+        let local = LocalSender::<ComputeMessage, ComputeService>::from(reply);
         ComputeApi {
             inner: local.into(),
         }
@@ -99,34 +99,45 @@ impl ComputeActor {
         match msg {
             ComputeMessage::Sqr(sqr) => {
                 trace!("sqr {:?}", sqr);
-                let WithChannels {
-                    tx, inner, span, ..
+                let Request {
+                    reply,
+                    message,
+                    span,
+                    ..
                 } = sqr;
                 let _entered = span.enter();
-                let result = (inner.num as u128) * (inner.num as u128);
-                tx.send(result).await?;
+                let result = (message.num as u128) * (message.num as u128);
+                reply.send(result).await?;
             }
             ComputeMessage::Sum(sum) => {
                 trace!("sum {:?}", sum);
-                let WithChannels { rx, tx, span, .. } = sum;
+                let Request {
+                    updates,
+                    reply,
+                    span,
+                    ..
+                } = sum;
                 let _entered = span.enter();
-                let mut receiver = rx;
+                let mut receiver = updates;
                 let mut total = 0;
                 while let Some(num) = receiver.recv().await? {
                     total += num;
                 }
-                tx.send(total).await?;
+                reply.send(total).await?;
             }
             ComputeMessage::Fibonacci(fib) => {
                 trace!("fibonacci {:?}", fib);
-                let WithChannels {
-                    tx, inner, span, ..
+                let Request {
+                    reply,
+                    message,
+                    span,
+                    ..
                 } = fib;
                 let _entered = span.enter();
-                let sender = tx;
+                let sender = reply;
                 let mut a = 0u64;
                 let mut b = 1u64;
-                while a <= inner.max {
+                while a <= message.max {
                     sender.send(a).await?;
                     let next = a + b;
                     a = b;
@@ -135,17 +146,17 @@ impl ComputeActor {
             }
             ComputeMessage::Multiply(mult) => {
                 trace!("multiply {:?}", mult);
-                let WithChannels {
-                    rx,
-                    tx,
-                    inner,
+                let Request {
+                    updates,
+                    reply,
+                    message,
                     span,
                     ..
                 } = mult;
                 let _entered = span.enter();
-                let mut receiver = rx;
-                let sender = tx;
-                let multiplier = inner.initial;
+                let mut receiver = updates;
+                let sender = reply;
+                let multiplier = message.initial;
                 while let Some(num) = receiver.recv().await? {
                     sender.send(multiplier * num).await?;
                 }
@@ -171,13 +182,13 @@ impl ComputeApi {
         let Some(local) = self.inner.local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler: Handler<ComputeProtocol> = Arc::new(move |msg, rx, tx| {
+        let handler: Handler<ComputeProtocol> = Arc::new(move |msg, updates, reply| {
             let local = local.clone();
             Box::pin(match msg {
-                ComputeProtocol::Sqr(msg) => local.send((msg, tx)),
-                ComputeProtocol::Sum(msg) => local.send((msg, tx, rx)),
-                ComputeProtocol::Fibonacci(msg) => local.send((msg, tx)),
-                ComputeProtocol::Multiply(msg) => local.send((msg, tx, rx)),
+                ComputeProtocol::Sqr(msg) => local.send((msg, reply)),
+                ComputeProtocol::Sum(msg) => local.send((msg, reply, updates)),
+                ComputeProtocol::Fibonacci(msg) => local.send((msg, reply)),
+                ComputeProtocol::Multiply(msg) => local.send((msg, reply, updates)),
             })
         });
         Ok(AbortOnDropHandle::new(task::spawn(listen(
@@ -188,13 +199,13 @@ impl ComputeApi {
     pub async fn sqr(&self, num: u64) -> anyhow::Result<oneshot::Receiver<u128>> {
         let msg = Sqr { num };
         match self.inner.request().await? {
-            Request::Local(request) => {
+            RequestSender::Local(sender) => {
                 let (tx, rx) = oneshot::channel();
-                request.send((msg, tx)).await?;
+                sender.send((msg, tx)).await?;
                 Ok(rx)
             }
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
+            RequestSender::Remote(sender) => {
+                let (_tx, rx) = sender.write(msg).await?;
                 Ok(rx.into())
             }
         }
@@ -203,14 +214,14 @@ impl ComputeApi {
     pub async fn sum(&self) -> anyhow::Result<(mpsc::Sender<i64>, oneshot::Receiver<i64>)> {
         let msg = Sum;
         match self.inner.request().await? {
-            Request::Local(request) => {
+            RequestSender::Local(sender) => {
                 let (num_tx, num_rx) = mpsc::channel(10);
                 let (sum_tx, sum_rx) = oneshot::channel();
-                request.send((msg, sum_tx, num_rx)).await?;
+                sender.send((msg, sum_tx, num_rx)).await?;
                 Ok((num_tx, sum_rx))
             }
-            Request::Remote(request) => {
-                let (tx, rx) = request.write(msg).await?;
+            RequestSender::Remote(sender) => {
+                let (tx, rx) = sender.write(msg).await?;
                 Ok((tx.into(), rx.into()))
             }
         }
@@ -219,13 +230,13 @@ impl ComputeApi {
     pub async fn fibonacci(&self, max: u64) -> anyhow::Result<mpsc::Receiver<u64>> {
         let msg = Fibonacci { max };
         match self.inner.request().await? {
-            Request::Local(request) => {
+            RequestSender::Local(sender) => {
                 let (tx, rx) = mpsc::channel(128);
-                request.send((msg, tx)).await?;
+                sender.send((msg, tx)).await?;
                 Ok(rx)
             }
-            Request::Remote(request) => {
-                let (_tx, rx) = request.write(msg).await?;
+            RequestSender::Remote(sender) => {
+                let (_tx, rx) = sender.write(msg).await?;
                 Ok(rx.into())
             }
         }
@@ -237,14 +248,14 @@ impl ComputeApi {
     ) -> anyhow::Result<(mpsc::Sender<u64>, mpsc::Receiver<u64>)> {
         let msg = Multiply { initial };
         match self.inner.request().await? {
-            Request::Local(request) => {
+            RequestSender::Local(sender) => {
                 let (in_tx, in_rx) = mpsc::channel(128);
                 let (out_tx, out_rx) = mpsc::channel(128);
-                request.send((msg, out_tx, in_rx)).await?;
+                sender.send((msg, out_tx, in_rx)).await?;
                 Ok((in_tx, out_rx))
             }
-            Request::Remote(request) => {
-                let (tx, rx) = request.write(msg).await?;
+            RequestSender::Remote(sender) => {
+                let (tx, rx) = sender.write(msg).await?;
                 Ok((tx.into(), rx.into()))
             }
         }

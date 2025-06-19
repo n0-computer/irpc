@@ -17,11 +17,11 @@ fn error_tokens(span: Span, message: &str) -> TokenStream {
 
 /// The only attribute we care about
 const ATTR_NAME: &str = "rpc";
-/// the tx type name
-const TX_ATTR: &str = "tx";
-/// the rx type name
-const RX_ATTR: &str = "rx";
-/// Fully qualified path to the default rx type
+/// the reply type name
+const TX_ATTR: &str = "reply";
+/// the request type name
+const RX_ATTR: &str = "updates";
+/// Fully qualified path to the default request type
 const DEFAULT_RX_TYPE: &str = "::irpc::channel::none::NoReceiver";
 
 /// Generate parent span method for an enum
@@ -45,18 +45,18 @@ fn generate_channels_impl(
     request_type: &Type,
     attr_span: Span,
 ) -> syn::Result<TokenStream2> {
-    // Try to get rx, default to NoReceiver if not present
+    // Try to get updates, default to NoReceiver if not present
     // Use unwrap_or_else for a cleaner default
-    let rx = args.types.remove(RX_ATTR).unwrap_or_else(|| {
+    let updates = args.types.remove(RX_ATTR).unwrap_or_else(|| {
         // We can safely unwrap here because this is a known valid type
-        syn::parse_str::<Type>(DEFAULT_RX_TYPE).expect("Failed to parse default rx type")
+        syn::parse_str::<Type>(DEFAULT_RX_TYPE).expect("Failed to parse default request type")
     });
-    let tx = args.get(TX_ATTR, attr_span)?;
+    let reply = args.get(TX_ATTR, attr_span)?;
 
     let res = quote! {
         impl ::irpc::Channels<#service_name> for #request_type {
-            type Tx = #tx;
-            type Rx = #rx;
+            type Reply = #reply;
+            type Updates = #updates;
         }
     };
 
@@ -98,11 +98,11 @@ fn generate_message_enum_from_impls(
 ) -> TokenStream2 {
     let mut impls = quote! {};
 
-    // Generate From<WithChannels<T, Service>> implementations for each case with an rpc attribute
+    // Generate From<Request<T, Service>> implementations for each case with an rpc attribute
     for (variant_name, inner_type) in variants_with_attr {
         let impl_tokens = quote! {
-            impl From<::irpc::WithChannels<#inner_type, #service_name>> for #message_enum_name {
-                fn from(value: ::irpc::WithChannels<#inner_type, #service_name>) -> Self {
+            impl From<::irpc::Request<#inner_type, #service_name>> for #message_enum_name {
+                fn from(value: ::irpc::Request<#inner_type, #service_name>) -> Self {
                     #message_enum_name::#variant_name(value)
                 }
             }
@@ -117,7 +117,7 @@ fn generate_message_enum_from_impls(
     impls
 }
 
-/// Generate type aliases for WithChannels<T, Service>
+/// Generate type aliases for Request<T, Service>
 fn generate_type_aliases(
     variants: &[(Ident, Type)],
     service_name: &Ident,
@@ -132,8 +132,8 @@ fn generate_type_aliases(
         let type_ident = Ident::new(&type_name, variant_name.span());
 
         let alias = quote! {
-            /// Type alias for WithChannels<#inner_type, #service_name>
-            pub type #type_ident = ::irpc::WithChannels<#inner_type, #service_name>;
+            /// Type alias for Request<#message_type, #service_name>
+            pub type #type_ident = ::irpc::Request<#inner_type, #service_name>;
         };
 
         aliases = quote! {
@@ -153,17 +153,17 @@ fn generate_type_aliases(
 /// # Macro Arguments
 ///
 /// * First positional argument (required): The service type that will handle these requests
-/// * `message` (optional): Generate an extended enum wrapping each type in `WithChannels<T, Service>`
-/// * `alias` (optional): Generate type aliases with the given suffix for each `WithChannels<T, Service>`
+/// * `message` (optional): Generate an extended enum wrapping each type in `Request<T, Service>`
+/// * `alias` (optional): Generate type aliases with the given suffix for each `Request<T, Service>`
 ///
 /// # Variant Attributes
 ///
 /// Individual enum variants can be annotated with the `#[rpc(...)]` attribute to specify channel types:
 ///
-/// * `#[rpc(tx=SomeType)]`: Specify the transmitter/sender channel type (required)
-/// * `#[rpc(tx=SomeType, rx=OtherType)]`: Also specify a receiver channel type (optional)
+/// * `#[rpc(reply=SomeType)]`: Specify the transmitter/sender channel type (required)
+/// * `#[rpc(reply=SomeType, updates=OtherType)]`: Also specify a receiver channel type (optional)
 ///
-/// If `rx` is not specified, it defaults to `NoReceiver`.
+/// If `request` is not specified, it defaults to `NoReceiver`.
 ///
 /// # Examples
 ///
@@ -171,9 +171,9 @@ fn generate_type_aliases(
 /// ```
 /// #[rpc_requests(ComputeService)]
 /// enum ComputeProtocol {
-///     #[rpc(tx=oneshot::Sender<u128>)]
+///     #[rpc(reply=oneshot::Sender<u128>)]
 ///     Sqr(Sqr),
-///     #[rpc(tx=oneshot::Sender<i64>)]
+///     #[rpc(reply=oneshot::Sender<i64>)]
 ///     Sum(Sum),
 /// }
 /// ```
@@ -182,9 +182,9 @@ fn generate_type_aliases(
 /// ```
 /// #[rpc_requests(ComputeService, message = ComputeMessage)]
 /// enum ComputeProtocol {
-///     #[rpc(tx=oneshot::Sender<u128>)]
+///     #[rpc(reply=oneshot::Sender<u128>)]
 ///     Sqr(Sqr),
-///     #[rpc(tx=oneshot::Sender<i64>)]
+///     #[rpc(reply=oneshot::Sender<i64>)]
 ///     Sum(Sum),
 /// }
 /// ```
@@ -193,10 +193,10 @@ fn generate_type_aliases(
 /// ```
 /// #[rpc_requests(ComputeService, alias = "Msg")]
 /// enum ComputeProtocol {
-///     #[rpc(tx=oneshot::Sender<u128>)]
-///     Sqr(Sqr), // Generates type SqrMsg = WithChannels<Sqr, ComputeService>
-///     #[rpc(tx=oneshot::Sender<i64>)]
-///     Sum(Sum), // Generates type SumMsg = WithChannels<Sum, ComputeService>
+///     #[rpc(reply=oneshot::Sender<u128>)]
+///     Sqr(Sqr), // Generates type SqrMsg = Request<Sqr, ComputeService>
+///     #[rpc(reply=oneshot::Sender<i64>)]
+///     Sum(Sum), // Generates type SumMsg = Request<Sum, ComputeService>
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -302,7 +302,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             .map(|(variant_name, inner_type)| {
                 quote! {
                     #[allow(missing_docs)]
-                    #variant_name(::irpc::WithChannels<#inner_type, #service_name>)
+                    #variant_name(::irpc::Request<#inner_type, #service_name>)
                 }
             })
             .collect::<Vec<_>>();
@@ -349,7 +349,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         // From implementations for the original enum
         #original_from_impls
 
-        // Type aliases for WithChannels
+        // Type aliases for Request
         #type_aliases
 
         // Extended enum and its implementations

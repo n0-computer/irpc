@@ -62,7 +62,7 @@ mod storage {
     use irpc::{
         channel::{mpsc, oneshot},
         rpc::Handler,
-        rpc_requests, Client, LocalSender, Service, WithChannels,
+        rpc_requests, Client, LocalSender, Request, Service,
     };
     // Import the macro
     use irpc_iroh::{IrohProtocol, IrohRemoteConnection};
@@ -93,11 +93,11 @@ mod storage {
     #[rpc_requests(StorageService, message = StorageMessage)]
     #[derive(Serialize, Deserialize)]
     enum StorageProtocol {
-        #[rpc(tx=oneshot::Sender<Option<String>>)]
+        #[rpc(reply=oneshot::Sender<Option<String>>)]
         Get(Get),
-        #[rpc(tx=oneshot::Sender<()>)]
+        #[rpc(reply=oneshot::Sender<()>)]
         Set(Set),
-        #[rpc(tx=mpsc::Sender<String>)]
+        #[rpc(reply=mpsc::Sender<String>)]
         List(List),
     }
 
@@ -130,20 +130,20 @@ mod storage {
             match msg {
                 StorageMessage::Get(get) => {
                     info!("get {:?}", get);
-                    let WithChannels { tx, inner, .. } = get;
-                    tx.send(self.state.get(&inner.key).cloned()).await.ok();
+                    let Request { reply, message, .. } = get;
+                    reply.send(self.state.get(&message.key).cloned()).await.ok();
                 }
                 StorageMessage::Set(set) => {
                     info!("set {:?}", set);
-                    let WithChannels { tx, inner, .. } = set;
-                    self.state.insert(inner.key, inner.value);
-                    tx.send(()).await.ok();
+                    let Request { reply, message, .. } = set;
+                    self.state.insert(message.key, message.value);
+                    reply.send(()).await.ok();
                 }
                 StorageMessage::List(list) => {
                     info!("list {:?}", list);
-                    let WithChannels { tx, .. } = list;
+                    let Request { reply, .. } = list;
                     for (key, value) in &self.state {
-                        if tx.send(format!("{key}={value}")).await.is_err() {
+                        if reply.send(format!("{key}={value}")).await.is_err() {
                             break;
                         }
                     }
@@ -175,12 +175,12 @@ mod storage {
                 .inner
                 .local()
                 .context("can not listen on remote service")?;
-            let handler: Handler<StorageProtocol> = Arc::new(move |msg, _rx, tx| {
+            let handler: Handler<StorageProtocol> = Arc::new(move |msg, _updates, reply| {
                 let local = local.clone();
                 Box::pin(match msg {
-                    StorageProtocol::Get(msg) => local.send((msg, tx)),
-                    StorageProtocol::Set(msg) => local.send((msg, tx)),
-                    StorageProtocol::List(msg) => local.send((msg, tx)),
+                    StorageProtocol::Get(msg) => local.send((msg, reply)),
+                    StorageProtocol::Set(msg) => local.send((msg, reply)),
+                    StorageProtocol::List(msg) => local.send((msg, reply)),
                 })
             });
             Ok(IrohProtocol::new(handler))

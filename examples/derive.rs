@@ -10,7 +10,7 @@ use irpc::{
     rpc::Handler,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, Service, WithChannels,
+    Client, LocalSender, Request, Service,
 };
 // Import the macro
 use n0_future::task::{self, AbortOnDropHandle};
@@ -51,13 +51,13 @@ struct SetMany;
 #[rpc_requests(StorageService, message = StorageMessage)]
 #[derive(Serialize, Deserialize)]
 enum StorageProtocol {
-    #[rpc(tx=oneshot::Sender<Option<String>>)]
+    #[rpc(reply=oneshot::Sender<Option<String>>)]
     Get(Get),
-    #[rpc(tx=oneshot::Sender<()>)]
+    #[rpc(reply=oneshot::Sender<()>)]
     Set(Set),
-    #[rpc(tx=oneshot::Sender<u64>, rx=mpsc::Receiver<(String, String)>)]
+    #[rpc(reply=oneshot::Sender<u64>, updates=mpsc::Receiver<(String, String)>)]
     SetMany(SetMany),
-    #[rpc(tx=mpsc::Sender<String>)]
+    #[rpc(reply=mpsc::Sender<String>)]
     List(List),
 }
 
@@ -68,13 +68,13 @@ struct StorageActor {
 
 impl StorageActor {
     pub fn spawn() -> StorageApi {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (reply, request) = tokio::sync::mpsc::channel(1);
         let actor = Self {
-            recv: rx,
+            recv: request,
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<StorageMessage, StorageService>::from(tx);
+        let local = LocalSender::<StorageMessage, StorageService>::from(reply);
         StorageApi {
             inner: local.into(),
         }
@@ -90,30 +90,32 @@ impl StorageActor {
         match msg {
             StorageMessage::Get(get) => {
                 info!("get {:?}", get);
-                let WithChannels { tx, inner, .. } = get;
-                tx.send(self.state.get(&inner.key).cloned()).await.ok();
+                let Request { reply, message, .. } = get;
+                reply.send(self.state.get(&message.key).cloned()).await.ok();
             }
             StorageMessage::Set(set) => {
                 info!("set {:?}", set);
-                let WithChannels { tx, inner, .. } = set;
-                self.state.insert(inner.key, inner.value);
-                tx.send(()).await.ok();
+                let Request { reply, message, .. } = set;
+                self.state.insert(message.key, message.value);
+                reply.send(()).await.ok();
             }
             StorageMessage::SetMany(set) => {
                 info!("set-many {:?}", set);
-                let WithChannels { mut rx, tx, .. } = set;
+                let Request {
+                    mut updates, reply, ..
+                } = set;
                 let mut count = 0;
-                while let Ok(Some((key, value))) = rx.recv().await {
+                while let Ok(Some((key, value))) = updates.recv().await {
                     self.state.insert(key, value);
                     count += 1;
                 }
-                tx.send(count).await.ok();
+                reply.send(count).await.ok();
             }
             StorageMessage::List(list) => {
                 info!("list {:?}", list);
-                let WithChannels { tx, .. } = list;
+                let Request { reply, .. } = list;
                 for (key, value) in &self.state {
-                    if tx.send(format!("{key}={value}")).await.is_err() {
+                    if reply.send(format!("{key}={value}")).await.is_err() {
                         break;
                     }
                 }
@@ -135,13 +137,13 @@ impl StorageApi {
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> Result<AbortOnDropHandle<()>> {
         let local = self.inner.local().context("cannot listen on remote API")?;
-        let handler: Handler<StorageProtocol> = Arc::new(move |msg, rx, tx| {
+        let handler: Handler<StorageProtocol> = Arc::new(move |msg, updates, reply| {
             let local = local.clone();
             Box::pin(match msg {
-                StorageProtocol::Get(msg) => local.send((msg, tx)),
-                StorageProtocol::Set(msg) => local.send((msg, tx)),
-                StorageProtocol::SetMany(msg) => local.send((msg, tx, rx)),
-                StorageProtocol::List(msg) => local.send((msg, tx)),
+                StorageProtocol::Get(msg) => local.send((msg, reply)),
+                StorageProtocol::Set(msg) => local.send((msg, reply)),
+                StorageProtocol::SetMany(msg) => local.send((msg, reply, updates)),
+                StorageProtocol::List(msg) => local.send((msg, reply)),
             })
         });
         let join_handle = task::spawn(irpc::rpc::listen(endpoint, handler));
