@@ -7,7 +7,7 @@ use std::{
 use anyhow::bail;
 use futures_buffered::BufferedStreamExt;
 use irpc::{
-    channel::{oneshot, mpsc},
+    channel::{mpsc, oneshot},
     rpc::{listen, Handler},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},

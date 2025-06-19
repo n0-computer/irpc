@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::bail;
 use irpc::{
-    channel::{none::NoReceiver, oneshot, mpsc},
+    channel::{mpsc, none::NoReceiver, oneshot},
     rpc::{listen, Handler},
     util::{make_client_endpoint, make_server_endpoint},
     Channels, Client, LocalSender, Request, Service, WithChannels,
