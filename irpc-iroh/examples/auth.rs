@@ -173,15 +173,15 @@ mod storage {
 
     fn upcast_message(
         msg: StorageProtocol,
-        request: RecvStream,
+        updates: RecvStream,
         reply: SendStream,
     ) -> StorageMessage {
         match msg {
-            StorageProtocol::Auth(msg) => Request::from((msg, reply, request)).into(),
-            StorageProtocol::Get(msg) => Request::from((msg, reply, request)).into(),
-            StorageProtocol::Set(msg) => Request::from((msg, reply, request)).into(),
-            StorageProtocol::SetMany(msg) => Request::from((msg, reply, request)).into(),
-            StorageProtocol::List(msg) => Request::from((msg, reply, request)).into(),
+            StorageProtocol::Auth(msg) => Request::from((msg, reply, updates)).into(),
+            StorageProtocol::Get(msg) => Request::from((msg, reply, updates)).into(),
+            StorageProtocol::Set(msg) => Request::from((msg, reply, updates)).into(),
+            StorageProtocol::SetMany(msg) => Request::from((msg, reply, updates)).into(),
+            StorageProtocol::List(msg) => Request::from((msg, reply, updates)).into(),
         }
     }
 

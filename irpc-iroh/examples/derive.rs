@@ -108,13 +108,13 @@ mod storage {
 
     impl StorageActor {
         pub fn spawn() -> StorageApi {
-            let (reply, request) = tokio::sync::mpsc::channel(1);
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
             let actor = Self {
-                recv: request,
+                recv: rx,
                 state: BTreeMap::new(),
             };
             n0_future::task::spawn(actor.run());
-            let local = LocalSender::<StorageMessage, StorageService>::from(reply);
+            let local = LocalSender::<StorageMessage, StorageService>::from(tx);
             StorageApi {
                 inner: local.into(),
             }
@@ -175,7 +175,7 @@ mod storage {
                 .inner
                 .local()
                 .context("can not listen on remote service")?;
-            let handler: Handler<StorageProtocol> = Arc::new(move |msg, _request, reply| {
+            let handler: Handler<StorageProtocol> = Arc::new(move |msg, _updates, reply| {
                 let local = local.clone();
                 Box::pin(match msg {
                     StorageProtocol::Get(msg) => local.send((msg, reply)),
