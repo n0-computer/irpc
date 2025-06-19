@@ -72,7 +72,7 @@ mod storage {
         Endpoint,
     };
     use irpc::{
-        channel::{oneshot, mpsc},
+        channel::{mpsc, oneshot},
         Client, Service, WithChannels,
     };
     // Import the macro

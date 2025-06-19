@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use irpc::{
-    channel::{oneshot, mpsc},
+    channel::{mpsc, oneshot},
     rpc::Handler,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},

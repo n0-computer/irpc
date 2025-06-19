@@ -60,7 +60,7 @@ mod storage {
     use anyhow::{Context, Result};
     use iroh::{protocol::ProtocolHandler, Endpoint};
     use irpc::{
-        channel::{oneshot, mpsc},
+        channel::{mpsc, oneshot},
         rpc::Handler,
         rpc_requests, Client, LocalSender, Service, WithChannels,
     };

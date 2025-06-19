@@ -1118,10 +1118,9 @@ pub mod rpc {
 
     use crate::{
         channel::{
-            none::NoSender,
-            oneshot,
             mpsc::{self, DynReceiver, DynSender},
-            RecvError, SendError,
+            none::NoSender,
+            oneshot, RecvError, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
         RequestError, RpcMessage,
