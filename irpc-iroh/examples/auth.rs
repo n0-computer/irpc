@@ -73,7 +73,7 @@ mod storage {
     };
     use irpc::{
         channel::{mpsc, oneshot},
-        Client, Service, WithChannels,
+        Client, Request, Service,
     };
     // Import the macro
     use irpc_derive::rpc_requests;
@@ -116,15 +116,15 @@ mod storage {
     #[rpc_requests(StorageService, message = StorageMessage)]
     #[derive(Serialize, Deserialize)]
     enum StorageProtocol {
-        #[rpc(tx=oneshot::Sender<Result<(), String>>)]
+        #[rpc(reply=oneshot::Sender<Result<(), String>>)]
         Auth(Auth),
-        #[rpc(tx=oneshot::Sender<Option<String>>)]
+        #[rpc(reply=oneshot::Sender<Option<String>>)]
         Get(Get),
-        #[rpc(tx=oneshot::Sender<()>)]
+        #[rpc(reply=oneshot::Sender<()>)]
         Set(Set),
-        #[rpc(tx=oneshot::Sender<u64>, rx=mpsc::Receiver<(String, String)>)]
+        #[rpc(reply=oneshot::Sender<u64>, updates=mpsc::Receiver<(String, String)>)]
         SetMany(SetMany),
-        #[rpc(tx=mpsc::Sender<String>)]
+        #[rpc(reply=mpsc::Sender<String>)]
         List(List),
     }
 
@@ -139,20 +139,20 @@ mod storage {
             let this = self.clone();
             Box::pin(async move {
                 let mut authed = false;
-                while let Some((msg, rx, tx)) = read_request(&conn).await? {
-                    let msg_with_channels = upcast_message(msg, rx, tx);
+                while let Some((msg, request, reply)) = read_request(&conn).await? {
+                    let msg_with_channels = upcast_message(msg, request, reply);
                     match msg_with_channels {
                         StorageMessage::Auth(msg) => {
-                            let WithChannels { inner, tx, .. } = msg;
+                            let Request { message, reply, .. } = msg;
                             if authed {
                                 conn.close(1u32.into(), b"invalid message");
                                 break;
-                            } else if inner.token != this.auth_token {
+                            } else if message.token != this.auth_token {
                                 conn.close(1u32.into(), b"permission denied");
                                 break;
                             } else {
                                 authed = true;
-                                tx.send(Ok(())).await.ok();
+                                reply.send(Ok(())).await.ok();
                             }
                         }
                         _ => {
@@ -171,13 +171,17 @@ mod storage {
         }
     }
 
-    fn upcast_message(msg: StorageProtocol, rx: RecvStream, tx: SendStream) -> StorageMessage {
+    fn upcast_message(
+        msg: StorageProtocol,
+        request: RecvStream,
+        reply: SendStream,
+    ) -> StorageMessage {
         match msg {
-            StorageProtocol::Auth(msg) => WithChannels::from((msg, tx, rx)).into(),
-            StorageProtocol::Get(msg) => WithChannels::from((msg, tx, rx)).into(),
-            StorageProtocol::Set(msg) => WithChannels::from((msg, tx, rx)).into(),
-            StorageProtocol::SetMany(msg) => WithChannels::from((msg, tx, rx)).into(),
-            StorageProtocol::List(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::Auth(msg) => Request::from((msg, reply, request)).into(),
+            StorageProtocol::Get(msg) => Request::from((msg, reply, request)).into(),
+            StorageProtocol::Set(msg) => Request::from((msg, reply, request)).into(),
+            StorageProtocol::SetMany(msg) => Request::from((msg, reply, request)).into(),
+            StorageProtocol::List(msg) => Request::from((msg, reply, request)).into(),
         }
     }
 
@@ -196,29 +200,34 @@ mod storage {
                 StorageMessage::Auth(_) => unreachable!("handled in ProtocolHandler::accept"),
                 StorageMessage::Get(get) => {
                     info!("get {:?}", get);
-                    let WithChannels { tx, inner, .. } = get;
-                    let res = self.state.lock().unwrap().get(&inner.key).cloned();
-                    tx.send(res).await.ok();
+                    let Request { reply, message, .. } = get;
+                    let res = self.state.lock().unwrap().get(&message.key).cloned();
+                    reply.send(res).await.ok();
                 }
                 StorageMessage::Set(set) => {
                     info!("set {:?}", set);
-                    let WithChannels { tx, inner, .. } = set;
-                    self.state.lock().unwrap().insert(inner.key, inner.value);
-                    tx.send(()).await.ok();
+                    let Request { reply, message, .. } = set;
+                    self.state
+                        .lock()
+                        .unwrap()
+                        .insert(message.key, message.value);
+                    reply.send(()).await.ok();
                 }
                 StorageMessage::SetMany(list) => {
-                    let WithChannels { tx, mut rx, .. } = list;
+                    let Request {
+                        reply, mut updates, ..
+                    } = list;
                     let mut i = 0;
-                    while let Ok(Some((key, value))) = rx.recv().await {
+                    while let Ok(Some((key, value))) = updates.recv().await {
                         let mut state = self.state.lock().unwrap();
                         state.insert(key, value);
                         i += 1;
                     }
-                    tx.send(i).await.ok();
+                    reply.send(i).await.ok();
                 }
                 StorageMessage::List(list) => {
                     info!("list {:?}", list);
-                    let WithChannels { tx, .. } = list;
+                    let Request { reply, .. } = list;
                     let values = {
                         let state = self.state.lock().unwrap();
                         // TODO: use async lock to not clone here.
@@ -229,7 +238,7 @@ mod storage {
                         values
                     };
                     for value in values {
-                        if tx.send(value).await.is_err() {
+                        if reply.send(value).await.is_err() {
                             break;
                         }
                     }

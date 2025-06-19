@@ -36,16 +36,16 @@ fn derive_simple() {
     #[derive(Debug, Serialize, Deserialize)]
     struct Response4;
 
-    #[rpc_requests(Service, message = RequestWithChannels)]
+    #[rpc_requests(Service, message = RequestRequest)]
     #[derive(Debug, Serialize, Deserialize)]
     enum Request {
-        #[rpc(tx=oneshot::Sender<()>)]
+        #[rpc(reply=oneshot::Sender<()>)]
         Rpc(RpcRequest),
-        #[rpc(tx=NoSender)]
+        #[rpc(reply=NoSender)]
         ServerStreaming(ServerStreamingRequest),
-        #[rpc(tx=NoSender)]
+        #[rpc(reply=NoSender)]
         BidiStreaming(BidiStreamingRequest),
-        #[rpc(tx=NoSender)]
+        #[rpc(reply=NoSender)]
         ClientStreaming(ClientStreamingRequest),
     }
 

@@ -118,7 +118,7 @@ mod quinn_setup_utils {
             _end_entity: &rustls::pki_types::CertificateDer<'_>,
             _intermediates: &[rustls::pki_types::CertificateDer<'_>],
             _server_name: &rustls::pki_types::ServerName<'_>,
-            _ocsp_response: &[u8],
+            _ocsp_reply: &[u8],
             _now: rustls::pki_types::UnixTime,
         ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
