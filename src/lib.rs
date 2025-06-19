@@ -141,7 +141,7 @@ pub mod channel {
 
     /// Oneshot channel, similar to tokio's oneshot channel
     pub mod oneshot {
-        use std::{fmt::Debug, future::Future, io, pin::Pin, task};
+        use std::{fmt::Debug, future::Future, pin::Pin, task};
 
         use n0_future::future::Boxed as BoxFuture;
 
@@ -162,7 +162,7 @@ pub mod channel {
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before sending it.
         pub type BoxedSender<T> =
-            Box<dyn FnOnce(T) -> BoxFuture<io::Result<()>> + Send + Sync + 'static>;
+            Box<dyn FnOnce(T) -> BoxFuture<Result<(), SendError>> + Send + Sync + 'static>;
 
         /// A sender that can be wrapped in a `Box<dyn DynSender<T>>`.
         ///
@@ -172,7 +172,9 @@ pub mod channel {
         /// Remote receivers are always boxed, since for remote communication the boxing
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before receiving it.
-        pub trait DynSender<T>: Future<Output = io::Result<()>> + Send + Sync + 'static {
+        pub trait DynSender<T>:
+            Future<Output = Result<(), SendError>> + Send + Sync + 'static
+        {
             fn is_rpc(&self) -> bool;
         }
 
@@ -181,7 +183,7 @@ pub mod channel {
         /// Remote receivers are always boxed, since for remote communication the boxing
         /// overhead is negligible. However, boxing can also be used for local communication,
         /// e.g. when applying a transform or filter to the message before receiving it.
-        pub type BoxedReceiver<T> = BoxFuture<io::Result<T>>;
+        pub type BoxedReceiver<T> = BoxFuture<Result<T, RecvError>>;
 
         /// A oneshot sender.
         ///
@@ -266,7 +268,7 @@ pub mod channel {
             fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
                 match self.get_mut() {
                     Self::Tokio(rx) => Pin::new(rx).poll(cx).map_err(|_| RecvError::SenderClosed),
-                    Self::Boxed(rx) => Pin::new(rx).poll(cx).map_err(RecvError::Io),
+                    Self::Boxed(rx) => Pin::new(rx).poll(cx),
                 }
             }
         }
@@ -293,7 +295,7 @@ pub mod channel {
         impl<T, F, Fut> From<F> for Receiver<T>
         where
             F: FnOnce() -> Fut,
-            Fut: Future<Output = io::Result<T>> + Send + 'static,
+            Fut: Future<Output = Result<T, RecvError>> + Send + 'static,
         {
             fn from(f: F) -> Self {
                 Self::Boxed(Box::pin(f()))
@@ -317,7 +319,7 @@ pub mod channel {
     ///
     /// For the rpc case, the send side can not be cloned, hence spsc instead of mpsc.
     pub mod spsc {
-        use std::{fmt::Debug, future::Future, io, pin::Pin};
+        use std::{fmt::Debug, future::Future, pin::Pin};
 
         use super::{RecvError, SendError};
         use crate::RpcMessage;
@@ -402,7 +404,7 @@ pub mod channel {
             fn send(
                 &mut self,
                 value: T,
-            ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+            ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>>;
 
             /// Try to send a message, returning as fast as possible if sending
             /// is not currently possible.
@@ -412,7 +414,7 @@ pub mod channel {
             fn try_send(
                 &mut self,
                 value: T,
-            ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>>;
+            ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + '_>>;
 
             /// Await the sender close
             fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
@@ -576,16 +578,26 @@ pub mod channel {
         /// for local communication.
         #[error("receiver closed")]
         ReceiverClosed,
+        /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+        #[error("maximum message size exceeded")]
+        MaxMessageSizeExceeded,
         /// The underlying io error. This can occur for remote communication,
         /// due to a network error or serialization error.
         #[error("io error: {0}")]
         Io(#[from] io::Error),
     }
 
+    impl From<postcard::Error> for SendError {
+        fn from(value: postcard::Error) -> Self {
+            Self::Io(io::Error::new(io::ErrorKind::InvalidData, value))
+        }
+    }
+
     impl From<SendError> for io::Error {
         fn from(e: SendError) -> Self {
             match e {
                 SendError::ReceiverClosed => io::Error::new(io::ErrorKind::BrokenPipe, e),
+                SendError::MaxMessageSizeExceeded => io::Error::new(io::ErrorKind::InvalidData, e),
                 SendError::Io(e) => e,
             }
         }
@@ -602,6 +614,9 @@ pub mod channel {
         /// for local communication.
         #[error("sender closed")]
         SenderClosed,
+        /// The message exceeded the maximum allowed message size [`MAX_MESSAGE_SIZE`].
+        #[error("maximum message size exceeded")]
+        MaxMessageSizeExceeded,
         /// An io error occurred. This can occur for remote communication,
         /// due to a network error or deserialization error.
         #[error("io error: {0}")]
@@ -613,6 +628,7 @@ pub mod channel {
             match e {
                 RecvError::Io(e) => e,
                 RecvError::SenderClosed => io::Error::new(io::ErrorKind::BrokenPipe, e),
+                RecvError::MaxMessageSizeExceeded => io::Error::new(io::ErrorKind::InvalidData, e),
             }
         }
     }
@@ -1108,6 +1124,12 @@ pub mod rpc {
         RequestError, RpcMessage,
     };
 
+    /// Default max message size (16 MiB).
+    const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
+
+    /// Error code on streams if the max message size was exceeded.
+    const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
+
     /// Error that can occur when writing the initial message when doing a
     /// cross-process RPC.
     #[derive(Debug, thiserror::Error)]
@@ -1115,17 +1137,40 @@ pub mod rpc {
         /// Error writing to the stream with quinn
         #[error("error writing to stream: {0}")]
         Quinn(#[from] quinn::WriteError),
+        /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+        #[error("maximum message size exceeded")]
+        MaxMessageSizeExceeded,
         /// Generic IO error, e.g. when serializing the message or when using
         /// other transports.
         #[error("error serializing: {0}")]
         Io(#[from] io::Error),
     }
 
+    impl From<postcard::Error> for WriteError {
+        fn from(value: postcard::Error) -> Self {
+            Self::Io(io::Error::new(io::ErrorKind::InvalidData, value))
+        }
+    }
+
     impl From<WriteError> for io::Error {
         fn from(e: WriteError) -> Self {
             match e {
                 WriteError::Io(e) => e,
+                WriteError::MaxMessageSizeExceeded => io::Error::new(io::ErrorKind::InvalidData, e),
                 WriteError::Quinn(e) => e.into(),
+            }
+        }
+    }
+
+    impl From<quinn::WriteError> for SendError {
+        fn from(err: quinn::WriteError) -> Self {
+            match err {
+                quinn::WriteError::Stopped(code)
+                    if code == ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into() =>
+                {
+                    SendError::MaxMessageSizeExceeded
+                }
+                _ => SendError::Io(io::Error::from(err)),
             }
         }
     }
@@ -1238,6 +1283,9 @@ pub mod rpc {
         {
             let RemoteSender(mut send, recv, _) = self;
             let msg = msg.into();
+            if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
+                return Err(WriteError::MaxMessageSizeExceeded);
+            }
             let mut buf = SmallVec::<[u8; 128]>::new();
             buf.write_length_prefixed(msg)?;
             send.write_all(&buf).await?;
@@ -1248,17 +1296,24 @@ pub mod rpc {
     impl<T: DeserializeOwned> From<quinn::RecvStream> for oneshot::Receiver<T> {
         fn from(mut read: quinn::RecvStream) -> Self {
             let fut = async move {
-                let size = read.read_varint_u64().await?.ok_or(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "failed to read size",
-                ))?;
+                let size = read
+                    .read_varint_u64()
+                    .await?
+                    .ok_or(RecvError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "failed to read size",
+                    )))?;
+                if size > MAX_MESSAGE_SIZE {
+                    read.stop(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
+                    return Err(RecvError::MaxMessageSizeExceeded);
+                }
                 let rest = read
                     .read_to_end(size as usize)
                     .await
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 let msg: T = postcard::from_bytes(&rest)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                io::Result::Ok(msg)
+                Ok(msg)
             };
             oneshot::Receiver::from(|| fut)
         }
@@ -1272,9 +1327,10 @@ pub mod rpc {
     }
 
     impl<T: RpcMessage> From<quinn::RecvStream> for spsc::Receiver<T> {
-        fn from(read: quinn::RecvStream) -> Self {
+        fn from(recv: quinn::RecvStream) -> Self {
             spsc::Receiver::Boxed(Box::new(QuinnReceiver {
-                recv: read,
+                recv,
+                buffer: Vec::new(),
                 _marker: PhantomData,
             }))
         }
@@ -1291,11 +1347,14 @@ pub mod rpc {
         fn from(mut writer: quinn::SendStream) -> Self {
             oneshot::Sender::Boxed(Box::new(move |value| {
                 Box::pin(async move {
+                    if postcard::experimental::serialized_size(&value)? as u64 > MAX_MESSAGE_SIZE {
+                        return Err(SendError::MaxMessageSizeExceeded);
+                    }
                     // write via a small buffer to avoid allocation for small values
                     let mut buf = SmallVec::<[u8; 128]>::new();
                     buf.write_length_prefixed(value)?;
                     writer.write_all(&buf).await?;
-                    io::Result::Ok(())
+                    Ok(())
                 })
             }))
         }
@@ -1313,6 +1372,7 @@ pub mod rpc {
 
     struct QuinnReceiver<T> {
         recv: quinn::RecvStream,
+        buffer: Vec<u8>,
         _marker: std::marker::PhantomData<T>,
     }
 
@@ -1332,11 +1392,17 @@ pub mod rpc {
                 let Some(size) = read.read_varint_u64().await? else {
                     return Ok(None);
                 };
-                let mut buf = vec![0; size as usize];
-                read.read_exact(&mut buf)
+                if size > MAX_MESSAGE_SIZE {
+                    self.recv
+                        .stop(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into())
+                        .ok();
+                    return Err(RecvError::MaxMessageSizeExceeded);
+                }
+                self.buffer.resize(size as usize, 0);
+                read.read_exact(&mut self.buffer)
                     .await
                     .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-                let msg: T = postcard::from_bytes(&buf)
+                let msg: T = postcard::from_bytes(&self.buffer)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 Ok(Some(msg))
             })
@@ -1360,9 +1426,14 @@ pub mod rpc {
     }
 
     impl<T: RpcMessage> DynSender<T> for QuinnSender<T> {
-        fn send(&mut self, value: T) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        fn send(
+            &mut self,
+            value: T,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>> {
             Box::pin(async {
-                let value = value;
+                if postcard::experimental::serialized_size(&value)? as u64 > MAX_MESSAGE_SIZE {
+                    return Err(SendError::MaxMessageSizeExceeded);
+                }
                 self.buffer.clear();
                 self.buffer.write_length_prefixed(value)?;
                 self.send.write_all(&self.buffer).await?;
@@ -1374,10 +1445,12 @@ pub mod rpc {
         fn try_send(
             &mut self,
             value: T,
-        ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + '_>> {
             Box::pin(async {
                 // todo: move the non-async part out of the box. Will require a new return type.
-                let value = value;
+                if postcard::experimental::serialized_size(&value)? as u64 > MAX_MESSAGE_SIZE {
+                    return Err(SendError::MaxMessageSizeExceeded);
+                }
                 self.buffer.clear();
                 self.buffer.write_length_prefixed(value)?;
                 let Some(n) = now_or_never(self.send.write(&self.buffer)) else {
