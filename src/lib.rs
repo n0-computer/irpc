@@ -587,12 +587,6 @@ pub mod channel {
         Io(#[from] io::Error),
     }
 
-    impl From<postcard::Error> for SendError {
-        fn from(value: postcard::Error) -> Self {
-            Self::Io(io::Error::new(io::ErrorKind::InvalidData, value))
-        }
-    }
-
     impl From<SendError> for io::Error {
         fn from(e: SendError) -> Self {
             match e {
@@ -1147,6 +1141,12 @@ pub mod rpc {
     }
 
     impl From<postcard::Error> for WriteError {
+        fn from(value: postcard::Error) -> Self {
+            Self::Io(io::Error::new(io::ErrorKind::InvalidData, value))
+        }
+    }
+
+    impl From<postcard::Error> for SendError {
         fn from(value: postcard::Error) -> Self {
             Self::Io(io::Error::new(io::ErrorKind::InvalidData, value))
         }
