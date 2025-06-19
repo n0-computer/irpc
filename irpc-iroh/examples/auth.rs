@@ -218,7 +218,7 @@ mod storage {
                 }
                 StorageMessage::List(list) => {
                     info!("list {:?}", list);
-                    let WithChannels { mut tx, .. } = list;
+                    let WithChannels { tx, .. } = list;
                     let values = {
                         let state = self.state.lock().unwrap();
                         // TODO: use async lock to not clone here.
