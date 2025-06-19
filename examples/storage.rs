@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::bail;
 use irpc::{
-    channel::{none::NoReceiver, oneshot, spsc},
+    channel::{none::NoReceiver, oneshot, mpsc},
     rpc::{listen, Handler},
     util::{make_client_endpoint, make_server_endpoint},
     Channels, Client, LocalSender, Request, Service, WithChannels,
@@ -36,7 +36,7 @@ struct List;
 
 impl Channels<StorageService> for List {
     type Rx = NoReceiver;
-    type Tx = spsc::Sender<String>;
+    type Tx = mpsc::Sender<String>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,11 +157,11 @@ impl StorageApi {
         }
     }
 
-    pub async fn list(&self) -> anyhow::Result<spsc::Receiver<String>> {
+    pub async fn list(&self) -> anyhow::Result<mpsc::Receiver<String>> {
         let msg = List;
         match self.inner.request().await? {
             Request::Local(request) => {
-                let (tx, rx) = spsc::channel(10);
+                let (tx, rx) = mpsc::channel(10);
                 request.send((msg, tx)).await?;
                 Ok(rx)
             }

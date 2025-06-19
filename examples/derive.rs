@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use irpc::{
-    channel::{oneshot, spsc},
+    channel::{oneshot, mpsc},
     rpc::Handler,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
@@ -55,9 +55,9 @@ enum StorageProtocol {
     Get(Get),
     #[rpc(tx=oneshot::Sender<()>)]
     Set(Set),
-    #[rpc(tx=oneshot::Sender<u64>, rx=spsc::Receiver<(String, String)>)]
+    #[rpc(tx=oneshot::Sender<u64>, rx=mpsc::Receiver<(String, String)>)]
     SetMany(SetMany),
-    #[rpc(tx=spsc::Sender<String>)]
+    #[rpc(tx=mpsc::Sender<String>)]
     List(List),
 }
 
@@ -152,7 +152,7 @@ impl StorageApi {
         self.inner.rpc(Get { key }).await
     }
 
-    pub async fn list(&self) -> irpc::Result<spsc::Receiver<String>> {
+    pub async fn list(&self) -> irpc::Result<mpsc::Receiver<String>> {
         self.inner.server_streaming(List, 16).await
     }
 
@@ -162,7 +162,7 @@ impl StorageApi {
 
     pub async fn set_many(
         &self,
-    ) -> irpc::Result<(spsc::Sender<(String, String)>, oneshot::Receiver<u64>)> {
+    ) -> irpc::Result<(mpsc::Sender<(String, String)>, oneshot::Receiver<u64>)> {
         self.inner.client_streaming(SetMany, 4).await
     }
 }
