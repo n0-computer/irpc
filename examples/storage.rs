@@ -27,16 +27,16 @@ struct Get {
 }
 
 impl Channels<StorageService> for Get {
-    type Request = NoReceiver;
-    type Response = oneshot::Sender<Option<String>>;
+    type Updates = NoReceiver;
+    type Reply = oneshot::Sender<Option<String>>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct List;
 
 impl Channels<StorageService> for List {
-    type Request = NoReceiver;
-    type Response = mpsc::Sender<String>;
+    type Updates = NoReceiver;
+    type Reply = mpsc::Sender<String>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,8 +46,8 @@ struct Set {
 }
 
 impl Channels<StorageService> for Set {
-    type Request = NoReceiver;
-    type Response = oneshot::Sender<()>;
+    type Updates = NoReceiver;
+    type Reply = oneshot::Sender<()>;
 }
 
 #[derive(derive_more::From, Serialize, Deserialize)]

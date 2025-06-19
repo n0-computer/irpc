@@ -55,8 +55,8 @@ fn generate_channels_impl(
 
     let res = quote! {
         impl ::irpc::Channels<#service_name> for #request_type {
-            type Response = #reply;
-            type Request = #request;
+            type Reply = #reply;
+            type Updates = #request;
         }
     };
 

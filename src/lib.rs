@@ -128,11 +128,11 @@ pub trait Receiver: Debug + Sealed {}
 /// Trait to specify channels for a message and service
 pub trait Channels<S: Service> {
     /// The sender type, can be either mpsc, oneshot or none
-    type Response: Sender;
+    type Reply: Sender;
     /// The receiver type, can be either mpsc, oneshot or none
     ///
     /// For many services, the receiver is not needed, so it can be set to [`NoReceiver`].
-    type Request: Receiver;
+    type Updates: Receiver;
 }
 
 /// Channels that abstract over local or remote sending
@@ -653,9 +653,9 @@ pub struct Request<I: Channels<S>, S: Service> {
     /// The request message.
     pub message: I,
     /// The return channel to send the reply to. Can be set to [`crate::channel::none::NoSender`] if not needed.
-    pub reply: <I as Channels<S>>::Response,
+    pub reply: <I as Channels<S>>::Reply,
     /// The request channel to receive the request from. Can be set to [`NoReceiver`] if not needed.
-    pub updates: <I as Channels<S>>::Request,
+    pub updates: <I as Channels<S>>::Updates,
     /// The current span where the full message was created.
     #[cfg(feature = "message_spans")]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "message_spans")))]
@@ -683,13 +683,13 @@ impl<I: Channels<S>, S: Service> Request<I, S> {
 /// Tuple conversion from message message and reply/request channels to a Request struct
 ///
 /// For the case where you want both reply and request channels.
-impl<I: Channels<S>, S: Service, Response, Updates> From<(I, Response, Updates)> for Request<I, S>
+impl<I: Channels<S>, S: Service, Reply, Updates> From<(I, Reply, Updates)> for Request<I, S>
 where
     I: Channels<S>,
-    <I as Channels<S>>::Response: From<Response>,
-    <I as Channels<S>>::Request: From<Updates>,
+    <I as Channels<S>>::Reply: From<Reply>,
+    <I as Channels<S>>::Updates: From<Updates>,
 {
-    fn from(message: (I, Response, Updates)) -> Self {
+    fn from(message: (I, Reply, Updates)) -> Self {
         let (message, reply, updates) = message;
         Self {
             message,
@@ -705,13 +705,13 @@ where
 /// Tuple conversion from message message and reply channel to a Request struct
 ///
 /// For the very common case where you just need a reply channel to send the reply to.
-impl<I, S, Response> From<(I, Response)> for Request<I, S>
+impl<I, S, Reply> From<(I, Reply)> for Request<I, S>
 where
-    I: Channels<S, Request = NoReceiver>,
+    I: Channels<S, Updates = NoReceiver>,
     S: Service,
-    <I as Channels<S>>::Response: From<Response>,
+    <I as Channels<S>>::Reply: From<Reply>,
 {
-    fn from(message: (I, Response)) -> Self {
+    fn from(message: (I, Reply)) -> Self {
         let (message, reply) = message;
         Self {
             message,
@@ -855,7 +855,7 @@ impl<M, R, S> Client<M, R, S> {
         S: Service,
         M: From<Request<Req, S>> + Send + Sync + Unpin + 'static,
         R: From<Req> + Serialize + Send + Sync + 'static,
-        Req: Channels<S, Response = channel::oneshot::Sender<Res>, Request = NoReceiver>
+        Req: Channels<S, Reply = channel::oneshot::Sender<Res>, Updates = NoReceiver>
             + Send
             + 'static,
         Res: RpcMessage,
@@ -891,9 +891,7 @@ impl<M, R, S> Client<M, R, S> {
         S: Service,
         M: From<Request<Req, S>> + Send + Sync + Unpin + 'static,
         R: From<Req> + Serialize + Send + Sync + 'static,
-        Req: Channels<S, Response = channel::mpsc::Sender<Res>, Request = NoReceiver>
-            + Send
-            + 'static,
+        Req: Channels<S, Reply = channel::mpsc::Sender<Res>, Updates = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
         let request = self.request();
@@ -933,8 +931,8 @@ impl<M, R, S> Client<M, R, S> {
         R: From<Req> + Serialize + 'static,
         Req: Channels<
             S,
-            Response = channel::oneshot::Sender<Res>,
-            Request = channel::mpsc::Receiver<Update>,
+            Reply = channel::oneshot::Sender<Res>,
+            Updates = channel::mpsc::Receiver<Update>,
         >,
         Update: RpcMessage,
         Res: RpcMessage,
@@ -978,8 +976,8 @@ impl<M, R, S> Client<M, R, S> {
         R: From<Req> + Serialize + Send + 'static,
         Req: Channels<
                 S,
-                Response = channel::mpsc::Sender<Res>,
-                Request = channel::mpsc::Receiver<Update>,
+                Reply = channel::mpsc::Sender<Res>,
+                Updates = channel::mpsc::Receiver<Update>,
             > + Send
             + 'static,
         Update: RpcMessage,
