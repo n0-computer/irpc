@@ -446,6 +446,13 @@ pub mod channel {
 
         impl<T: RpcMessage> Sender<T> {
             /// Send a message and yield until either it is sent or an error occurs.
+            ///
+            /// ## Cancellation safety
+            ///
+            /// If the future is dropped before completion, and if this is a remote sender,
+            /// then the sender will be closed and further sends will return an [`io::Error`]
+            /// with [`io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+            /// future until completion if you want to reuse the sender or any clone afterwards.
             pub async fn send(&self, value: T) -> std::result::Result<(), SendError> {
                 match self {
                     Sender::Tokio(tx) => {
@@ -469,6 +476,13 @@ pub mod channel {
             /// all.
             ///
             /// Returns true if the message was sent.
+            ///
+            /// ## Cancellation safety
+            ///
+            /// If the future is dropped before completion, and if this is a remote sender,
+            /// then the sender will be closed and further sends will return an [`io::Error`]
+            /// with [`io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+            /// future until completion if you want to reuse the sender or any clone afterwards.
             pub async fn try_send(&mut self, value: T) -> std::result::Result<bool, SendError> {
                 match self {
                     Sender::Tokio(tx) => match tx.try_send(value) {
