@@ -174,12 +174,12 @@ async fn client_demo(api: StorageApi) -> Result<()> {
     let value = api.get("hello".to_string()).await?;
     println!("get: hello = {:?}", value);
 
-    let (reply, request) = api.set_many().await?;
+    let (tx, rx) = api.set_many().await?;
     for i in 0..3 {
-        reply.send((format!("key{i}"), format!("value{i}"))).await?;
+        tx.send((format!("key{i}"), format!("value{i}"))).await?;
     }
-    drop(reply);
-    let count = request.await?;
+    drop(tx);
+    let count = rx.await?;
     println!("set-many: {count} values set");
 
     let mut list = api.list().await?;

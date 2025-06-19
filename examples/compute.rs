@@ -182,13 +182,13 @@ impl ComputeApi {
         let Some(local) = self.inner.local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler: Handler<ComputeProtocol> = Arc::new(move |msg, request, reply| {
+        let handler: Handler<ComputeProtocol> = Arc::new(move |msg, updates, reply| {
             let local = local.clone();
             Box::pin(match msg {
                 ComputeProtocol::Sqr(msg) => local.send((msg, reply)),
-                ComputeProtocol::Sum(msg) => local.send((msg, reply, request)),
+                ComputeProtocol::Sum(msg) => local.send((msg, reply, updates)),
                 ComputeProtocol::Fibonacci(msg) => local.send((msg, reply)),
-                ComputeProtocol::Multiply(msg) => local.send((msg, reply, request)),
+                ComputeProtocol::Multiply(msg) => local.send((msg, reply, updates)),
             })
         });
         Ok(AbortOnDropHandle::new(task::spawn(listen(
@@ -200,13 +200,13 @@ impl ComputeApi {
         let msg = Sqr { num };
         match self.inner.request().await? {
             RequestSender::Local(sender) => {
-                let (reply, request) = oneshot::channel();
-                sender.send((msg, reply)).await?;
-                Ok(request)
+                let (tx, rx) = oneshot::channel();
+                sender.send((msg, tx)).await?;
+                Ok(rx)
             }
             RequestSender::Remote(sender) => {
-                let (_reply, request) = sender.write(msg).await?;
-                Ok(request.into())
+                let (_tx, rx) = sender.write(msg).await?;
+                Ok(rx.into())
             }
         }
     }
@@ -215,14 +215,14 @@ impl ComputeApi {
         let msg = Sum;
         match self.inner.request().await? {
             RequestSender::Local(sender) => {
-                let (num_reply, num_request) = mpsc::channel(10);
-                let (sum_reply, sum_request) = oneshot::channel();
-                sender.send((msg, sum_reply, num_request)).await?;
-                Ok((num_reply, sum_request))
+                let (num_tx, num_rx) = mpsc::channel(10);
+                let (sum_tx, sum_rx) = oneshot::channel();
+                sender.send((msg, sum_tx, num_rx)).await?;
+                Ok((num_tx, sum_rx))
             }
             RequestSender::Remote(sender) => {
-                let (reply, request) = sender.write(msg).await?;
-                Ok((reply.into(), request.into()))
+                let (tx, rx) = sender.write(msg).await?;
+                Ok((tx.into(), rx.into()))
             }
         }
     }
@@ -231,13 +231,13 @@ impl ComputeApi {
         let msg = Fibonacci { max };
         match self.inner.request().await? {
             RequestSender::Local(sender) => {
-                let (reply, request) = mpsc::channel(128);
-                sender.send((msg, reply)).await?;
-                Ok(request)
+                let (tx, rx) = mpsc::channel(128);
+                sender.send((msg, tx)).await?;
+                Ok(rx)
             }
             RequestSender::Remote(sender) => {
-                let (_reply, request) = sender.write(msg).await?;
-                Ok(request.into())
+                let (_tx, rx) = sender.write(msg).await?;
+                Ok(rx.into())
             }
         }
     }
@@ -249,14 +249,14 @@ impl ComputeApi {
         let msg = Multiply { initial };
         match self.inner.request().await? {
             RequestSender::Local(sender) => {
-                let (in_reply, in_request) = mpsc::channel(128);
-                let (out_reply, out_request) = mpsc::channel(128);
-                sender.send((msg, out_reply, in_request)).await?;
-                Ok((in_reply, out_request))
+                let (in_tx, in_rx) = mpsc::channel(128);
+                let (out_tx, out_rx) = mpsc::channel(128);
+                sender.send((msg, out_tx, in_rx)).await?;
+                Ok((in_tx, out_rx))
             }
             RequestSender::Remote(sender) => {
-                let (reply, request) = sender.write(msg).await?;
-                Ok((reply.into(), request.into()))
+                let (tx, rx) = sender.write(msg).await?;
+                Ok((tx.into(), rx.into()))
             }
         }
     }
