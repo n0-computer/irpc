@@ -137,12 +137,12 @@ impl StorageApi {
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> Result<AbortOnDropHandle<()>> {
         let local = self.inner.local().context("cannot listen on remote API")?;
-        let handler: Handler<StorageProtocol> = Arc::new(move |msg, request, reply| {
+        let handler: Handler<StorageProtocol> = Arc::new(move |msg, updates, reply| {
             let local = local.clone();
             Box::pin(match msg {
                 StorageProtocol::Get(msg) => local.send((msg, reply)),
                 StorageProtocol::Set(msg) => local.send((msg, reply)),
-                StorageProtocol::SetMany(msg) => local.send((msg, reply, request)),
+                StorageProtocol::SetMany(msg) => local.send((msg, reply, updates)),
                 StorageProtocol::List(msg) => local.send((msg, reply)),
             })
         });

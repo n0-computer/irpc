@@ -31,7 +31,7 @@ fn generate_parent_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> Tok
             /// Get the parent span of the message
             pub fn parent_span(&self) -> tracing::Span {
                 let span = match self {
-                    #(#enum_name::#variant_names(message) => message.parent_span_opt()),*
+                    #(#enum_name::#variant_names(inner) => inner.parent_span_opt()),*
                 };
                 span.cloned().unwrap_or_else(|| ::tracing::Span::current())
             }
@@ -45,9 +45,9 @@ fn generate_channels_impl(
     request_type: &Type,
     attr_span: Span,
 ) -> syn::Result<TokenStream2> {
-    // Try to get request, default to NoReceiver if not present
+    // Try to get updates, default to NoReceiver if not present
     // Use unwrap_or_else for a cleaner default
-    let request = args.types.remove(RX_ATTR).unwrap_or_else(|| {
+    let updates = args.types.remove(RX_ATTR).unwrap_or_else(|| {
         // We can safely unwrap here because this is a known valid type
         syn::parse_str::<Type>(DEFAULT_RX_TYPE).expect("Failed to parse default request type")
     });
@@ -56,7 +56,7 @@ fn generate_channels_impl(
     let res = quote! {
         impl ::irpc::Channels<#service_name> for #request_type {
             type Reply = #reply;
-            type Updates = #request;
+            type Updates = #updates;
         }
     };
 
@@ -72,10 +72,10 @@ fn generate_case_from_impls(
     let mut impls = quote! {};
 
     // Generate From implementations for each case that has an rpc attribute
-    for (variant_name, message_type) in variants_with_attr {
+    for (variant_name, inner_type) in variants_with_attr {
         let impl_tokens = quote! {
-            impl From<#message_type> for #enum_name {
-                fn from(value: #message_type) -> Self {
+            impl From<#inner_type> for #enum_name {
+                fn from(value: #inner_type) -> Self {
                     #enum_name::#variant_name(value)
                 }
             }
@@ -99,10 +99,10 @@ fn generate_message_enum_from_impls(
     let mut impls = quote! {};
 
     // Generate From<Request<T, Service>> implementations for each case with an rpc attribute
-    for (variant_name, message_type) in variants_with_attr {
+    for (variant_name, inner_type) in variants_with_attr {
         let impl_tokens = quote! {
-            impl From<::irpc::Request<#message_type, #service_name>> for #message_enum_name {
-                fn from(value: ::irpc::Request<#message_type, #service_name>) -> Self {
+            impl From<::irpc::Request<#inner_type, #service_name>> for #message_enum_name {
+                fn from(value: ::irpc::Request<#inner_type, #service_name>) -> Self {
                     #message_enum_name::#variant_name(value)
                 }
             }
@@ -125,7 +125,7 @@ fn generate_type_aliases(
 ) -> TokenStream2 {
     let mut aliases = quote! {};
 
-    for (variant_name, message_type) in variants {
+    for (variant_name, inner_type) in variants {
         // Create a type name using the variant name + suffix
         // For example: Sum + "Msg" = SumMsg
         let type_name = format!("{}{}", variant_name, suffix);
@@ -133,7 +133,7 @@ fn generate_type_aliases(
 
         let alias = quote! {
             /// Type alias for Request<#message_type, #service_name>
-            pub type #type_ident = ::irpc::Request<#message_type, #service_name>;
+            pub type #type_ident = ::irpc::Request<#inner_type, #service_name>;
         };
 
         aliases = quote! {
@@ -299,10 +299,10 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let extended_enum_code = if let Some(message_enum_name) = message_enum_name {
         let message_variants = all_variants
             .iter()
-            .map(|(variant_name, message_type)| {
+            .map(|(variant_name, inner_type)| {
                 quote! {
                     #[allow(missing_docs)]
-                    #variant_name(::irpc::Request<#message_type, #service_name>)
+                    #variant_name(::irpc::Request<#inner_type, #service_name>)
                 }
             })
             .collect::<Vec<_>>();
