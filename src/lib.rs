@@ -232,7 +232,7 @@ pub mod channel {
             pub async fn send(self, value: T) -> std::result::Result<(), SendError> {
                 match self {
                     Sender::Tokio(tx) => tx.send(value).map_err(|_| SendError::ReceiverClosed),
-                    Sender::Boxed(f) => f(value).await.map_err(SendError::from),
+                    Sender::Boxed(f) => f(value).await,
                 }
             }
         }
@@ -450,7 +450,7 @@ pub mod channel {
                     Sender::Tokio(tx) => {
                         tx.send(value).await.map_err(|_| SendError::ReceiverClosed)
                     }
-                    Sender::Boxed(sink) => sink.send(value).await.map_err(SendError::from),
+                    Sender::Boxed(sink) => sink.send(value).await,
                 }
             }
 
@@ -477,7 +477,7 @@ pub mod channel {
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(false),
                     },
-                    Sender::Boxed(sink) => sink.try_send(value).await.map_err(SendError::from),
+                    Sender::Boxed(sink) => sink.try_send(value).await,
                 }
             }
         }
