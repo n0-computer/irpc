@@ -60,7 +60,7 @@ mod storage {
     use anyhow::{Context, Result};
     use iroh::{protocol::ProtocolHandler, Endpoint};
     use irpc::{
-        channel::{oneshot, spsc},
+        channel::{oneshot, mpsc},
         rpc::Handler,
         rpc_requests, Client, LocalSender, Service, WithChannels,
     };
@@ -97,7 +97,7 @@ mod storage {
         Get(Get),
         #[rpc(tx=oneshot::Sender<()>)]
         Set(Set),
-        #[rpc(tx=spsc::Sender<String>)]
+        #[rpc(tx=mpsc::Sender<String>)]
         List(List),
     }
 
@@ -190,7 +190,7 @@ mod storage {
             self.inner.rpc(Get { key }).await
         }
 
-        pub async fn list(&self) -> irpc::Result<spsc::Receiver<String>> {
+        pub async fn list(&self) -> irpc::Result<mpsc::Receiver<String>> {
             self.inner.server_streaming(List, 10).await
         }
 
