@@ -317,7 +317,7 @@ pub mod channel {
     ///
     /// For the rpc case, the send side can not be cloned, hence spsc instead of mpsc.
     pub mod spsc {
-        use std::{fmt::Debug, future::Future, io, pin::Pin};
+        use std::{fmt::Debug, future::Future, io, pin::Pin, sync::Arc};
 
         use super::{RecvError, SendError};
         use crate::RpcMessage;
@@ -332,15 +332,11 @@ pub mod channel {
 
         /// Single producer, single consumer sender.
         ///
-        /// For the local case, this wraps a tokio::sync::mpsc::Sender. However,
-        /// due to the fact that a stream to a remote service can not be cloned,
-        /// this can also not be cloned.
-        ///
-        /// This forces you to use senders in a linear way, passing out references
-        /// to the sender to other tasks instead of cloning it.
+        /// For the local case, this wraps a tokio::sync::mpsc::Sender.
+        #[derive(Clone)]
         pub enum Sender<T> {
             Tokio(tokio::sync::mpsc::Sender<T>),
-            Boxed(Box<dyn DynSender<T>>),
+            Boxed(Arc<dyn DynSender<T>>),
         }
 
         impl<T> Sender<T> {
@@ -354,7 +350,7 @@ pub mod channel {
                 }
             }
 
-            pub async fn closed(&mut self)
+            pub async fn closed(&self)
             where
                 T: RpcMessage,
             {
@@ -369,7 +365,7 @@ pub mod channel {
             where
                 T: RpcMessage,
             {
-                futures_util::sink::unfold(self, |mut sink, value| async move {
+                futures_util::sink::unfold(self, |sink, value| async move {
                     sink.send(value).await?;
                     Ok(sink)
                 })
@@ -393,16 +389,16 @@ pub mod channel {
             }
         }
 
-        /// A sender that can be wrapped in a `Box<dyn DynSender<T>>`.
+        /// A sender that can be wrapped in a `Arc<dyn DynSender<T>>`.
         pub trait DynSender<T>: Debug + Send + Sync + 'static {
             /// Send a message.
             ///
             /// For the remote case, if the message can not be completely sent,
             /// this must return an error and disable the channel.
             fn send(
-                &mut self,
+                &self,
                 value: T,
-            ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+            ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + Sync + '_>>;
 
             /// Try to send a message, returning as fast as possible if sending
             /// is not currently possible.
@@ -410,12 +406,12 @@ pub mod channel {
             /// For the remote case, it must be guaranteed that the message is
             /// either completely sent or not at all.
             fn try_send(
-                &mut self,
+                &self,
                 value: T,
-            ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>>;
+            ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + Sync + '_>>;
 
             /// Await the sender close
-            fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+            fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>>;
 
             /// True if this is a remote sender
             fn is_rpc(&self) -> bool;
@@ -425,7 +421,14 @@ pub mod channel {
         pub trait DynReceiver<T>: Debug + Send + Sync + 'static {
             fn recv(
                 &mut self,
-            ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<T>, RecvError>> + Send + '_>>;
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = std::result::Result<Option<T>, RecvError>>
+                        + Send
+                        + Sync
+                        + '_,
+                >,
+            >;
         }
 
         impl<T> Debug for Sender<T> {
@@ -443,7 +446,14 @@ pub mod channel {
 
         impl<T: RpcMessage> Sender<T> {
             /// Send a message and yield until either it is sent or an error occurs.
-            pub async fn send(&mut self, value: T) -> std::result::Result<(), SendError> {
+            ///
+            /// ## Cancellation safety
+            ///
+            /// If the future is dropped before completion, and if this is a remote sender,
+            /// then the sender will be closed and further sends will return an [`io::Error`]
+            /// with [`io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+            /// future until completion if you want to reuse the sender or any clone afterwards.
+            pub async fn send(&self, value: T) -> std::result::Result<(), SendError> {
                 match self {
                     Sender::Tokio(tx) => {
                         tx.send(value).await.map_err(|_| SendError::ReceiverClosed)
@@ -466,6 +476,13 @@ pub mod channel {
             /// all.
             ///
             /// Returns true if the message was sent.
+            ///
+            /// ## Cancellation safety
+            ///
+            /// If the future is dropped before completion, and if this is a remote sender,
+            /// then the sender will be closed and further sends will return an [`io::Error`]
+            /// with [`io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+            /// future until completion if you want to reuse the sender or any clone afterwards.
             pub async fn try_send(&mut self, value: T) -> std::result::Result<bool, SendError> {
                 match self {
                     Sender::Tokio(tx) => match tx.try_send(value) {
@@ -505,7 +522,7 @@ pub mod channel {
             #[cfg(feature = "stream")]
             pub fn into_stream(
                 self,
-            ) -> impl n0_future::Stream<Item = std::result::Result<T, RecvError>> + Send + 'static
+            ) -> impl n0_future::Stream<Item = std::result::Result<T, RecvError>> + Send + Sync + 'static
             {
                 n0_future::stream::unfold(self, |mut recv| async move {
                     recv.recv().await.transpose().map(|msg| (msg, recv))
@@ -1089,7 +1106,9 @@ pub mod rpc {
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod rpc {
     //! Module for cross-process RPC using [`quinn`].
-    use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::Arc};
+    use std::{
+        fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
+    };
 
     use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
     use quinn::ConnectionError;
@@ -1303,11 +1322,13 @@ pub mod rpc {
 
     impl<T: RpcMessage> From<quinn::SendStream> for spsc::Sender<T> {
         fn from(write: quinn::SendStream) -> Self {
-            spsc::Sender::Boxed(Box::new(QuinnSender {
-                send: write,
-                buffer: SmallVec::new(),
-                _marker: PhantomData,
-            }))
+            spsc::Sender::Boxed(Arc::new(QuinnSender(tokio::sync::Mutex::new(
+                QuinnSenderState::Open(QuinnSenderInner {
+                    send: write,
+                    buffer: SmallVec::new(),
+                    _marker: PhantomData,
+                }),
+            ))))
         }
     }
 
@@ -1325,8 +1346,9 @@ pub mod rpc {
     impl<T: RpcMessage> DynReceiver<T> for QuinnReceiver<T> {
         fn recv(
             &mut self,
-        ) -> Pin<Box<dyn Future<Output = std::result::Result<Option<T>, RecvError>> + Send + '_>>
-        {
+        ) -> Pin<
+            Box<dyn Future<Output = std::result::Result<Option<T>, RecvError>> + Send + Sync + '_>,
+        > {
             Box::pin(async {
                 let read = &mut self.recv;
                 let Some(size) = read.read_varint_u64().await? else {
@@ -1347,20 +1369,17 @@ pub mod rpc {
         fn drop(&mut self) {}
     }
 
-    struct QuinnSender<T> {
+    struct QuinnSenderInner<T> {
         send: quinn::SendStream,
         buffer: SmallVec<[u8; 128]>,
         _marker: std::marker::PhantomData<T>,
     }
 
-    impl<T> Debug for QuinnSender<T> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("QuinnSender").finish()
-        }
-    }
-
-    impl<T: RpcMessage> DynSender<T> for QuinnSender<T> {
-        fn send(&mut self, value: T) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+    impl<T: RpcMessage> QuinnSenderInner<T> {
+        fn send(
+            &mut self,
+            value: T,
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + Sync + '_>> {
             Box::pin(async {
                 let value = value;
                 self.buffer.clear();
@@ -1374,7 +1393,7 @@ pub mod rpc {
         fn try_send(
             &mut self,
             value: T,
-        ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + Sync + '_>> {
             Box::pin(async {
                 // todo: move the non-async part out of the box. Will require a new return type.
                 let value = value;
@@ -1390,20 +1409,81 @@ pub mod rpc {
             })
         }
 
-        fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
             Box::pin(async move {
                 self.send.stopped().await.ok();
+            })
+        }
+    }
+
+    #[derive(Default)]
+    enum QuinnSenderState<T> {
+        Open(QuinnSenderInner<T>),
+        #[default]
+        Closed,
+    }
+
+    struct QuinnSender<T>(tokio::sync::Mutex<QuinnSenderState<T>>);
+
+    impl<T> Debug for QuinnSender<T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("QuinnSender").finish()
+        }
+    }
+
+    impl<T: RpcMessage> DynSender<T> for QuinnSender<T> {
+        fn send(
+            &self,
+            value: T,
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + Sync + '_>> {
+            Box::pin(async {
+                let mut guard = self.0.lock().await;
+                let sender = std::mem::take(guard.deref_mut());
+                match sender {
+                    QuinnSenderState::Open(mut sender) => {
+                        let res = sender.send(value).await;
+                        if res.is_ok() {
+                            *guard = QuinnSenderState::Open(sender);
+                        }
+                        res
+                    }
+                    QuinnSenderState::Closed => Err(io::ErrorKind::BrokenPipe.into()),
+                }
+            })
+        }
+
+        fn try_send(
+            &self,
+            value: T,
+        ) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + Sync + '_>> {
+            Box::pin(async {
+                let mut guard = self.0.lock().await;
+                let sender = std::mem::take(guard.deref_mut());
+                match sender {
+                    QuinnSenderState::Open(mut sender) => {
+                        let res = sender.try_send(value).await;
+                        if res.is_ok() {
+                            *guard = QuinnSenderState::Open(sender);
+                        }
+                        res
+                    }
+                    QuinnSenderState::Closed => Err(io::ErrorKind::BrokenPipe.into()),
+                }
+            })
+        }
+
+        fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
+            Box::pin(async {
+                let mut guard = self.0.lock().await;
+                match guard.deref_mut() {
+                    QuinnSenderState::Open(sender) => sender.closed().await,
+                    QuinnSenderState::Closed => {}
+                }
             })
         }
 
         fn is_rpc(&self) -> bool {
             true
-        }
-    }
-
-    impl<T> Drop for QuinnSender<T> {
-        fn drop(&mut self) {
-            self.send.finish().ok();
         }
     }
 
