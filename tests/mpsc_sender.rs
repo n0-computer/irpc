@@ -5,7 +5,7 @@ use std::{
 };
 
 use irpc::{
-    channel::{spsc, SendError},
+    channel::{mpsc, SendError},
     util::{make_client_endpoint, make_server_endpoint},
 };
 use quinn::Endpoint;
@@ -36,7 +36,7 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
     });
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (send, _) = conn.open_bi().await?;
-    let send1 = spsc::Sender::<Vec<u8>>::from(send);
+    let send1 = mpsc::Sender::<Vec<u8>>::from(send);
     let send2 = send1.clone();
     let send3 = send1.clone();
     let second_client = tokio::spawn(async move {
@@ -82,7 +82,7 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
     });
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (send, _) = conn.open_bi().await?;
-    let send1 = spsc::Sender::<Vec<u8>>::from(send);
+    let send1 = mpsc::Sender::<Vec<u8>>::from(send);
     let send2 = send1.clone();
     let send3 = send1.clone();
     let second_client = tokio::spawn(async move {
