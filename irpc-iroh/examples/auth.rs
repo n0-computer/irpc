@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use iroh::{protocol::Router, Endpoint};
+use n0_watcher::Watcher;
 
 use self::storage::{StorageClient, StorageServer};
 
@@ -23,7 +24,7 @@ async fn remote() -> Result<()> {
         let router = Router::builder(endpoint.clone())
             .accept(StorageServer::ALPN, server.clone())
             .spawn();
-        let addr = endpoint.node_addr().await?;
+        let addr = endpoint.node_addr().initialized().await?;
         (router, addr)
     };
 
@@ -68,7 +69,7 @@ mod storage {
     use anyhow::Result;
     use iroh::{
         endpoint::{Connection, RecvStream, SendStream},
-        protocol::ProtocolHandler,
+        protocol::{AcceptError, ProtocolHandler},
         Endpoint,
     };
     use irpc::{
@@ -135,7 +136,10 @@ mod storage {
     }
 
     impl ProtocolHandler for StorageServer {
-        fn accept(&self, conn: Connection) -> n0_future::future::Boxed<Result<()>> {
+        fn accept(
+            &self,
+            conn: Connection,
+        ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
             let this = self.clone();
             Box::pin(async move {
                 let mut authed = false;

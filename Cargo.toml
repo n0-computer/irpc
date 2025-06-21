@@ -81,7 +81,7 @@ rustdoc-args = ["--cfg", "quicrpc_docsrs"]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(quicrpc_docsrs)"] }
 
 [workspace.dependencies]
-anyhow = { version = "1.0.66" }
+anyhow = { version = "1.0.98" }
 tokio = { version = "1.44", default-features = false }
 postcard = { version = "1.1.1", default-features = false }
 serde = { version = "1", default-features = false }
@@ -89,5 +89,8 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.1.2", default-features = false }
 tracing-subscriber = { version = "0.3.19" }
 iroh = { version = "0.35" }
-quinn = { package = "iroh-quinn", version = "0.13.0", default-features = false }
+quinn = { package = "iroh-quinn", version = "0.14.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
+
+[patch.crates-io]
+iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }

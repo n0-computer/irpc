@@ -5,7 +5,7 @@ use std::{
 
 use iroh::{
     endpoint::{Connection, ConnectionError, RecvStream, SendStream},
-    protocol::ProtocolHandler,
+    protocol::{AcceptError, ProtocolHandler},
 };
 use irpc::{
     rpc::{Handler, RemoteConnection},
@@ -111,12 +111,15 @@ impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
 }
 
 impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
-    fn accept(&self, connection: Connection) -> n0_future::future::Boxed<anyhow::Result<()>> {
+    fn accept(
+        &self,
+        connection: Connection,
+    ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
         let handler = self.handler.clone();
         let request_id = self
             .request_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let fut = handle_connection(connection, handler).map_err(anyhow::Error::from);
+        let fut = handle_connection(connection, handler).map_err(AcceptError::from_err);
         let span = trace_span!("rpc", id = request_id);
         Box::pin(fut.instrument(span))
     }
