@@ -1462,7 +1462,7 @@ dependencies = [
  "instant",
  "iroh-base",
  "iroh-metrics",
- "iroh-quinn",
+ "iroh-quinn 0.13.0",
  "iroh-quinn-proto",
  "iroh-quinn-udp",
  "iroh-relay",
@@ -1559,6 +1559,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "iroh-quinn"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cde160ebee7aabede6ae887460cd303c8b809054224815addf1469d54a6fcf7"
+dependencies = [
+ "bytes",
+ "cfg_aliases",
+ "iroh-quinn-proto",
+ "iroh-quinn-udp",
+ "pin-project-lite",
+ "rustc-hash",
+ "rustls",
+ "socket2",
+ "thiserror 2.0.12",
+ "tokio",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
 name = "iroh-quinn-proto"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1611,7 +1631,7 @@ dependencies = [
  "hyper-util",
  "iroh-base",
  "iroh-metrics",
- "iroh-quinn",
+ "iroh-quinn 0.13.0",
  "iroh-quinn-proto",
  "lru 0.12.5",
  "n0-future",
@@ -1647,7 +1667,7 @@ dependencies = [
  "derive_more 2.0.1",
  "futures-buffered",
  "futures-util",
- "iroh-quinn",
+ "iroh-quinn 0.14.0",
  "irpc-derive",
  "n0-future",
  "postcard",
