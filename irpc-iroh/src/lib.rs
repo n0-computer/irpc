@@ -1,5 +1,8 @@
 use std::{
-    fmt, future::Future, io, sync::{atomic::AtomicU64, Arc}
+    fmt,
+    future::Future,
+    io,
+    sync::{atomic::AtomicU64, Arc},
 };
 
 use iroh::{
@@ -110,7 +113,10 @@ impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
 }
 
 impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
-    fn accept(&self, connection: Connection) -> impl Future<Output = Result<(), AcceptError>> + std::marker::Send {
+    fn accept(
+        &self,
+        connection: Connection,
+    ) -> impl Future<Output = Result<(), AcceptError>> + std::marker::Send {
         let handler = self.handler.clone();
         let request_id = self
             .request_id
