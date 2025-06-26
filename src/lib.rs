@@ -1371,11 +1371,16 @@ pub mod rpc {
                         Ok(size) => size,
                         Err(e) => {
                             writer.reset(ERROR_CODE_INVALID_POSTCARD.into()).ok();
-                            return Err(SendError::Io(io::Error::new(io::ErrorKind::InvalidData, e)));
+                            return Err(SendError::Io(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                e,
+                            )));
                         }
                     };
                     if size as u64 > MAX_MESSAGE_SIZE {
-                        writer.reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
+                        writer
+                            .reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into())
+                            .ok();
                         return Err(SendError::MaxMessageSizeExceeded);
                     }
                     // write via a small buffer to avoid allocation for small values
@@ -1458,8 +1463,17 @@ pub mod rpc {
             value: T,
         ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + Sync + '_>> {
             Box::pin(async {
-                if postcard::experimental::serialized_size(&value)? as u64 > MAX_MESSAGE_SIZE {
-                    self.send.reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
+                let size = match postcard::experimental::serialized_size(&value) {
+                    Ok(size) => size,
+                    Err(e) => {
+                        self.send.reset(ERROR_CODE_INVALID_POSTCARD.into()).ok();
+                        return Err(SendError::Io(io::Error::new(io::ErrorKind::InvalidData, e)));
+                    }
+                };
+                if size as u64 > MAX_MESSAGE_SIZE {
+                    self.send
+                        .reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into())
+                        .ok();
                     return Err(SendError::MaxMessageSizeExceeded);
                 }
                 let value = value;
