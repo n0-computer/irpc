@@ -1142,6 +1142,9 @@ pub mod rpc {
     /// Error code on streams if the max message size was exceeded.
     const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
 
+    /// Error code on streams if the sender tried to send an message that could not be postcard serialized.
+    const ERROR_CODE_INVALID_POSTCARD: u32 = 2;
+
     /// Error that can occur when writing the initial message when doing a
     /// cross-process RPC.
     #[derive(Debug, thiserror::Error)]
@@ -1364,12 +1367,23 @@ pub mod rpc {
         fn from(mut writer: quinn::SendStream) -> Self {
             oneshot::Sender::Boxed(Box::new(move |value| {
                 Box::pin(async move {
-                    if postcard::experimental::serialized_size(&value)? as u64 > MAX_MESSAGE_SIZE {
+                    let size = match postcard::experimental::serialized_size(&value) {
+                        Ok(size) => size,
+                        Err(e) => {
+                            writer.reset(ERROR_CODE_INVALID_POSTCARD.into()).ok();
+                            return Err(SendError::Io(io::Error::new(io::ErrorKind::InvalidData, e)));
+                        }
+                    };
+                    if size as u64 > MAX_MESSAGE_SIZE {
+                        writer.reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
                         return Err(SendError::MaxMessageSizeExceeded);
                     }
                     // write via a small buffer to avoid allocation for small values
                     let mut buf = SmallVec::<[u8; 128]>::new();
-                    buf.write_length_prefixed(value)?;
+                    if let Err(e) = buf.write_length_prefixed(value) {
+                        writer.reset(ERROR_CODE_INVALID_POSTCARD.into()).ok();
+                        return Err(e.into());
+                    }
                     writer.write_all(&buf).await?;
                     Ok(())
                 })
@@ -1445,11 +1459,15 @@ pub mod rpc {
         ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + Sync + '_>> {
             Box::pin(async {
                 if postcard::experimental::serialized_size(&value)? as u64 > MAX_MESSAGE_SIZE {
+                    self.send.reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
                     return Err(SendError::MaxMessageSizeExceeded);
                 }
                 let value = value;
                 self.buffer.clear();
-                self.buffer.write_length_prefixed(value)?;
+                if let Err(e) = self.buffer.write_length_prefixed(value) {
+                    self.send.reset(ERROR_CODE_INVALID_POSTCARD.into()).ok();
+                    return Err(e.into());
+                }
                 self.send.write_all(&self.buffer).await?;
                 self.buffer.clear();
                 Ok(())

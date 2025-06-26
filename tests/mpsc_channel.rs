@@ -1,16 +1,16 @@
 use std::{
-    io::ErrorKind,
+    io::{self, ErrorKind},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     time::Duration,
 };
 
 use irpc::{
-    channel::{mpsc, SendError},
-    util::{make_client_endpoint, make_server_endpoint},
+    channel::{mpsc, RecvError, SendError},
+    util::{make_client_endpoint, make_server_endpoint, AsyncWriteVarintExt},
 };
 use quinn::Endpoint;
 use testresult::TestResult;
-use tokio::time::timeout;
+use tokio::{task::JoinHandle, time::timeout};
 
 fn create_connected_endpoints() -> TestResult<(Endpoint, Endpoint, SocketAddr)> {
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into();
@@ -113,5 +113,57 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
     server.await??;
     second_client.await?;
     third_client.await?;
+    Ok(())
+}
+
+/// Checks that the max message size is enforced on the sender side and that errors are propagated to the receiver side.
+#[tokio::test]
+async fn mpsc_max_message_size_send() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server: JoinHandle<Result<(), RecvError>> = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.map_err(|e| RecvError::Io(e.into()))?;
+        let (_, recv) = conn.accept_bi().await.map_err(|e| RecvError::Io(e.into()))?;
+        let mut recv = mpsc::Receiver::<Vec<u8>>::from(recv);
+        while let Some(_) = recv.recv().await? {}
+        return Err(RecvError::Io(io::ErrorKind::UnexpectedEof.into()));
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    // this one should work!
+    send.send(vec![0u8; 1024 * 1024]).await?;
+    // this one should fail!
+    let Err(cause) = send.send(vec![0u8; 1024 * 1024 * 32]).await else {
+        panic!("client should have failed due to max message size");
+    };
+    assert!(matches!(cause, SendError::MaxMessageSizeExceeded));
+    let Err(cause) = server.await? else {
+        panic!("server should have failed due to max message size");
+    };
+    assert!(matches!(cause, RecvError::Io(e) if e.kind() == ErrorKind::ConnectionReset));
+    Ok(())
+}
+
+/// Checks that the max message size is enforced on receiver side.
+#[tokio::test]
+async fn mpsc_max_message_size_recv() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server: JoinHandle<Result<(), RecvError>> = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.map_err(|e| RecvError::Io(e.into()))?;
+        let (_, recv) = conn.accept_bi().await.map_err(|e| RecvError::Io(e.into()))?;
+        let mut recv = mpsc::Receiver::<Vec<u8>>::from(recv);
+        while let Some(_) = recv.recv().await? {}
+        return Err(RecvError::Io(io::ErrorKind::UnexpectedEof.into()));
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // this one should work!
+    send.write_length_prefixed(vec![0u8; 1024 * 1024]).await?;
+    // this one should fail on receive!
+    send.write_length_prefixed(vec![0u8; 1024 * 1024 * 32]).await.ok();
+    let Err(cause) = server.await? else {
+        panic!("server should have failed due to max message size");
+    };
+    assert!(matches!(cause, RecvError::MaxMessageSizeExceeded));
     Ok(())
 }
