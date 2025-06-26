@@ -103,6 +103,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-polyfill"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cf2bce30dfe09ef0bfaef228b9d414faaf7e563035494d7fe092dba54b300f4"
+dependencies = [
+ "critical-section",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -928,6 +937,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0c35f58762feb77d74ebe43bdbc3210f09be9fe6742234d573bacc26ed92b67"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -942,6 +960,20 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+]
+
+[[package]]
+name = "heapless"
+version = "0.7.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
+dependencies = [
+ "atomic-polyfill",
+ "hash32",
+ "rustc_version",
+ "serde",
+ "spin",
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -1395,11 +1427,11 @@ checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
 
 [[package]]
 name = "iroh"
-version = "0.35.0"
-source = "git+https://github.com/n0-computer/iroh.git?branch=main#aebbc727ffbb72d738f8c76b489e034fdd6a5cc8"
+version = "0.90.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9436f319c2d24bca1b28a2fab4477c8d2ac795ab2d3aeda142d207b38ec068f4"
 dependencies = [
  "aead",
- "anyhow",
  "backon",
  "bytes",
  "cfg_aliases",
@@ -1426,7 +1458,7 @@ dependencies = [
  "n0-watcher",
  "nested_enum_utils",
  "netdev",
- "netwatch 0.6.0",
+ "netwatch",
  "pin-project",
  "pkarr",
  "portmapper",
@@ -1456,8 +1488,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-base"
-version = "0.35.0"
-source = "git+https://github.com/n0-computer/iroh.git?branch=main#aebbc727ffbb72d738f8c76b489e034fdd6a5cc8"
+version = "0.90.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e0090050c4055b21e61cbcb856f043a2b24ad22c65d76bab91f121b4c7bece3"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1473,12 +1506,13 @@ dependencies = [
 
 [[package]]
 name = "iroh-metrics"
-version = "0.34.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f70466f14caff7420a14373676947e25e2917af6a5b1bec45825beb2bf1eb6a7"
+checksum = "c8922c169f1b84d39d325c02ef1bbe1419d4de6e35f0403462b3c7e60cc19634"
 dependencies = [
  "iroh-metrics-derive",
  "itoa",
+ "postcard",
  "serde",
  "snafu",
  "tracing",
@@ -1552,8 +1586,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "0.35.0"
-source = "git+https://github.com/n0-computer/iroh.git?branch=main#aebbc727ffbb72d738f8c76b489e034fdd6a5cc8"
+version = "0.90.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3f3cdbdaebc92835452e4e1d0d4b36118206b0950089b7bc3654f13e843475b"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1586,7 +1621,6 @@ dependencies = [
  "sha1",
  "snafu",
  "strum",
- "stun-rs",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -1959,39 +1993,6 @@ dependencies = [
  "libc",
  "log",
  "tokio",
-]
-
-[[package]]
-name = "netwatch"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67eeaa5f7505c93c5a9b35ba84fd21fb8aa3f24678c76acfe8716af7862fb07a"
-dependencies = [
- "atomic-waker",
- "bytes",
- "cfg_aliases",
- "derive_more 1.0.0",
- "iroh-quinn-udp",
- "js-sys",
- "libc",
- "n0-future",
- "nested_enum_utils",
- "netdev",
- "netlink-packet-core",
- "netlink-packet-route 0.23.0",
- "netlink-proto",
- "netlink-sys",
- "serde",
- "snafu",
- "socket2",
- "time",
- "tokio",
- "tokio-util",
- "tracing",
- "web-sys",
- "windows 0.59.0",
- "windows-result 0.3.2",
- "wmi",
 ]
 
 [[package]]
@@ -2376,9 +2377,9 @@ checksum = "350e9b48cbc6b0e028b0473b114454c6316e57336ee184ceab6e53f72c178b3e"
 
 [[package]]
 name = "portmapper"
-version = "0.5.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d6db66007eac4a0ec8331d0d20c734bd64f6445d64bbaf0d0a27fea7a054e36"
+checksum = "2d82975dc029c00d566f4e0f61f567d31f0297a290cb5416b5580dd8b4b54ade"
 dependencies = [
  "base64",
  "bytes",
@@ -2390,7 +2391,7 @@ dependencies = [
  "iroh-metrics",
  "libc",
  "nested_enum_utils",
- "netwatch 0.5.0",
+ "netwatch",
  "num_enum",
  "rand 0.8.5",
  "serde",
@@ -2414,6 +2415,7 @@ dependencies = [
  "cobs",
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
+ "heapless",
  "postcard-derive",
  "serde",
 ]
@@ -3083,6 +3085,9 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "spki"
