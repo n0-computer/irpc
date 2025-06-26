@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "irpc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "derive_more 2.0.1",
@@ -1655,6 +1655,7 @@ dependencies = [
  "rustls",
  "serde",
  "smallvec",
+ "testresult",
  "thiserror 2.0.12",
  "thousands",
  "tokio",
@@ -1666,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "irpc-derive"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1675,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "irpc-iroh"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.2",
@@ -3299,6 +3300,12 @@ checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
 ]
+
+[[package]]
+name = "testresult"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "614b328ff036a4ef882c61570f72918f7e9c5bee1da33f8e7f91e01daee7e56c"
 
 [[package]]
 name = "thiserror"

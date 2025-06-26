@@ -1,6 +1,6 @@
 [package]
 name = "irpc"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>", "n0 team"]
 keywords = ["api", "protocol", "network", "rpc"]
@@ -42,7 +42,7 @@ futures-buffered ={ version = "0.2.9", optional = true }
 n0-future = { workspace = true }
 futures-util = { workspace = true, optional = true }
 # for the derive reexport/feature
-irpc-derive = { version = "0.3.0", path = "./irpc-derive", optional = true }
+irpc-derive = { version = "0.4.0", path = "./irpc-derive", optional = true }
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 quinn = { workspace = true, optional = true, features = ["runtime-tokio"] }
@@ -57,6 +57,7 @@ tokio = { workspace = true, features = ["full"] }
 thousands = "0.2.0"
 # macro tests
 trybuild = "1.0.104"
+testresult = "0.4.1"
 
 [features]
 # enable the remote transport

@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::bail;
 use irpc::{
-    channel::{none::NoReceiver, oneshot, spsc},
+    channel::{mpsc, none::NoReceiver, oneshot},
     rpc::{listen, Handler},
     util::{make_client_endpoint, make_server_endpoint},
     Channels, Client, LocalSender, Request, Service, WithChannels,
@@ -36,7 +36,7 @@ struct List;
 
 impl Channels<StorageService> for List {
     type Rx = NoReceiver;
-    type Tx = spsc::Sender<String>;
+    type Tx = mpsc::Sender<String>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,7 +104,7 @@ impl StorageActor {
             }
             StorageMessage::List(list) => {
                 info!("list {:?}", list);
-                let WithChannels { mut tx, .. } = list;
+                let WithChannels { tx, .. } = list;
                 for (key, value) in &self.state {
                     if tx.send(format!("{key}={value}")).await.is_err() {
                         break;
@@ -157,11 +157,11 @@ impl StorageApi {
         }
     }
 
-    pub async fn list(&self) -> anyhow::Result<spsc::Receiver<String>> {
+    pub async fn list(&self) -> anyhow::Result<mpsc::Receiver<String>> {
         let msg = List;
         match self.inner.request().await? {
             Request::Local(request) => {
-                let (tx, rx) = spsc::channel(10);
+                let (tx, rx) = mpsc::channel(10);
                 request.send((msg, tx)).await?;
                 Ok(rx)
             }

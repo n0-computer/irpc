@@ -72,7 +72,7 @@ mod storage {
         Endpoint,
     };
     use irpc::{
-        channel::{oneshot, spsc},
+        channel::{mpsc, oneshot},
         Client, Service, WithChannels,
     };
     // Import the macro
@@ -122,9 +122,9 @@ mod storage {
         Get(Get),
         #[rpc(tx=oneshot::Sender<()>)]
         Set(Set),
-        #[rpc(tx=oneshot::Sender<u64>, rx=spsc::Receiver<(String, String)>)]
+        #[rpc(tx=oneshot::Sender<u64>, rx=mpsc::Receiver<(String, String)>)]
         SetMany(SetMany),
-        #[rpc(tx=spsc::Sender<String>)]
+        #[rpc(tx=mpsc::Sender<String>)]
         List(List),
     }
 
@@ -218,7 +218,7 @@ mod storage {
                 }
                 StorageMessage::List(list) => {
                     info!("list {:?}", list);
-                    let WithChannels { mut tx, .. } = list;
+                    let WithChannels { tx, .. } = list;
                     let values = {
                         let state = self.state.lock().unwrap();
                         // TODO: use async lock to not clone here.
@@ -265,7 +265,7 @@ mod storage {
             self.inner.rpc(Get { key }).await
         }
 
-        pub async fn list(&self) -> Result<spsc::Receiver<String>, irpc::Error> {
+        pub async fn list(&self) -> Result<mpsc::Receiver<String>, irpc::Error> {
             self.inner.server_streaming(List, 10).await
         }
 

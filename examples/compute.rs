@@ -7,7 +7,7 @@ use std::{
 use anyhow::bail;
 use futures_buffered::BufferedStreamExt;
 use irpc::{
-    channel::{oneshot, spsc},
+    channel::{mpsc, oneshot},
     rpc::{listen, Handler},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
@@ -61,11 +61,11 @@ enum ComputeRequest {
 enum ComputeProtocol {
     #[rpc(tx=oneshot::Sender<u128>)]
     Sqr(Sqr),
-    #[rpc(rx=spsc::Receiver<i64>, tx=oneshot::Sender<i64>)]
+    #[rpc(rx=mpsc::Receiver<i64>, tx=oneshot::Sender<i64>)]
     Sum(Sum),
-    #[rpc(tx=spsc::Sender<u64>)]
+    #[rpc(tx=mpsc::Sender<u64>)]
     Fibonacci(Fibonacci),
-    #[rpc(rx=spsc::Receiver<u64>, tx=spsc::Sender<u64>)]
+    #[rpc(rx=mpsc::Receiver<u64>, tx=mpsc::Sender<u64>)]
     Multiply(Multiply),
 }
 
@@ -123,7 +123,7 @@ impl ComputeActor {
                     tx, inner, span, ..
                 } = fib;
                 let _entered = span.enter();
-                let mut sender = tx;
+                let sender = tx;
                 let mut a = 0u64;
                 let mut b = 1u64;
                 while a <= inner.max {
@@ -144,7 +144,7 @@ impl ComputeActor {
                 } = mult;
                 let _entered = span.enter();
                 let mut receiver = rx;
-                let mut sender = tx;
+                let sender = tx;
                 let multiplier = inner.initial;
                 while let Some(num) = receiver.recv().await? {
                     sender.send(multiplier * num).await?;
@@ -200,11 +200,11 @@ impl ComputeApi {
         }
     }
 
-    pub async fn sum(&self) -> anyhow::Result<(spsc::Sender<i64>, oneshot::Receiver<i64>)> {
+    pub async fn sum(&self) -> anyhow::Result<(mpsc::Sender<i64>, oneshot::Receiver<i64>)> {
         let msg = Sum;
         match self.inner.request().await? {
             Request::Local(request) => {
-                let (num_tx, num_rx) = spsc::channel(10);
+                let (num_tx, num_rx) = mpsc::channel(10);
                 let (sum_tx, sum_rx) = oneshot::channel();
                 request.send((msg, sum_tx, num_rx)).await?;
                 Ok((num_tx, sum_rx))
@@ -216,11 +216,11 @@ impl ComputeApi {
         }
     }
 
-    pub async fn fibonacci(&self, max: u64) -> anyhow::Result<spsc::Receiver<u64>> {
+    pub async fn fibonacci(&self, max: u64) -> anyhow::Result<mpsc::Receiver<u64>> {
         let msg = Fibonacci { max };
         match self.inner.request().await? {
             Request::Local(request) => {
-                let (tx, rx) = spsc::channel(128);
+                let (tx, rx) = mpsc::channel(128);
                 request.send((msg, tx)).await?;
                 Ok(rx)
             }
@@ -234,12 +234,12 @@ impl ComputeApi {
     pub async fn multiply(
         &self,
         initial: u64,
-    ) -> anyhow::Result<(spsc::Sender<u64>, spsc::Receiver<u64>)> {
+    ) -> anyhow::Result<(mpsc::Sender<u64>, mpsc::Receiver<u64>)> {
         let msg = Multiply { initial };
         match self.inner.request().await? {
             Request::Local(request) => {
-                let (in_tx, in_rx) = spsc::channel(128);
-                let (out_tx, out_rx) = spsc::channel(128);
+                let (in_tx, in_rx) = mpsc::channel(128);
+                let (out_tx, out_rx) = mpsc::channel(128);
                 request.send((msg, out_tx, in_rx)).await?;
                 Ok((in_tx, out_rx))
             }
@@ -260,7 +260,7 @@ async fn local() -> anyhow::Result<()> {
     println!("Local: 5^2 = {}", rx.await?);
 
     // Test Sum
-    let (mut tx, rx) = api.sum().await?;
+    let (tx, rx) = api.sum().await?;
     tx.send(1).await?;
     tx.send(2).await?;
     tx.send(3).await?;
@@ -276,7 +276,7 @@ async fn local() -> anyhow::Result<()> {
     println!();
 
     // Test Multiply
-    let (mut in_tx, mut out_rx) = api.multiply(3).await?;
+    let (in_tx, mut out_rx) = api.multiply(3).await?;
     in_tx.send(2).await?;
     in_tx.send(4).await?;
     in_tx.send(6).await?;
@@ -311,7 +311,7 @@ async fn remote() -> anyhow::Result<()> {
     println!("Remote: 4^2 = {}", rx.await?);
 
     // Test Sum
-    let (mut tx, rx) = api.sum().await?;
+    let (tx, rx) = api.sum().await?;
     tx.send(4).await?;
     tx.send(5).await?;
     tx.send(6).await?;
@@ -327,7 +327,7 @@ async fn remote() -> anyhow::Result<()> {
     println!();
 
     // Test Multiply
-    let (mut in_tx, mut out_rx) = api.multiply(5).await?;
+    let (in_tx, mut out_rx) = api.multiply(5).await?;
     in_tx.send(1).await?;
     in_tx.send(2).await?;
     in_tx.send(3).await?;
@@ -380,7 +380,7 @@ async fn bench(api: ComputeApi, n: u64) -> anyhow::Result<()> {
     // Sequential streaming (using Multiply instead of MultiplyUpdate)
     {
         let t0 = std::time::Instant::now();
-        let (mut send, mut recv) = api.multiply(2).await?;
+        let (send, mut recv) = api.multiply(2).await?;
         let handle = tokio::task::spawn(async move {
             for i in 0..n {
                 send.send(i).await?;
