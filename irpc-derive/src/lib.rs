@@ -128,7 +128,7 @@ fn generate_type_aliases(
     for (variant_name, inner_type) in variants {
         // Create a type name using the variant name + suffix
         // For example: Sum + "Msg" = SumMsg
-        let type_name = format!("{}{}", variant_name, suffix);
+        let type_name = format!("{variant_name}{suffix}");
         let type_ident = Ident::new(&type_name, variant_name.span());
 
         let alias = quote! {
@@ -392,7 +392,7 @@ impl Parse for MacroArgs {
                 _ => {
                     return Err(syn::Error::new(
                         param_name.span(),
-                        format!("Unknown parameter: {}", param_name),
+                        format!("Unknown parameter: {param_name}"),
                     ));
                 }
             }

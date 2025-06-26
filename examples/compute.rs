@@ -89,7 +89,7 @@ impl ComputeActor {
         while let Some(msg) = self.recv.recv().await {
             n0_future::task::spawn(async move {
                 if let Err(cause) = Self::handle(msg).await {
-                    eprintln!("Error: {}", cause);
+                    eprintln!("Error: {cause}");
                 }
             });
         }
@@ -271,7 +271,7 @@ async fn local() -> anyhow::Result<()> {
     let mut rx = api.fibonacci(10).await?;
     print!("Local: Fibonacci up to 10 = ");
     while let Some(num) = rx.recv().await? {
-        print!("{} ", num);
+        print!("{num} ");
     }
     println!();
 
@@ -283,7 +283,7 @@ async fn local() -> anyhow::Result<()> {
     drop(in_tx);
     print!("Local: 3 * [2, 4, 6] = ");
     while let Some(num) = out_rx.recv().await? {
-        print!("{} ", num);
+        print!("{num} ");
     }
     println!();
 
@@ -322,7 +322,7 @@ async fn remote() -> anyhow::Result<()> {
     let mut rx = api.fibonacci(20).await?;
     print!("Remote: Fibonacci up to 20 = ");
     while let Some(num) = rx.recv().await? {
-        print!("{} ", num);
+        print!("{num} ");
     }
     println!();
 
@@ -334,7 +334,7 @@ async fn remote() -> anyhow::Result<()> {
     drop(in_tx);
     print!("Remote: 5 * [1, 2, 3] = ");
     while let Some(num) = out_rx.recv().await? {
-        print!("{} ", num);
+        print!("{num} ");
     }
     println!();
 
