@@ -48,7 +48,7 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
     while send1.send(vec![1, 2, 3]).await.is_ok() {}
     match send1.send(vec![4, 5, 6]).await {
         Err(SendError::Io(e)) if e.kind() == ErrorKind::BrokenPipe => {}
-        e => panic!("Expected SendError::Io with kind BrokenPipe, got {:?}", e),
+        e => panic!("Expected SendError::Io with kind BrokenPipe, got {e:?}"),
     };
     // check that closed signal was received by the second sender
     second_client.await?;

@@ -196,9 +196,9 @@ async fn local() -> anyhow::Result<()> {
     let value = api.get("hello".to_string()).await?.await?;
     let mut list = api.list().await?;
     while let Some(value) = list.recv().await? {
-        println!("list value = {:?}", value);
+        println!("list value = {value:?}");
     }
-    println!("value = {:?}", value);
+    println!("value = {value:?}");
     Ok(())
 }
 
@@ -218,10 +218,10 @@ async fn remote() -> anyhow::Result<()> {
         .await?
         .await?;
     let value = api.get("hello".to_string()).await?.await?;
-    println!("value = {:?}", value);
+    println!("value = {value:?}");
     let mut list = api.list().await?;
     while let Some(value) = list.recv().await? {
-        println!("list value = {:?}", value);
+        println!("list value = {value:?}");
     }
     drop(handle);
     Ok(())

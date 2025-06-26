@@ -96,7 +96,7 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    println!("Server error: {:?}", cause);
+    println!("Server error: {cause:?}");
     assert!(matches!(cause, RecvError::Io(e) if e.kind() == ErrorKind::ConnectionReset));
     Ok(())
 }
@@ -113,7 +113,7 @@ async fn oneshot_serialize_error_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    println!("Server error: {:?}", cause);
+    println!("Server error: {cause:?}");
     assert!(matches!(cause, RecvError::Io(e) if e.kind() == ErrorKind::InvalidData));
     Ok(())
 }

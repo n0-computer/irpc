@@ -34,10 +34,10 @@ async fn remote() -> Result<()> {
     api.set("hello".to_string(), "world".to_string()).await?;
     api.set("goodbye".to_string(), "world".to_string()).await?;
     let value = api.get("hello".to_string()).await?;
-    println!("value = {:?}", value);
+    println!("value = {value:?}");
     let mut list = api.list().await?;
     while let Some(value) = list.recv().await? {
-        println!("list value = {:?}", value);
+        println!("list value = {value:?}");
     }
 
     // invalid authentication

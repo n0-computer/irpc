@@ -170,7 +170,7 @@ impl StorageApi {
 async fn client_demo(api: StorageApi) -> Result<()> {
     api.set("hello".to_string(), "world".to_string()).await?;
     let value = api.get("hello".to_string()).await?;
-    println!("get: hello = {:?}", value);
+    println!("get: hello = {value:?}");
 
     let (tx, rx) = api.set_many().await?;
     for i in 0..3 {
@@ -182,7 +182,7 @@ async fn client_demo(api: StorageApi) -> Result<()> {
 
     let mut list = api.list().await?;
     while let Some(value) = list.recv().await? {
-        println!("list value = {:?}", value);
+        println!("list value = {value:?}");
     }
     Ok(())
 }
