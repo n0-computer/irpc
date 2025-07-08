@@ -106,15 +106,6 @@ impl<T> RpcMessage for T where
 {
 }
 
-/// Marker trait for a service
-///
-/// This is usually implemented by a zero-sized struct.
-/// It has various bounds to make derives easier.
-///
-/// A service acts as a scope for defining the tx and rx channels for each
-/// message type, and provides some type safety when sending messages.
-pub trait Service: Send + Sync + Debug + Clone + 'static {}
-
 mod sealed {
     pub trait Sealed {}
 }
@@ -126,7 +117,7 @@ pub trait Sender: Debug + Sealed {}
 pub trait Receiver: Debug + Sealed {}
 
 /// Trait to specify channels for a message and service
-pub trait Channels<S: Service> {
+pub trait Channels {
     /// The sender type, can be either mpsc, oneshot or none
     type Tx: Sender;
     /// The receiver type, can be either mpsc, oneshot or none
@@ -231,7 +222,10 @@ pub mod channel {
             /// Local senders will never yield, but can fail if the receiver has been closed.
             pub async fn send(self, value: T) -> std::result::Result<(), SendError> {
                 match self {
-                    Sender::Tokio(tx) => tx.send(value).map_err(|_| SendError::ReceiverClosed),
+                    Sender::Tokio(tx) => {
+                        println!("[tokio oneshot] sending value");
+                        tx.send(value).map_err(|_| SendError::ReceiverClosed)
+                    }
                     Sender::Boxed(f) => f(value).await,
                 }
             }
@@ -654,20 +648,20 @@ pub mod channel {
 ///
 /// When the `message_spans` feature is enabled, this also includes a tracing
 /// span to carry the tracing context during message passing.
-pub struct WithChannels<I: Channels<S>, S: Service> {
+pub struct WithChannels<I: Channels> {
     /// The inner message.
     pub inner: I,
     /// The return channel to send the response to. Can be set to [`crate::channel::none::NoSender`] if not needed.
-    pub tx: <I as Channels<S>>::Tx,
+    pub tx: <I as Channels>::Tx,
     /// The request channel to receive the request from. Can be set to [`NoReceiver`] if not needed.
-    pub rx: <I as Channels<S>>::Rx,
+    pub rx: <I as Channels>::Rx,
     /// The current span where the full message was created.
     #[cfg(feature = "message_spans")]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "message_spans")))]
     pub span: tracing::Span,
 }
 
-impl<I: Channels<S> + Debug, S: Service> Debug for WithChannels<I, S> {
+impl<I: Channels + Debug> Debug for WithChannels<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("")
             .field(&self.inner)
@@ -677,7 +671,7 @@ impl<I: Channels<S> + Debug, S: Service> Debug for WithChannels<I, S> {
     }
 }
 
-impl<I: Channels<S>, S: Service> WithChannels<I, S> {
+impl<I: Channels> WithChannels<I> {
     /// Get the parent span
     #[cfg(feature = "message_spans")]
     pub fn parent_span_opt(&self) -> Option<&tracing::Span> {
@@ -688,11 +682,11 @@ impl<I: Channels<S>, S: Service> WithChannels<I, S> {
 /// Tuple conversion from inner message and tx/rx channels to a WithChannels struct
 ///
 /// For the case where you want both tx and rx channels.
-impl<I: Channels<S>, S: Service, Tx, Rx> From<(I, Tx, Rx)> for WithChannels<I, S>
+impl<I: Channels, Tx, Rx> From<(I, Tx, Rx)> for WithChannels<I>
 where
-    I: Channels<S>,
-    <I as Channels<S>>::Tx: From<Tx>,
-    <I as Channels<S>>::Rx: From<Rx>,
+    I: Channels,
+    <I as Channels>::Tx: From<Tx>,
+    <I as Channels>::Rx: From<Rx>,
 {
     fn from(inner: (I, Tx, Rx)) -> Self {
         let (inner, tx, rx) = inner;
@@ -710,11 +704,10 @@ where
 /// Tuple conversion from inner message and tx channel to a WithChannels struct
 ///
 /// For the very common case where you just need a tx channel to send the response to.
-impl<I, S, Tx> From<(I, Tx)> for WithChannels<I, S>
+impl<I, Tx> From<(I, Tx)> for WithChannels<I>
 where
-    I: Channels<S, Rx = NoReceiver>,
-    S: Service,
-    <I as Channels<S>>::Tx: From<Tx>,
+    I: Channels<Rx = NoReceiver>,
+    <I as Channels>::Tx: From<Tx>,
 {
     fn from(inner: (I, Tx)) -> Self {
         let (inner, tx) = inner;
@@ -733,7 +726,7 @@ where
 ///
 /// If the inner message has fields named `tx`, `rx` or `span`, you need to use the
 /// `inner` field to access them.
-impl<I: Channels<S>, S: Service> Deref for WithChannels<I, S> {
+impl<I: Channels> Deref for WithChannels<I> {
     type Target = I;
 
     fn deref(&self) -> &Self::Target {
@@ -758,27 +751,27 @@ impl<I: Channels<S>, S: Service> Deref for WithChannels<I, S> {
 /// The service type `S` provides a scope for the protocol messages. It exists
 /// so you can use the same message with multiple services.
 #[derive(Debug)]
-pub struct Client<M, R, S>(ClientInner<M>, PhantomData<(R, S)>);
+pub struct Client<M, R>(ClientInner<M>, PhantomData<R>);
 
-impl<M, R, S> Clone for Client<M, R, S> {
+impl<M, R> Clone for Client<M, R> {
     fn clone(&self) -> Self {
         Self(self.0.clone(), PhantomData)
     }
 }
 
-impl<M, R, S> From<LocalSender<M, S>> for Client<M, R, S> {
-    fn from(tx: LocalSender<M, S>) -> Self {
+impl<M, R> From<LocalSender<M>> for Client<M, R> {
+    fn from(tx: LocalSender<M>) -> Self {
         Self(ClientInner::Local(tx.0), PhantomData)
     }
 }
 
-impl<M, R, S> From<tokio::sync::mpsc::Sender<M>> for Client<M, R, S> {
+impl<M, R> From<tokio::sync::mpsc::Sender<M>> for Client<M, R> {
     fn from(tx: tokio::sync::mpsc::Sender<M>) -> Self {
         LocalSender::from(tx).into()
     }
 }
 
-impl<M, R, S> Client<M, R, S> {
+impl<M, R> Client<M, R> {
     /// Create a new client to a remote service using the given quinn `endpoint`
     /// and a socket `addr` of the remote service.
     #[cfg(feature = "rpc")]
@@ -796,7 +789,7 @@ impl<M, R, S> Client<M, R, S> {
 
     /// Get the local sender. This is useful if you don't care about remote
     /// requests.
-    pub fn local(&self) -> Option<LocalSender<M, S>> {
+    pub fn local(&self) -> Option<LocalSender<M>> {
         match &self.0 {
             ClientInner::Local(tx) => Some(tx.clone().into()),
             ClientInner::Remote(..) => None,
@@ -818,10 +811,9 @@ impl<M, R, S> Client<M, R, S> {
     pub fn request(
         &self,
     ) -> impl Future<
-        Output = result::Result<Request<LocalSender<M, S>, rpc::RemoteSender<R, S>>, RequestError>,
+        Output = result::Result<Request<LocalSender<M>, rpc::RemoteSender<R>>, RequestError>,
     > + 'static
     where
-        S: Service,
         M: Send + Sync + 'static,
         R: 'static,
     {
@@ -854,10 +846,9 @@ impl<M, R, S> Client<M, R, S> {
     /// Performs a request for which the server returns a oneshot receiver.
     pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
     where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        M: From<WithChannels<Req>> + Send + Sync + Unpin + 'static,
         R: From<Req> + Serialize + Send + Sync + 'static,
-        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver> + Send + 'static,
+        Req: Channels<Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
         let request = self.request();
@@ -888,10 +879,9 @@ impl<M, R, S> Client<M, R, S> {
         local_response_cap: usize,
     ) -> impl Future<Output = Result<channel::mpsc::Receiver<Res>>> + Send + 'static
     where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        M: From<WithChannels<Req>> + Send + Sync + Unpin + 'static,
         R: From<Req> + Serialize + Send + Sync + 'static,
-        Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = NoReceiver> + Send + 'static,
+        Req: Channels<Tx = channel::mpsc::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
         let request = self.request();
@@ -926,10 +916,9 @@ impl<M, R, S> Client<M, R, S> {
         )>,
     >
     where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        M: From<WithChannels<Req>> + Send + Sync + Unpin + 'static,
         R: From<Req> + Serialize + 'static,
-        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>,
+        Req: Channels<Tx = channel::oneshot::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>,
         Update: RpcMessage,
         Res: RpcMessage,
     {
@@ -967,10 +956,9 @@ impl<M, R, S> Client<M, R, S> {
            + Send
            + 'static
     where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        M: From<WithChannels<Req>> + Send + Sync + Unpin + 'static,
         R: From<Req> + Serialize + Send + 'static,
-        Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>
+        Req: Channels<Tx = channel::mpsc::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>
             + Send
             + 'static,
         Update: RpcMessage,
@@ -1093,23 +1081,23 @@ impl From<RequestError> for io::Error {
 /// [`WithChannels`].
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct LocalSender<M, S>(tokio::sync::mpsc::Sender<M>, std::marker::PhantomData<S>);
+pub struct LocalSender<M>(tokio::sync::mpsc::Sender<M>);
 
-impl<M, S> Clone for LocalSender<M, S> {
+impl<M> Clone for LocalSender<M> {
     fn clone(&self) -> Self {
-        Self(self.0.clone(), PhantomData)
+        Self(self.0.clone())
     }
 }
 
-impl<M, S> From<tokio::sync::mpsc::Sender<M>> for LocalSender<M, S> {
+impl<M> From<tokio::sync::mpsc::Sender<M>> for LocalSender<M> {
     fn from(tx: tokio::sync::mpsc::Sender<M>) -> Self {
-        Self(tx, PhantomData)
+        Self(tx)
     }
 }
 
 #[cfg(not(feature = "rpc"))]
 pub mod rpc {
-    pub struct RemoteSender<R, S>(std::marker::PhantomData<(R, S)>);
+    pub struct RemoteSender<R>(std::marker::PhantomData<(R)>);
 }
 
 #[cfg(feature = "rpc")]
@@ -1284,13 +1272,13 @@ pub mod rpc {
 
     /// A connection to a remote service that can be used to send the initial message.
     #[derive(Debug)]
-    pub struct RemoteSender<R, S>(
+    pub struct RemoteSender<R>(
         quinn::SendStream,
         quinn::RecvStream,
-        std::marker::PhantomData<(R, S)>,
+        std::marker::PhantomData<R>,
     );
 
-    impl<R, S> RemoteSender<R, S> {
+    impl<R> RemoteSender<R> {
         pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
             Self(send, recv, PhantomData)
         }
@@ -1665,12 +1653,12 @@ pub enum Request<L, R> {
     Remote(R),
 }
 
-impl<M: Send, S: Service> LocalSender<M, S> {
+impl<M: Send> LocalSender<M> {
     /// Send a message to the service
-    pub fn send<T>(&self, value: impl Into<WithChannels<T, S>>) -> SendFut<M>
+    pub fn send<T>(&self, value: impl Into<WithChannels<T>>) -> SendFut<M>
     where
-        T: Channels<S>,
-        M: From<WithChannels<T, S>>,
+        T: Channels,
+        M: From<WithChannels<T>>,
     {
         let value: M = value.into().into();
         SendFut::new(self.0.clone(), value)

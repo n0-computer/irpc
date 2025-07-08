@@ -392,10 +392,12 @@ mod fuse_wrapper {
         type Output = Result<T, tokio::sync::oneshot::error::RecvError>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            println!("polling FusedOneshotReceiver");
             if self.0.is_terminated() {
                 // don't panic when polling a terminated receiver
                 Poll::Pending
             } else {
+                println!("polling inner receiver");
                 Future::poll(Pin::new(&mut self.0), cx)
             }
         }
