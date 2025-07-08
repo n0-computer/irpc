@@ -375,7 +375,7 @@ impl Parse for MacroArgs {
                 _ => {
                     return Err(syn::Error::new(
                         param_name.span(),
-                        format!("Unknown parameter: {}", param_name),
+                        format!("Unknown parameter: {param_name}"),
                     ));
                 }
             }

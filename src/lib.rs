@@ -1097,7 +1097,7 @@ impl<M> From<tokio::sync::mpsc::Sender<M>> for LocalSender<M> {
 
 #[cfg(not(feature = "rpc"))]
 pub mod rpc {
-    pub struct RemoteSender<R>(std::marker::PhantomData<(R)>);
+    pub struct RemoteSender<R>(std::marker::PhantomData<R>);
 }
 
 #[cfg(feature = "rpc")]
