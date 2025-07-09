@@ -10,18 +10,12 @@ use irpc::{
     rpc::Handler,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, Service, WithChannels,
+    Client, LocalSender, WithChannels,
 };
 // Import the macro
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-
-/// A simple storage service, just to try it out
-#[derive(Debug, Clone, Copy)]
-struct StorageService;
-
-impl Service for StorageService {}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Get {
@@ -48,7 +42,7 @@ struct SetMany;
 
 // Use the macro to generate both the StorageProtocol and StorageMessage enums
 // plus implement Channels for each type
-#[rpc_requests(StorageService, message = StorageMessage)]
+#[rpc_requests(message = StorageMessage)]
 #[derive(Serialize, Deserialize)]
 enum StorageProtocol {
     #[rpc(tx=oneshot::Sender<Option<String>>)]
@@ -74,7 +68,7 @@ impl StorageActor {
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<StorageMessage, StorageService>::from(tx);
+        let local = LocalSender::<StorageMessage>::from(tx);
         StorageApi {
             inner: local.into(),
         }
@@ -123,7 +117,7 @@ impl StorageActor {
 }
 
 struct StorageApi {
-    inner: Client<StorageMessage, StorageProtocol, StorageService>,
+    inner: Client<StorageMessage, StorageProtocol>,
 }
 
 impl StorageApi {

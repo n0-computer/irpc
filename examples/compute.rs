@@ -11,7 +11,7 @@ use irpc::{
     rpc::{listen, Handler},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, Request, Service, WithChannels,
+    Client, LocalSender, Request, WithChannels,
 };
 use n0_future::{
     stream::StreamExt,
@@ -20,12 +20,6 @@ use n0_future::{
 use serde::{Deserialize, Serialize};
 use thousands::Separable;
 use tracing::trace;
-
-// Define the ComputeService
-#[derive(Debug, Clone, Copy)]
-struct ComputeService;
-
-impl Service for ComputeService {}
 
 // Define ComputeRequest sub-messages
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,7 +50,7 @@ enum ComputeRequest {
 }
 
 // Define the protocol and message enums using the macro
-#[rpc_requests(ComputeService, message = ComputeMessage)]
+#[rpc_requests(message = ComputeMessage)]
 #[derive(Serialize, Deserialize)]
 enum ComputeProtocol {
     #[rpc(tx=oneshot::Sender<u128>)]
@@ -79,7 +73,7 @@ impl ComputeActor {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let actor = Self { recv: rx };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<ComputeMessage, ComputeService>::from(tx);
+        let local = LocalSender::<ComputeMessage>::from(tx);
         ComputeApi {
             inner: local.into(),
         }
@@ -157,7 +151,7 @@ impl ComputeActor {
 // The API for interacting with the ComputeService
 #[derive(Clone)]
 struct ComputeApi {
-    inner: Client<ComputeMessage, ComputeProtocol, ComputeService>,
+    inner: Client<ComputeMessage, ComputeProtocol>,
 }
 
 impl ComputeApi {

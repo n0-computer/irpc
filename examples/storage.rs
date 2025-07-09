@@ -9,24 +9,18 @@ use irpc::{
     channel::{mpsc, none::NoReceiver, oneshot},
     rpc::{listen, Handler},
     util::{make_client_endpoint, make_server_endpoint},
-    Channels, Client, LocalSender, Request, Service, WithChannels,
+    Channels, Client, LocalSender, Request, WithChannels,
 };
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-
-/// A simple storage service, just to try it out
-#[derive(Debug, Clone, Copy)]
-struct StorageService;
-
-impl Service for StorageService {}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Get {
     key: String,
 }
 
-impl Channels<StorageService> for Get {
+impl Channels for Get {
     type Rx = NoReceiver;
     type Tx = oneshot::Sender<Option<String>>;
 }
@@ -34,7 +28,7 @@ impl Channels<StorageService> for Get {
 #[derive(Debug, Serialize, Deserialize)]
 struct List;
 
-impl Channels<StorageService> for List {
+impl Channels for List {
     type Rx = NoReceiver;
     type Tx = mpsc::Sender<String>;
 }
@@ -45,7 +39,7 @@ struct Set {
     value: String,
 }
 
-impl Channels<StorageService> for Set {
+impl Channels for Set {
     type Rx = NoReceiver;
     type Tx = oneshot::Sender<()>;
 }
@@ -59,9 +53,9 @@ enum StorageProtocol {
 
 #[derive(derive_more::From)]
 enum StorageMessage {
-    Get(WithChannels<Get, StorageService>),
-    Set(WithChannels<Set, StorageService>),
-    List(WithChannels<List, StorageService>),
+    Get(WithChannels<Get>),
+    Set(WithChannels<Set>),
+    List(WithChannels<List>),
 }
 
 struct StorageActor {
@@ -77,7 +71,7 @@ impl StorageActor {
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<StorageMessage, StorageService>::from(tx);
+        let local = LocalSender::<StorageMessage>::from(tx);
         StorageApi {
             inner: local.into(),
         }
@@ -115,7 +109,7 @@ impl StorageActor {
     }
 }
 struct StorageApi {
-    inner: Client<StorageMessage, StorageProtocol, StorageService>,
+    inner: Client<StorageMessage, StorageProtocol>,
 }
 
 impl StorageApi {
