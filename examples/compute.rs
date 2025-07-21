@@ -10,7 +10,7 @@ use irpc::{
     rpc::{listen, RemoteService},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, Request, WithChannels,
+    Client, Request, WithChannels,
 };
 use n0_future::{
     stream::StreamExt,
@@ -72,9 +72,8 @@ impl ComputeActor {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let actor = Self { recv: rx };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<ComputeProtocol>::from(tx);
         ComputeApi {
-            inner: local.into(),
+            inner: Client::local(tx),
         }
     }
 
@@ -161,7 +160,7 @@ impl ComputeApi {
     }
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
-        let Some(local) = self.inner.local() else {
+        let Some(local) = self.inner.as_local() else {
             bail!("cannot listen on a remote service");
         };
         let handler = ComputeProtocol::forwarding_handler(local);

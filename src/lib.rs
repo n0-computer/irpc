@@ -797,9 +797,14 @@ impl<S: Service> Client<S> {
         Self(ClientInner::Remote(Box::new(remote)), PhantomData)
     }
 
+    /// Creates a new client from a `tokio::sync::mpsc::Sender`.
+    pub fn local(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
+        tx.into()
+    }
+
     /// Get the local sender. This is useful if you don't care about remote
     /// requests.
-    pub fn local(&self) -> Option<LocalSender<S>> {
+    pub fn as_local(&self) -> Option<LocalSender<S>> {
         match &self.0 {
             ClientInner::Local(tx) => Some(tx.clone().into()),
             ClientInner::Remote(..) => None,
@@ -1663,9 +1668,9 @@ pub mod rpc {
     pub async fn read_request<S: RemoteService>(
         connection: &quinn::Connection,
     ) -> std::io::Result<Option<S::Message>> {
-        Ok(
-            read_request_raw::<S::WireMessage>(connection).await?.map(|(msg, rx, tx)| S::from_wire(msg, rx, tx)),
-        )
+        Ok(read_request_raw::<S::WireMessage>(connection)
+            .await?
+            .map(|(msg, rx, tx)| S::from_wire(msg, rx, tx)))
     }
 
     /// Reads a single request from the connection.

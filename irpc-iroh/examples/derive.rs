@@ -63,7 +63,7 @@ mod storage {
     use irpc::{
         channel::{mpsc, oneshot},
         rpc::RemoteService,
-        rpc_requests, Client, LocalSender, WithChannels,
+        rpc_requests, Client, WithChannels,
     };
     // Import the macro
     use irpc_iroh::{IrohProtocol, IrohRemoteConnection};
@@ -110,9 +110,8 @@ mod storage {
                 state: BTreeMap::new(),
             };
             n0_future::task::spawn(actor.run());
-            let local = LocalSender::<StorageProtocol>::from(tx);
             StorageApi {
-                inner: local.into(),
+                inner: Client::local(tx),
             }
         }
 
@@ -169,7 +168,7 @@ mod storage {
         pub fn expose(&self) -> Result<impl ProtocolHandler> {
             let local = self
                 .inner
-                .local()
+                .as_local()
                 .context("can not listen on remote service")?;
             Ok(IrohProtocol::new(StorageProtocol::forwarding_handler(
                 local,

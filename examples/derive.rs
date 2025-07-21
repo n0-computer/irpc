@@ -9,7 +9,7 @@ use irpc::{
     rpc::RemoteService,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, WithChannels,
+    Client, WithChannels,
 };
 // Import the macro
 use n0_future::task::{self, AbortOnDropHandle};
@@ -67,9 +67,8 @@ impl StorageActor {
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<StorageProtocol>::from(tx);
         StorageApi {
-            inner: local.into(),
+            inner: Client::local(tx),
         }
     }
 
@@ -127,7 +126,10 @@ impl StorageApi {
     }
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> Result<AbortOnDropHandle<()>> {
-        let local = self.inner.local().context("cannot listen on remote API")?;
+        let local = self
+            .inner
+            .as_local()
+            .context("cannot listen on remote API")?;
         let join_handle = task::spawn(irpc::rpc::listen(
             endpoint,
             StorageProtocol::forwarding_handler(local),

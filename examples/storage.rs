@@ -9,7 +9,7 @@ use irpc::{
     channel::{mpsc, none::NoReceiver, oneshot},
     rpc::{listen, Handler},
     util::{make_client_endpoint, make_server_endpoint},
-    Channels, Client, LocalSender, Request, Service, WithChannels,
+    Channels, Client, Request, Service, WithChannels,
 };
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
@@ -76,9 +76,8 @@ impl StorageActor {
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<StorageProtocol>::from(tx);
         StorageApi {
-            inner: local.into(),
+            inner: Client::local(tx),
         }
     }
 
@@ -125,7 +124,7 @@ impl StorageApi {
     }
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
-        let Some(local) = self.inner.local() else {
+        let Some(local) = self.inner.as_local() else {
             bail!("cannot listen on a remote service");
         };
         let handler: Handler<StorageProtocol> = Arc::new(move |msg, _rx, tx| {

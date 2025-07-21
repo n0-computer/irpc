@@ -355,11 +355,8 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         let parent_span_impl = generate_parent_span_impl(&message_enum_name, &variant_names);
 
         // Generate From implementations for the message enum (only for variants with rpc attributes)
-        let message_from_impls = generate_message_enum_from_impls(
-            &message_enum_name,
-            &variants_with_attr,
-            service_name,
-        );
+        let message_from_impls =
+            generate_message_enum_from_impls(&message_enum_name, &variants_with_attr, service_name);
 
         let message_from_quic_streams =
             generate_message_from_wire_impl(&message_enum_name, enum_name, &variants_with_attr);
