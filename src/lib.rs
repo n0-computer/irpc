@@ -1133,8 +1133,11 @@ pub mod rpc {
             oneshot, RecvError, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
-        RequestError, RpcMessage,
+        LocalSender, RequestError, RpcMessage, Service,
     };
+
+    #[doc(hidden)]
+    pub use quinn;
 
     /// Default max message size (16 MiB).
     pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
@@ -1604,6 +1607,23 @@ pub mod rpc {
             + 'static,
     >;
 
+    pub trait MessageWithChannels: Send + Unpin + 'static {
+        type WireMessage: DeserializeOwned + Send;
+
+        fn from_wire(msg: Self::WireMessage, rx: quinn::RecvStream, tx: quinn::SendStream) -> Self;
+
+        fn forwarding_handler<S: Service>(
+            local_sender: LocalSender<Self, S>,
+        ) -> Handler<Self::WireMessage>
+        where
+            Self: Sized,
+        {
+            Arc::new(move |msg, rx, tx| {
+                Box::pin(local_sender.send_raw(Self::from_wire(msg, rx, tx)))
+            })
+        }
+    }
+
     /// Utility function to listen for incoming connections and handle them with the provided handler
     pub async fn listen<R: DeserializeOwned + 'static>(
         endpoint: quinn::Endpoint,
@@ -1629,17 +1649,28 @@ pub mod rpc {
         }
     }
 
-    /// Handles a quic iroh connection with the provided `handler`.
+    /// Handles a quic connection with the provided `handler`.
     pub async fn handle_connection<R: DeserializeOwned + 'static>(
         connection: quinn::Connection,
         handler: Handler<R>,
     ) -> io::Result<()> {
         loop {
-            let Some((msg, rx, tx)) = read_request(&connection).await? else {
+            let Some((msg, rx, tx)) = read_request_raw(&connection).await? else {
                 return Ok(());
             };
             handler(msg, rx, tx).await?;
         }
+    }
+
+    pub async fn read_request<M: MessageWithChannels>(
+        connection: &quinn::Connection,
+    ) -> std::io::Result<Option<M>> {
+        Ok(
+            match read_request_raw::<M::WireMessage>(connection).await? {
+                None => None,
+                Some((msg, rx, tx)) => Some(M::from_wire(msg, rx, tx)),
+            },
+        )
     }
 
     /// Reads a single request from the connection.
@@ -1649,7 +1680,7 @@ pub mod rpc {
     /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
     /// Returns None if the remote closed the connection with error code `0`.
     /// Returns an error for all other failure cases.
-    pub async fn read_request<R: DeserializeOwned + 'static>(
+    pub async fn read_request_raw<R: DeserializeOwned + 'static>(
         connection: &quinn::Connection,
     ) -> std::io::Result<Option<(R, quinn::RecvStream, quinn::SendStream)>> {
         let (send, mut recv) = match connection.accept_bi().await {

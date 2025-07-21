@@ -1,14 +1,13 @@
 use std::{
     io::{self, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
 };
 
 use anyhow::bail;
 use futures_buffered::BufferedStreamExt;
 use irpc::{
     channel::{mpsc, oneshot},
-    rpc::{listen, Handler},
+    rpc::{listen, MessageWithChannels},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
     Client, LocalSender, Request, Service, WithChannels,
@@ -171,15 +170,7 @@ impl ComputeApi {
         let Some(local) = self.inner.local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler: Handler<ComputeProtocol> = Arc::new(move |msg, rx, tx| {
-            let local = local.clone();
-            Box::pin(match msg {
-                ComputeProtocol::Sqr(msg) => local.send((msg, tx)),
-                ComputeProtocol::Sum(msg) => local.send((msg, tx, rx)),
-                ComputeProtocol::Fibonacci(msg) => local.send((msg, tx)),
-                ComputeProtocol::Multiply(msg) => local.send((msg, tx, rx)),
-            })
-        });
+        let handler = ComputeMessage::forwarding_handler(local);
         Ok(AbortOnDropHandle::new(task::spawn(listen(
             endpoint, handler,
         ))))

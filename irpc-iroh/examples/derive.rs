@@ -56,13 +56,13 @@ mod storage {
     //!
     //! The only `pub` item is [`StorageApi`], everything else is private.
 
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::collections::BTreeMap;
 
     use anyhow::{Context, Result};
     use iroh::{protocol::ProtocolHandler, Endpoint};
     use irpc::{
         channel::{mpsc, oneshot},
-        rpc::Handler,
+        rpc::MessageWithChannels,
         rpc_requests, Client, LocalSender, Service, WithChannels,
     };
     // Import the macro
@@ -176,15 +176,7 @@ mod storage {
                 .inner
                 .local()
                 .context("can not listen on remote service")?;
-            let handler: Handler<StorageProtocol> = Arc::new(move |msg, _rx, tx| {
-                let local = local.clone();
-                Box::pin(match msg {
-                    StorageProtocol::Get(msg) => local.send((msg, tx)),
-                    StorageProtocol::Set(msg) => local.send((msg, tx)),
-                    StorageProtocol::List(msg) => local.send((msg, tx)),
-                })
-            });
-            Ok(IrohProtocol::new(handler))
+            Ok(IrohProtocol::new(StorageMessage::forwarding_handler(local)))
         }
 
         pub async fn get(&self, key: String) -> irpc::Result<Option<String>> {

@@ -117,6 +117,37 @@ fn generate_message_enum_from_impls(
     impls
 }
 
+/// Generate Message::from_quic_streams impl
+fn generate_message_from_wire_impl(
+    message_enum_name: &Ident,
+    proto_enum_name: &Ident,
+    variants_with_attr: &[(Ident, Type)],
+) -> TokenStream2 {
+    let variants = variants_with_attr
+        .iter()
+        .map(|(variant_name, _inner_type)| {
+            quote! {
+                #proto_enum_name::#variant_name(msg) => {
+                    #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
+                }
+            }
+        });
+
+    quote! {
+        impl ::irpc::rpc::MessageWithChannels for #message_enum_name {
+            type WireMessage = #proto_enum_name;
+            fn from_wire(
+                msg: Self::WireMessage,
+                rx: ::irpc::rpc::quinn::RecvStream,
+                tx: ::irpc::rpc::quinn::SendStream) -> Self {
+                    match msg {
+                        #(#variants),*
+                    }
+                }
+        }
+    }
+}
+
 /// Generate type aliases for WithChannels<T, Service>
 fn generate_type_aliases(
     variants: &[(Ident, Type)],
@@ -295,6 +326,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    let enum_vis = &input.vis;
     // Generate the extended message enum if requested
     let extended_enum_code = if let Some(message_enum_name) = message_enum_name {
         let message_variants = all_variants
@@ -314,7 +346,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         let message_enum = quote! {
             #[allow(missing_docs)]
             #[derive(Debug)]
-            pub enum #message_enum_name {
+            #enum_vis enum #message_enum_name {
                 #(#message_variants),*
             }
         };
@@ -329,8 +361,12 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             &service_name,
         );
 
+        let message_from_quic_streams =
+            generate_message_from_wire_impl(&message_enum_name, &enum_name, &variants_with_attr);
+
         quote! {
             #message_enum
+            #message_from_quic_streams
             #parent_span_impl
             #message_from_impls
         }

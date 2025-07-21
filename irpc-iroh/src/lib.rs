@@ -9,7 +9,10 @@ use iroh::{
 };
 use irpc::{
     channel::RecvError,
-    rpc::{Handler, RemoteConnection, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, MAX_MESSAGE_SIZE},
+    rpc::{
+        Handler, MessageWithChannels, RemoteConnection, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
+        MAX_MESSAGE_SIZE,
+    },
     util::AsyncReadVarintExt,
     RequestError,
 };
@@ -132,11 +135,22 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     handler: Handler<R>,
 ) -> io::Result<()> {
     loop {
-        let Some((msg, rx, tx)) = read_request(&connection).await? else {
+        let Some((msg, rx, tx)) = read_request_raw(&connection).await? else {
             return Ok(());
         };
         handler(msg, rx, tx).await?;
     }
+}
+
+pub async fn read_request<M: MessageWithChannels>(
+    connection: &Connection,
+) -> std::io::Result<Option<M>> {
+    Ok(
+        match read_request_raw::<M::WireMessage>(connection).await? {
+            None => None,
+            Some((msg, rx, tx)) => Some(M::from_wire(msg, rx, tx)),
+        },
+    )
 }
 
 /// Reads a single request from the connection.
@@ -146,7 +160,7 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
 /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
 /// Returns None if the remote closed the connection with error code `0`.
 /// Returns an error for all other failure cases.
-pub async fn read_request<R: DeserializeOwned + 'static>(
+pub async fn read_request_raw<R: DeserializeOwned + 'static>(
     connection: &Connection,
 ) -> std::io::Result<Option<(R, RecvStream, SendStream)>> {
     let (send, mut recv) = match connection.accept_bi().await {

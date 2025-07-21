@@ -1,13 +1,12 @@
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
 };
 
 use anyhow::{Context, Result};
 use irpc::{
     channel::{mpsc, oneshot},
-    rpc::Handler,
+    rpc::MessageWithChannels,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
     Client, LocalSender, Service, WithChannels,
@@ -135,16 +134,10 @@ impl StorageApi {
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> Result<AbortOnDropHandle<()>> {
         let local = self.inner.local().context("cannot listen on remote API")?;
-        let handler: Handler<StorageProtocol> = Arc::new(move |msg, rx, tx| {
-            let local = local.clone();
-            Box::pin(match msg {
-                StorageProtocol::Get(msg) => local.send((msg, tx)),
-                StorageProtocol::Set(msg) => local.send((msg, tx)),
-                StorageProtocol::SetMany(msg) => local.send((msg, tx, rx)),
-                StorageProtocol::List(msg) => local.send((msg, tx)),
-            })
-        });
-        let join_handle = task::spawn(irpc::rpc::listen(endpoint, handler));
+        let join_handle = task::spawn(irpc::rpc::listen(
+            endpoint,
+            StorageMessage::forwarding_handler(local),
+        ));
         Ok(AbortOnDropHandle::new(join_handle))
     }
 
