@@ -115,7 +115,7 @@ impl<T> RpcMessage for T where
 /// message type, and provides some type safety when sending messages.
 pub trait Service: Send + Sync + Debug + 'static {
     type WireMessage: Serialize + DeserializeOwned + Send + 'static;
-    type Message: Send + 'static;
+    type Message: Send + Unpin + 'static;
 }
 
 mod sealed {
@@ -1605,17 +1605,14 @@ pub mod rpc {
             + 'static,
     >;
 
-    pub trait MessageWithChannels: Send + Unpin + 'static {
-        type WireMessage: DeserializeOwned + Send;
-
-        fn from_wire(msg: Self::WireMessage, rx: quinn::RecvStream, tx: quinn::SendStream) -> Self;
-
-        fn forwarding_handler<S: Service<Message = Self>>(
-            local_sender: LocalSender<S>,
-        ) -> Handler<Self::WireMessage>
-        where
-            Self: Sized,
-        {
+    pub trait RemoteService: Service + Sized {
+        /// Creates a message from a wire message and a pair of quic streams.
+        fn from_wire(
+            msg: Self::WireMessage,
+            rx: quinn::RecvStream,
+            tx: quinn::SendStream,
+        ) -> Self::Message;
+        fn forwarding_handler(local_sender: LocalSender<Self>) -> Handler<Self::WireMessage> {
             Arc::new(move |msg, rx, tx| {
                 let msg = Self::from_wire(msg, rx, tx);
                 Box::pin(local_sender.send_raw(msg))
@@ -1661,13 +1658,13 @@ pub mod rpc {
         }
     }
 
-    pub async fn read_request<M: MessageWithChannels>(
+    pub async fn read_request<S: RemoteService>(
         connection: &quinn::Connection,
-    ) -> std::io::Result<Option<M>> {
+    ) -> std::io::Result<Option<S::Message>> {
         Ok(
-            match read_request_raw::<M::WireMessage>(connection).await? {
+            match read_request_raw::<S::WireMessage>(connection).await? {
                 None => None,
-                Some((msg, rx, tx)) => Some(M::from_wire(msg, rx, tx)),
+                Some((msg, rx, tx)) => Some(S::from_wire(msg, rx, tx)),
             },
         )
     }

@@ -10,7 +10,7 @@ use iroh::{
 use irpc::{
     channel::RecvError,
     rpc::{
-        Handler, MessageWithChannels, RemoteConnection, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
+        Handler, RemoteConnection, RemoteService, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
         MAX_MESSAGE_SIZE,
     },
     util::AsyncReadVarintExt,
@@ -142,13 +142,13 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     }
 }
 
-pub async fn read_request<M: MessageWithChannels>(
+pub async fn read_request<S: RemoteService>(
     connection: &Connection,
-) -> std::io::Result<Option<M>> {
+) -> std::io::Result<Option<S::Message>> {
     Ok(
-        match read_request_raw::<M::WireMessage>(connection).await? {
+        match read_request_raw::<S::WireMessage>(connection).await? {
             None => None,
-            Some((msg, rx, tx)) => Some(M::from_wire(msg, rx, tx)),
+            Some((msg, rx, tx)) => Some(S::from_wire(msg, rx, tx)),
         },
     )
 }

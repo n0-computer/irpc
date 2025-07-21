@@ -134,16 +134,16 @@ fn generate_message_from_wire_impl(
         });
 
     quote! {
-        impl ::irpc::rpc::MessageWithChannels for #message_enum_name {
-            type WireMessage = #proto_enum_name;
+        impl ::irpc::rpc::RemoteService for #proto_enum_name {
             fn from_wire(
                 msg: Self::WireMessage,
                 rx: ::irpc::rpc::quinn::RecvStream,
-                tx: ::irpc::rpc::quinn::SendStream) -> Self {
-                    match msg {
-                        #(#variants),*
-                    }
+                tx: ::irpc::rpc::quinn::SendStream
+            ) -> Self::Message {
+                match msg {
+                    #(#variants),*
                 }
+            }
         }
     }
 }

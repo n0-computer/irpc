@@ -7,7 +7,7 @@ use anyhow::bail;
 use futures_buffered::BufferedStreamExt;
 use irpc::{
     channel::{mpsc, oneshot},
-    rpc::{listen, MessageWithChannels},
+    rpc::{listen, RemoteService},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
     Client, LocalSender, Request, WithChannels,
@@ -164,7 +164,7 @@ impl ComputeApi {
         let Some(local) = self.inner.local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler = ComputeMessage::forwarding_handler(local);
+        let handler = ComputeProtocol::forwarding_handler(local);
         Ok(AbortOnDropHandle::new(task::spawn(listen(
             endpoint, handler,
         ))))

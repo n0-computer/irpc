@@ -62,7 +62,7 @@ mod storage {
     use iroh::{protocol::ProtocolHandler, Endpoint};
     use irpc::{
         channel::{mpsc, oneshot},
-        rpc::MessageWithChannels,
+        rpc::RemoteService,
         rpc_requests, Client, LocalSender, WithChannels,
     };
     // Import the macro
@@ -171,7 +171,9 @@ mod storage {
                 .inner
                 .local()
                 .context("can not listen on remote service")?;
-            Ok(IrohProtocol::new(StorageMessage::forwarding_handler(local)))
+            Ok(IrohProtocol::new(StorageProtocol::forwarding_handler(
+                local,
+            )))
         }
 
         pub async fn get(&self, key: String) -> irpc::Result<Option<String>> {

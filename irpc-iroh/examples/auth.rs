@@ -132,7 +132,7 @@ mod storage {
     impl ProtocolHandler for StorageServer {
         async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
             let mut authed = false;
-            while let Some(msg) = read_request(&conn).await? {
+            while let Some(msg) = read_request::<StorageProtocol>(&conn).await? {
                 match msg {
                     StorageMessage::Auth(msg) => {
                         let WithChannels { inner, tx, .. } = msg;

@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use irpc::{
     channel::{mpsc, oneshot},
-    rpc::MessageWithChannels,
+    rpc::RemoteService,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
     Client, LocalSender, WithChannels,
@@ -130,7 +130,7 @@ impl StorageApi {
         let local = self.inner.local().context("cannot listen on remote API")?;
         let join_handle = task::spawn(irpc::rpc::listen(
             endpoint,
-            StorageMessage::forwarding_handler(local),
+            StorageProtocol::forwarding_handler(local),
         ));
         Ok(AbortOnDropHandle::new(join_handle))
     }
