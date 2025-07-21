@@ -8,7 +8,8 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
 };
 use irpc::{
-    rpc::{Handler, RemoteConnection},
+    channel::RecvError,
+    rpc::{Handler, RemoteConnection, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, MAX_MESSAGE_SIZE},
     util::AsyncReadVarintExt,
     RequestError,
 };
@@ -163,6 +164,13 @@ pub async fn read_request<R: DeserializeOwned + 'static>(
         .read_varint_u64()
         .await?
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
+    if size > MAX_MESSAGE_SIZE {
+        connection.close(
+            ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
+            b"request exceeded max message size",
+        );
+        return Err(RecvError::MaxMessageSizeExceeded.into());
+    }
     let mut buf = vec![0; size as usize];
     recv.read_exact(&mut buf)
         .await
