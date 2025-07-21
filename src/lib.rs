@@ -1142,6 +1142,9 @@ pub mod rpc {
         LocalSender, RequestError, RpcMessage, Service,
     };
 
+    /// This is used by irpc-derive to refer to quinn types (SendStream and RecvStream)
+    /// to make generated code work for users without having to depend on quinn directly
+    /// (i.e. when using iroh).
     #[doc(hidden)]
     pub use quinn;
 
