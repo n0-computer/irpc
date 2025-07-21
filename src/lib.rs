@@ -1612,6 +1612,8 @@ pub mod rpc {
             rx: quinn::RecvStream,
             tx: quinn::SendStream,
         ) -> Self::Message;
+
+        /// Creates a [`Handler`] that forwards all messages to a [`LocalSender`].
         fn forwarding_handler(local_sender: LocalSender<Self>) -> Handler<Self::WireMessage> {
             Arc::new(move |msg, rx, tx| {
                 let msg = Self::from_wire(msg, rx, tx);
