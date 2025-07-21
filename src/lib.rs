@@ -1110,7 +1110,7 @@ impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for LocalSender<S> 
 
 #[cfg(not(feature = "rpc"))]
 pub mod rpc {
-    pub struct RemoteSender<S>(std::marker::PhantomData<(R, S)>);
+    pub struct RemoteSender<S>(std::marker::PhantomData<S>);
 }
 
 #[cfg(feature = "rpc")]
@@ -1664,10 +1664,7 @@ pub mod rpc {
         connection: &quinn::Connection,
     ) -> std::io::Result<Option<S::Message>> {
         Ok(
-            match read_request_raw::<S::WireMessage>(connection).await? {
-                None => None,
-                Some((msg, rx, tx)) => Some(S::from_wire(msg, rx, tx)),
-            },
+            read_request_raw::<S::WireMessage>(connection).await?.map(|(msg, rx, tx)| S::from_wire(msg, rx, tx)),
         )
     }
 

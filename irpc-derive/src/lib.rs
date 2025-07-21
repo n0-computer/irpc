@@ -309,7 +309,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                 Err(e) => return e.to_compile_error().into(),
             };
 
-            match generate_channels_impl(args, &service_name, request_type, attr.span()) {
+            match generate_channels_impl(args, service_name, request_type, attr.span()) {
                 Ok(impls) => channel_impls.push(impls),
                 Err(e) => return e.to_compile_error().into(),
             }
@@ -322,7 +322,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate type aliases if requested
     let type_aliases = if let Some(suffix) = alias_suffix {
         // Use all variants for type aliases, not just those with rpc attributes
-        generate_type_aliases(&all_variants, &service_name, &suffix)
+        generate_type_aliases(&all_variants, service_name, &suffix)
     } else {
         quote! {}
     };
@@ -358,11 +358,11 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         let message_from_impls = generate_message_enum_from_impls(
             &message_enum_name,
             &variants_with_attr,
-            &service_name,
+            service_name,
         );
 
         let message_from_quic_streams =
-            generate_message_from_wire_impl(&message_enum_name, &enum_name, &variants_with_attr);
+            generate_message_from_wire_impl(&message_enum_name, enum_name, &variants_with_attr);
 
         quote! {
             #message_enum

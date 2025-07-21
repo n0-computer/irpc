@@ -146,10 +146,7 @@ pub async fn read_request<S: RemoteService>(
     connection: &Connection,
 ) -> std::io::Result<Option<S::Message>> {
     Ok(
-        match read_request_raw::<S::WireMessage>(connection).await? {
-            None => None,
-            Some((msg, rx, tx)) => Some(S::from_wire(msg, rx, tx)),
-        },
+        read_request_raw::<S::WireMessage>(connection).await?.map(|(msg, rx, tx)| S::from_wire(msg, rx, tx)),
     )
 }
 
