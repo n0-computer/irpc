@@ -74,7 +74,7 @@ mod storage {
     };
     use irpc::{
         channel::{mpsc, oneshot},
-        Client, Service, WithChannels,
+        Client, WithChannels,
     };
     // Import the macro
     use irpc_derive::rpc_requests;
@@ -83,12 +83,6 @@ mod storage {
     use tracing::info;
 
     const ALPN: &[u8] = b"storage-api/0";
-
-    /// A simple storage service, just to try it out
-    #[derive(Debug, Clone, Copy)]
-    struct StorageService;
-
-    impl Service for StorageService {}
 
     #[derive(Debug, Serialize, Deserialize)]
     struct Auth {
@@ -114,8 +108,8 @@ mod storage {
 
     // Use the macro to generate both the StorageProtocol and StorageMessage enums
     // plus implement Channels for each type
-    #[rpc_requests(StorageService, message = StorageMessage)]
-    #[derive(Serialize, Deserialize)]
+    #[rpc_requests(StorageMessage)]
+    #[derive(Serialize, Deserialize, Debug)]
     enum StorageProtocol {
         #[rpc(tx=oneshot::Sender<Result<(), String>>)]
         Auth(Auth),
@@ -226,7 +220,7 @@ mod storage {
     }
 
     pub struct StorageClient {
-        inner: Client<StorageMessage, StorageProtocol, StorageService>,
+        inner: Client<StorageProtocol>,
     }
 
     impl StorageClient {

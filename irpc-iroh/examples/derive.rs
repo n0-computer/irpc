@@ -63,17 +63,12 @@ mod storage {
     use irpc::{
         channel::{mpsc, oneshot},
         rpc::MessageWithChannels,
-        rpc_requests, Client, LocalSender, Service, WithChannels,
+        rpc_requests, Client, LocalSender, WithChannels,
     };
     // Import the macro
     use irpc_iroh::{IrohProtocol, IrohRemoteConnection};
     use serde::{Deserialize, Serialize};
     use tracing::info;
-    /// A simple storage service, just to try it out
-    #[derive(Debug, Clone, Copy)]
-    struct StorageService;
-
-    impl Service for StorageService {}
 
     #[derive(Debug, Serialize, Deserialize)]
     struct Get {
@@ -91,8 +86,8 @@ mod storage {
 
     // Use the macro to generate both the StorageProtocol and StorageMessage enums
     // plus implement Channels for each type
-    #[rpc_requests(StorageService, message = StorageMessage)]
-    #[derive(Serialize, Deserialize)]
+    #[rpc_requests(StorageMessage)]
+    #[derive(Serialize, Deserialize, Debug)]
     enum StorageProtocol {
         #[rpc(tx=oneshot::Sender<Option<String>>)]
         Get(Get),
@@ -115,7 +110,7 @@ mod storage {
                 state: BTreeMap::new(),
             };
             n0_future::task::spawn(actor.run());
-            let local = LocalSender::<StorageMessage, StorageService>::from(tx);
+            let local = LocalSender::<StorageProtocol>::from(tx);
             StorageApi {
                 inner: local.into(),
             }
@@ -154,7 +149,7 @@ mod storage {
     }
 
     pub struct StorageApi {
-        inner: Client<StorageMessage, StorageProtocol, StorageService>,
+        inner: Client<StorageProtocol>,
     }
 
     impl StorageApi {

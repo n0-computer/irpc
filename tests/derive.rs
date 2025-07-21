@@ -36,7 +36,7 @@ fn derive_simple() {
     #[derive(Debug, Serialize, Deserialize)]
     struct Response4;
 
-    #[rpc_requests(Service, message = RequestWithChannels)]
+    #[rpc_requests(RequestWithChannels)]
     #[derive(Debug, Serialize, Deserialize)]
     enum Request {
         #[rpc(tx=oneshot::Sender<()>)]
@@ -48,11 +48,6 @@ fn derive_simple() {
         #[rpc(tx=NoSender)]
         ClientStreaming(ClientStreamingRequest),
     }
-
-    #[derive(Debug, Clone)]
-    struct Service;
-
-    impl irpc::Service for Service {}
 }
 
 /// Use

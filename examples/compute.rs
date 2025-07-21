@@ -10,7 +10,7 @@ use irpc::{
     rpc::{listen, MessageWithChannels},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, Request, Service, WithChannels,
+    Client, LocalSender, Request, WithChannels,
 };
 use n0_future::{
     stream::StreamExt,
@@ -20,11 +20,19 @@ use serde::{Deserialize, Serialize};
 use thousands::Separable;
 use tracing::trace;
 
-// Define the ComputeService
-#[derive(Debug, Clone, Copy)]
-struct ComputeService;
-
-impl Service for ComputeService {}
+// Define the protocol and message enums using the macro
+#[rpc_requests(ComputeMessage)]
+#[derive(Serialize, Deserialize, Debug)]
+enum ComputeProtocol {
+    #[rpc(tx=oneshot::Sender<u128>)]
+    Sqr(Sqr),
+    #[rpc(rx=mpsc::Receiver<i64>, tx=oneshot::Sender<i64>)]
+    Sum(Sum),
+    #[rpc(tx=mpsc::Sender<u64>)]
+    Fibonacci(Fibonacci),
+    #[rpc(rx=mpsc::Receiver<u64>, tx=mpsc::Sender<u64>)]
+    Multiply(Multiply),
+}
 
 // Define ComputeRequest sub-messages
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,20 +62,6 @@ enum ComputeRequest {
     Multiply(Multiply),
 }
 
-// Define the protocol and message enums using the macro
-#[rpc_requests(ComputeService, message = ComputeMessage)]
-#[derive(Serialize, Deserialize)]
-enum ComputeProtocol {
-    #[rpc(tx=oneshot::Sender<u128>)]
-    Sqr(Sqr),
-    #[rpc(rx=mpsc::Receiver<i64>, tx=oneshot::Sender<i64>)]
-    Sum(Sum),
-    #[rpc(tx=mpsc::Sender<u64>)]
-    Fibonacci(Fibonacci),
-    #[rpc(rx=mpsc::Receiver<u64>, tx=mpsc::Sender<u64>)]
-    Multiply(Multiply),
-}
-
 // The actor that processes requests
 struct ComputeActor {
     recv: tokio::sync::mpsc::Receiver<ComputeMessage>,
@@ -78,7 +72,7 @@ impl ComputeActor {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let actor = Self { recv: rx };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<ComputeMessage, ComputeService>::from(tx);
+        let local = LocalSender::<ComputeProtocol>::from(tx);
         ComputeApi {
             inner: local.into(),
         }
@@ -156,7 +150,7 @@ impl ComputeActor {
 // The API for interacting with the ComputeService
 #[derive(Clone)]
 struct ComputeApi {
-    inner: Client<ComputeMessage, ComputeProtocol, ComputeService>,
+    inner: Client<ComputeProtocol>,
 }
 
 impl ComputeApi {

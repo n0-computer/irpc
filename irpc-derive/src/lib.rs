@@ -235,11 +235,12 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as DeriveInput);
     let args = parse_macro_input!(attr as MacroArgs);
 
-    let service_name = args.service_name;
     let message_enum_name = args.message_enum_name;
     let alias_suffix = args.alias_suffix;
 
     let enum_name = &input.ident;
+    let service_name = args.service_enum_name.as_ref().unwrap_or(enum_name);
+    let vis = &input.vis;
     let input_span = input.span();
 
     let data_enum = match &mut input.data {
@@ -326,9 +327,8 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    let enum_vis = &input.vis;
     // Generate the extended message enum if requested
-    let extended_enum_code = if let Some(message_enum_name) = message_enum_name {
+    let extended_enum_code = {
         let message_variants = all_variants
             .iter()
             .map(|(variant_name, inner_type)| {
@@ -346,7 +346,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         let message_enum = quote! {
             #[allow(missing_docs)]
             #[derive(Debug)]
-            #enum_vis enum #message_enum_name {
+            #vis enum #message_enum_name {
                 #(#message_variants),*
             }
         };
@@ -370,14 +370,16 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             #parent_span_impl
             #message_from_impls
         }
-    } else {
-        // If no message_enum_name is provided, don't generate the extended enum
-        quote! {}
     };
 
     // Combine everything
     let output = quote! {
         #input
+
+        impl ::irpc::Service for #service_name {
+            type Message = #message_enum_name;
+            type WireMessage = #enum_name;
+        }
 
         // Channel implementations
         #(#channel_impls)*
@@ -397,18 +399,16 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 // Parse arguments for the macro
 struct MacroArgs {
-    service_name: Ident,
-    message_enum_name: Option<Ident>,
+    message_enum_name: Ident,
+    service_enum_name: Option<Ident>,
     alias_suffix: Option<String>,
 }
 
 impl Parse for MacroArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        // First argument must be the service name (positional)
-        let service_name: Ident = input.parse()?;
-
+        let message_enum_name = input.parse()?;
         // Initialize optional parameters
-        let mut message_enum_name = None;
+        let mut service_enum_name = None;
         let mut alias_suffix = None;
 
         // Parse any additional named parameters
@@ -418,8 +418,8 @@ impl Parse for MacroArgs {
             input.parse::<Token![=]>()?;
 
             match param_name.to_string().as_str() {
-                "message" => {
-                    message_enum_name = Some(input.parse()?);
+                "service" => {
+                    service_enum_name = Some(input.parse()?);
                 }
                 "alias" => {
                     let lit: LitStr = input.parse()?;
@@ -435,7 +435,7 @@ impl Parse for MacroArgs {
         }
 
         Ok(MacroArgs {
-            service_name,
+            service_enum_name,
             message_enum_name,
             alias_suffix,
         })

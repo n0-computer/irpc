@@ -113,7 +113,10 @@ impl<T> RpcMessage for T where
 ///
 /// A service acts as a scope for defining the tx and rx channels for each
 /// message type, and provides some type safety when sending messages.
-pub trait Service: Send + Sync + Debug + Clone + 'static {}
+pub trait Service: Send + Sync + Debug + 'static {
+    type WireMessage: Serialize + DeserializeOwned + Send + 'static;
+    type Message: Send + 'static;
+}
 
 mod sealed {
     pub trait Sealed {}
@@ -758,27 +761,27 @@ impl<I: Channels<S>, S: Service> Deref for WithChannels<I, S> {
 /// The service type `S` provides a scope for the protocol messages. It exists
 /// so you can use the same message with multiple services.
 #[derive(Debug)]
-pub struct Client<M, R, S>(ClientInner<M>, PhantomData<(R, S)>);
+pub struct Client<S: Service>(ClientInner<S::Message>, PhantomData<S>);
 
-impl<M, R, S> Clone for Client<M, R, S> {
+impl<S: Service> Clone for Client<S> {
     fn clone(&self) -> Self {
         Self(self.0.clone(), PhantomData)
     }
 }
 
-impl<M, R, S> From<LocalSender<M, S>> for Client<M, R, S> {
-    fn from(tx: LocalSender<M, S>) -> Self {
+impl<S: Service> From<LocalSender<S>> for Client<S> {
+    fn from(tx: LocalSender<S>) -> Self {
         Self(ClientInner::Local(tx.0), PhantomData)
     }
 }
 
-impl<M, R, S> From<tokio::sync::mpsc::Sender<M>> for Client<M, R, S> {
-    fn from(tx: tokio::sync::mpsc::Sender<M>) -> Self {
+impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for Client<S> {
+    fn from(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
         LocalSender::from(tx).into()
     }
 }
 
-impl<M, R, S> Client<M, R, S> {
+impl<S: Service> Client<S> {
     /// Create a new client to a remote service using the given quinn `endpoint`
     /// and a socket `addr` of the remote service.
     #[cfg(feature = "rpc")]
@@ -796,7 +799,7 @@ impl<M, R, S> Client<M, R, S> {
 
     /// Get the local sender. This is useful if you don't care about remote
     /// requests.
-    pub fn local(&self) -> Option<LocalSender<M, S>> {
+    pub fn local(&self) -> Option<LocalSender<S>> {
         match &self.0 {
             ClientInner::Local(tx) => Some(tx.clone().into()),
             ClientInner::Remote(..) => None,
@@ -818,12 +821,10 @@ impl<M, R, S> Client<M, R, S> {
     pub fn request(
         &self,
     ) -> impl Future<
-        Output = result::Result<Request<LocalSender<M, S>, rpc::RemoteSender<R, S>>, RequestError>,
+        Output = result::Result<Request<LocalSender<S>, rpc::RemoteSender<S>>, RequestError>,
     > + 'static
     where
         S: Service,
-        M: Send + Sync + 'static,
-        R: 'static,
     {
         #[cfg(feature = "rpc")]
         {
@@ -855,8 +856,8 @@ impl<M, R, S> Client<M, R, S> {
     pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
     where
         S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + Send + Sync + 'static,
+        S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        S::WireMessage: From<Req> + Serialize + Send + Sync + 'static,
         Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
@@ -889,8 +890,8 @@ impl<M, R, S> Client<M, R, S> {
     ) -> impl Future<Output = Result<channel::mpsc::Receiver<Res>>> + Send + 'static
     where
         S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + Send + Sync + 'static,
+        S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        S::WireMessage: From<Req> + Serialize + Send + Sync + 'static,
         Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
@@ -927,8 +928,8 @@ impl<M, R, S> Client<M, R, S> {
     >
     where
         S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + 'static,
+        S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        S::WireMessage: From<Req> + Serialize + 'static,
         Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>,
         Update: RpcMessage,
         Res: RpcMessage,
@@ -968,8 +969,8 @@ impl<M, R, S> Client<M, R, S> {
            + 'static
     where
         S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + Send + 'static,
+        S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
+        S::WireMessage: From<Req> + Serialize + Send + 'static,
         Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>
             + Send
             + 'static,
@@ -1093,23 +1094,23 @@ impl From<RequestError> for io::Error {
 /// [`WithChannels`].
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct LocalSender<M, S>(tokio::sync::mpsc::Sender<M>, std::marker::PhantomData<S>);
+pub struct LocalSender<S: Service>(tokio::sync::mpsc::Sender<S::Message>);
 
-impl<M, S> Clone for LocalSender<M, S> {
+impl<S: Service> Clone for LocalSender<S> {
     fn clone(&self) -> Self {
-        Self(self.0.clone(), PhantomData)
+        Self(self.0.clone())
     }
 }
 
-impl<M, S> From<tokio::sync::mpsc::Sender<M>> for LocalSender<M, S> {
-    fn from(tx: tokio::sync::mpsc::Sender<M>) -> Self {
-        Self(tx, PhantomData)
+impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for LocalSender<S> {
+    fn from(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
+        Self(tx)
     }
 }
 
 #[cfg(not(feature = "rpc"))]
 pub mod rpc {
-    pub struct RemoteSender<R, S>(std::marker::PhantomData<(R, S)>);
+    pub struct RemoteSender<S>(std::marker::PhantomData<(R, S)>);
 }
 
 #[cfg(feature = "rpc")]
@@ -1122,7 +1123,7 @@ pub mod rpc {
 
     use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
     use quinn::ConnectionError;
-    use serde::{de::DeserializeOwned, Serialize};
+    use serde::de::DeserializeOwned;
     use smallvec::SmallVec;
     use tracing::{trace, trace_span, warn, Instrument};
 
@@ -1287,24 +1288,21 @@ pub mod rpc {
 
     /// A connection to a remote service that can be used to send the initial message.
     #[derive(Debug)]
-    pub struct RemoteSender<R, S>(
+    pub struct RemoteSender<S>(
         quinn::SendStream,
         quinn::RecvStream,
-        std::marker::PhantomData<(R, S)>,
+        std::marker::PhantomData<S>,
     );
 
-    impl<R, S> RemoteSender<R, S> {
+    impl<S: Service> RemoteSender<S> {
         pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
             Self(send, recv, PhantomData)
         }
 
         pub async fn write(
             self,
-            msg: impl Into<R>,
-        ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError>
-        where
-            R: Serialize,
-        {
+            msg: impl Into<S::WireMessage>,
+        ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
             let RemoteSender(mut send, recv, _) = self;
             let msg = msg.into();
             if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
@@ -1612,14 +1610,15 @@ pub mod rpc {
 
         fn from_wire(msg: Self::WireMessage, rx: quinn::RecvStream, tx: quinn::SendStream) -> Self;
 
-        fn forwarding_handler<S: Service>(
-            local_sender: LocalSender<Self, S>,
+        fn forwarding_handler<S: Service<Message = Self>>(
+            local_sender: LocalSender<S>,
         ) -> Handler<Self::WireMessage>
         where
             Self: Sized,
         {
             Arc::new(move |msg, rx, tx| {
-                Box::pin(local_sender.send_raw(Self::from_wire(msg, rx, tx)))
+                let msg = Self::from_wire(msg, rx, tx);
+                Box::pin(local_sender.send_raw(msg))
             })
         }
     }
@@ -1728,19 +1727,19 @@ pub enum Request<L, R> {
     Remote(R),
 }
 
-impl<M: Send, S: Service> LocalSender<M, S> {
+impl<S: Service> LocalSender<S> {
     /// Send a message to the service
-    pub fn send<T>(&self, value: impl Into<WithChannels<T, S>>) -> SendFut<M>
+    pub fn send<T>(&self, value: impl Into<WithChannels<T, S>>) -> SendFut<S::Message>
     where
         T: Channels<S>,
-        M: From<WithChannels<T, S>>,
+        S::Message: From<WithChannels<T, S>>,
     {
-        let value: M = value.into().into();
+        let value: S::Message = value.into().into();
         SendFut::new(self.0.clone(), value)
     }
 
     /// Send a message to the service without the type conversion magic
-    pub fn send_raw(&self, value: M) -> SendFut<M> {
+    pub fn send_raw(&self, value: S::Message) -> SendFut<S::Message> {
         SendFut::new(self.0.clone(), value)
     }
 }

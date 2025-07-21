@@ -15,18 +15,17 @@ use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-/// A simple storage service, just to try it out
-#[derive(Debug, Clone, Copy)]
-struct StorageService;
-
-impl Service for StorageService {}
+impl Service for StorageProtocol {
+    type Message = StorageMessage;
+    type WireMessage = Self;
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Get {
     key: String,
 }
 
-impl Channels<StorageService> for Get {
+impl Channels<StorageProtocol> for Get {
     type Rx = NoReceiver;
     type Tx = oneshot::Sender<Option<String>>;
 }
@@ -34,7 +33,7 @@ impl Channels<StorageService> for Get {
 #[derive(Debug, Serialize, Deserialize)]
 struct List;
 
-impl Channels<StorageService> for List {
+impl Channels<StorageProtocol> for List {
     type Rx = NoReceiver;
     type Tx = mpsc::Sender<String>;
 }
@@ -45,12 +44,12 @@ struct Set {
     value: String,
 }
 
-impl Channels<StorageService> for Set {
+impl Channels<StorageProtocol> for Set {
     type Rx = NoReceiver;
     type Tx = oneshot::Sender<()>;
 }
 
-#[derive(derive_more::From, Serialize, Deserialize)]
+#[derive(derive_more::From, Serialize, Deserialize, Debug)]
 enum StorageProtocol {
     Get(Get),
     Set(Set),
@@ -59,9 +58,9 @@ enum StorageProtocol {
 
 #[derive(derive_more::From)]
 enum StorageMessage {
-    Get(WithChannels<Get, StorageService>),
-    Set(WithChannels<Set, StorageService>),
-    List(WithChannels<List, StorageService>),
+    Get(WithChannels<Get, StorageProtocol>),
+    Set(WithChannels<Set, StorageProtocol>),
+    List(WithChannels<List, StorageProtocol>),
 }
 
 struct StorageActor {
@@ -77,7 +76,7 @@ impl StorageActor {
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<StorageMessage, StorageService>::from(tx);
+        let local = LocalSender::<StorageProtocol>::from(tx);
         StorageApi {
             inner: local.into(),
         }
@@ -115,7 +114,7 @@ impl StorageActor {
     }
 }
 struct StorageApi {
-    inner: Client<StorageMessage, StorageProtocol, StorageService>,
+    inner: Client<StorageProtocol>,
 }
 
 impl StorageApi {
