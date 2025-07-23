@@ -1613,9 +1613,13 @@ pub mod rpc {
             + 'static,
     >;
 
+    /// Extension trait to [`Service`] to create a [`Service::Message`] from a [`Service::WireMessage`]
+    /// and a pair of QUIC streams.
+    ///
+    /// This trait is auto-implemented when using the [`crate::rpc_requests`] macro.
     pub trait RemoteService: Service + Sized {
-        /// Creates a message from a wire message and a pair of quic streams.
-        fn from_wire(
+        /// Creates a message from a wire message and a pair of QUIC streams.
+        fn with_channels(
             msg: Self::WireMessage,
             rx: quinn::RecvStream,
             tx: quinn::SendStream,
@@ -1624,7 +1628,7 @@ pub mod rpc {
         /// Creates a [`Handler`] that forwards all messages to a [`LocalSender`].
         fn forwarding_handler(local_sender: LocalSender<Self>) -> Handler<Self::WireMessage> {
             Arc::new(move |msg, rx, tx| {
-                let msg = Self::from_wire(msg, rx, tx);
+                let msg = Self::with_channels(msg, rx, tx);
                 Box::pin(local_sender.send_raw(msg))
             })
         }
@@ -1673,7 +1677,7 @@ pub mod rpc {
     ) -> std::io::Result<Option<S::Message>> {
         Ok(read_request_raw::<S::WireMessage>(connection)
             .await?
-            .map(|(msg, rx, tx)| S::from_wire(msg, rx, tx)))
+            .map(|(msg, rx, tx)| S::with_channels(msg, rx, tx)))
     }
 
     /// Reads a single request from the connection.

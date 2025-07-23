@@ -118,7 +118,7 @@ fn generate_message_enum_from_impls(
 }
 
 /// Generate Message::from_quic_streams impl
-fn generate_message_from_wire_impl(
+fn generate_remote_service_impl(
     message_enum_name: &Ident,
     proto_enum_name: &Ident,
     variants_with_attr: &[(Ident, Type)],
@@ -135,7 +135,7 @@ fn generate_message_from_wire_impl(
 
     quote! {
         impl ::irpc::rpc::RemoteService for #proto_enum_name {
-            fn from_wire(
+            fn with_channels(
                 msg: Self::WireMessage,
                 rx: ::irpc::rpc::quinn::RecvStream,
                 tx: ::irpc::rpc::quinn::SendStream
@@ -239,6 +239,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let alias_suffix = args.alias_suffix;
 
     let enum_name = &input.ident;
+    let should_impl_service = args.service_enum_name.is_none();
     let service_name = args.service_enum_name.as_ref().unwrap_or(enum_name);
     let vis = &input.vis;
     let input_span = input.span();
@@ -358,25 +359,36 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         let message_from_impls =
             generate_message_enum_from_impls(&message_enum_name, &variants_with_attr, service_name);
 
-        let message_from_quic_streams =
-            generate_message_from_wire_impl(&message_enum_name, enum_name, &variants_with_attr);
+        let remote_service_impl = if should_impl_service {
+            generate_remote_service_impl(&message_enum_name, enum_name, &variants_with_attr)
+        } else {
+            quote! {}
+        };
 
         quote! {
             #message_enum
-            #message_from_quic_streams
+            #remote_service_impl
             #parent_span_impl
             #message_from_impls
         }
+    };
+
+    let service_impl = if should_impl_service {
+        quote! {
+            impl ::irpc::Service for #service_name {
+                type Message = #message_enum_name;
+                type WireMessage = #enum_name;
+            }
+        }
+    } else {
+        quote! {}
     };
 
     // Combine everything
     let output = quote! {
         #input
 
-        impl ::irpc::Service for #service_name {
-            type Message = #message_enum_name;
-            type WireMessage = #enum_name;
-        }
+        #service_impl
 
         // Channel implementations
         #(#channel_impls)*
@@ -403,7 +415,7 @@ struct MacroArgs {
 
 impl Parse for MacroArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let message_enum_name = input.parse()?;
+        let message_enum_name: Ident = input.parse()?;
         // Initialize optional parameters
         let mut service_enum_name = None;
         let mut alias_suffix = None;
@@ -416,7 +428,8 @@ impl Parse for MacroArgs {
 
             match param_name.to_string().as_str() {
                 "service" => {
-                    service_enum_name = Some(input.parse()?);
+                    let name: Ident = input.parse()?;
+                    service_enum_name = Some(name);
                 }
                 "alias" => {
                     let lit: LitStr = input.parse()?;
