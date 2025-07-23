@@ -1134,7 +1134,7 @@ pub mod rpc {
             oneshot, RecvError, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
-        LocalSender, RequestError, RpcMessage, Service, WithChannels,
+        LocalSender, RequestError, RpcMessage, Service,
     };
 
     /// This is used by irpc-derive to refer to quinn types (SendStream and RecvStream)
