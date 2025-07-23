@@ -29,29 +29,28 @@ fn generate_parent_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> Tok
     quote! {
         impl #enum_name {
             /// Get the parent span of the message
-            pub fn parent_span(&self) -> ::tracing::Span {
-                let span = match self {
-                    #(#enum_name::#variant_names(inner) => inner.parent_span_opt()),*
-                };
-                span.cloned().unwrap_or_else(|| ::tracing::Span::current())
+            pub fn parent_span(&self) -> tracing::Span {
+                match self {
+                    #(#enum_name::#variant_names(inner) => inner.parent_span().clone()),*
+                }
             }
         }
     }
 }
 
 fn generate_channels_impl(
-    mut args: NamedTypeArgs,
+    mut types: NamedTypes,
     service_name: &Ident,
     request_type: &Type,
     attr_span: Span,
 ) -> syn::Result<TokenStream2> {
     // Try to get rx, default to NoReceiver if not present
     // Use unwrap_or_else for a cleaner default
-    let rx = args.types.remove(RX_ATTR).unwrap_or_else(|| {
+    let rx = types.0.remove(RX_ATTR).unwrap_or_else(|| {
         // We can safely unwrap here because this is a known valid type
         syn::parse_str::<Type>(DEFAULT_RX_TYPE).expect("Failed to parse default rx type")
     });
-    let tx = args.get(TX_ATTR, attr_span)?;
+    let tx = types.get(TX_ATTR, attr_span)?;
 
     let res = quote! {
         impl ::irpc::Channels<#service_name> for #request_type {
@@ -60,19 +59,19 @@ fn generate_channels_impl(
         }
     };
 
-    args.check_empty(attr_span)?;
+    types.check_empty(attr_span)?;
     Ok(res)
 }
 
 /// Generates From implementations for protocol enum variants.
 fn generate_protocol_enum_from_impls(
     enum_name: &Ident,
-    variants_with_attr: &[(Ident, Type)],
+    variants_with_attr: &[(Ident, Type, VariantKind)],
 ) -> TokenStream2 {
     let mut impls = quote! {};
 
     // Generate From implementations for each case that has an rpc attribute
-    for (variant_name, inner_type) in variants_with_attr {
+    for (variant_name, inner_type, _) in variants_with_attr {
         let impl_tokens = quote! {
             impl From<#inner_type> for #enum_name {
                 fn from(value: #inner_type) -> Self {
@@ -93,17 +92,30 @@ fn generate_protocol_enum_from_impls(
 /// Generates From implementations for message enum variants.
 fn generate_message_enum_from_impls(
     message_enum_name: &Ident,
-    variants_with_attr: &[(Ident, Type)],
+    variants_with_attr: &[(Ident, Type, VariantKind)],
     service_name: &Ident,
 ) -> TokenStream2 {
     let mut impls = quote! {};
 
     // Generate From<WithChannels<T, Service>> implementations for each case with an rpc attribute
-    for (variant_name, inner_type) in variants_with_attr {
-        let impl_tokens = quote! {
-            impl From<::irpc::WithChannels<#inner_type, #service_name>> for #message_enum_name {
-                fn from(value: ::irpc::WithChannels<#inner_type, #service_name>) -> Self {
-                    #message_enum_name::#variant_name(value)
+    for (variant_name, inner_type, kind) in variants_with_attr {
+        let impl_tokens = match kind {
+            VariantKind::Direct => {
+                quote! {
+                    impl From<::irpc::WithChannels<#inner_type, #service_name>> for #message_enum_name {
+                        fn from(value: ::irpc::WithChannels<#inner_type, #service_name>) -> Self {
+                            #message_enum_name::#variant_name(value)
+                        }
+                    }
+                }
+            }
+            VariantKind::Nested(ident) => {
+                quote! {
+                    impl From<#ident> for #message_enum_name {
+                        fn from(value: #ident) -> Self {
+                            #message_enum_name::#variant_name(value)
+                        }
+                    }
                 }
             }
         };
@@ -121,14 +133,23 @@ fn generate_message_enum_from_impls(
 fn generate_remote_service_impl(
     message_enum_name: &Ident,
     proto_enum_name: &Ident,
-    variants_with_attr: &[(Ident, Type)],
+    variants_with_attr: &[(Ident, Type, VariantKind)],
 ) -> TokenStream2 {
     let variants = variants_with_attr
         .iter()
-        .map(|(variant_name, _inner_type)| {
-            quote! {
-                #proto_enum_name::#variant_name(msg) => {
-                    #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
+        .map(|(variant_name, _inner_type, kind)| match kind {
+            VariantKind::Direct => {
+                quote! {
+                    #proto_enum_name::#variant_name(msg) => {
+                        #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
+                    }
+                }
+            }
+            VariantKind::Nested(_) => {
+                quote! {
+                    #proto_enum_name::#variant_name(msg) => {
+                        #message_enum_name::from(msg.with_remote_channels(rx, tx))
+                    }
                 }
             }
         });
@@ -174,6 +195,11 @@ fn generate_type_aliases(
     }
 
     aliases
+}
+
+enum VariantKind {
+    Direct,
+    Nested(Ident),
 }
 
 #[proc_macro_attribute]
@@ -253,16 +279,31 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // Process variants with rpc attributes
         if let Some(attr) = rpc_attr {
-            variants_with_attr.push((variant.ident.clone(), request_type.clone()));
-
-            let args = match attr.parse_args::<NamedTypeArgs>() {
+            let args = match attr.parse_args::<VariantArgs>() {
                 Ok(info) => info,
                 Err(e) => return e.to_compile_error().into(),
             };
 
-            match generate_channels_impl(args, enum_name, request_type, attr.span()) {
-                Ok(impls) => channel_impls.push(impls),
-                Err(e) => return e.to_compile_error().into(),
+            match args {
+                VariantArgs::NamedTypes(types) => {
+                    variants_with_attr.push((
+                        variant.ident.clone(),
+                        request_type.clone(),
+                        VariantKind::Direct,
+                    ));
+
+                    match generate_channels_impl(types, enum_name, request_type, attr.span()) {
+                        Ok(impls) => channel_impls.push(impls),
+                        Err(e) => return e.to_compile_error().into(),
+                    }
+                }
+                VariantArgs::Nested(ident) => {
+                    variants_with_attr.push((
+                        variant.ident.clone(),
+                        request_type.clone(),
+                        VariantKind::Nested(ident),
+                    ));
+                }
             }
         }
     }
@@ -281,12 +322,20 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Generate the extended message enum if requested
     let extended_enum_code = if let Some(message_enum_name) = args.message_enum_name.as_ref() {
-        let message_variants = all_variants
+        let message_variants = variants_with_attr
             .iter()
-            .map(|(variant_name, inner_type)| {
-                quote! {
-                    #[allow(missing_docs)]
-                    #variant_name(::irpc::WithChannels<#inner_type, #enum_name>)
+            .map(|(variant_name, inner_type, kind)| match kind {
+                VariantKind::Direct => {
+                    quote! {
+                        #[allow(missing_docs)]
+                        #variant_name(::irpc::WithChannels<#inner_type, #enum_name>)
+                    }
+                }
+                VariantKind::Nested(ident) => {
+                    quote! {
+                        #[allow(missing_docs)]
+                        #variant_name(#ident)
+                    }
                 }
             })
             .collect::<Vec<_>>();
@@ -443,28 +492,31 @@ impl Parse for MacroArgs {
     }
 }
 
-struct NamedTypeArgs {
-    types: BTreeMap<String, Type>,
+enum VariantArgs {
+    NamedTypes(NamedTypes),
+    Nested(Ident),
 }
 
-impl NamedTypeArgs {
+struct NamedTypes(BTreeMap<String, Type>);
+
+impl NamedTypes {
     /// Get and remove a type from the map, failing if it doesn't exist
     fn get(&mut self, key: &str, span: Span) -> syn::Result<Type> {
-        self.types
+        self.0
             .remove(key)
             .ok_or_else(|| syn::Error::new(span, format!("rpc requires a {key} type")))
     }
 
     /// Fail if there are any unknown arguments remaining
     fn check_empty(&self, span: Span) -> syn::Result<()> {
-        if self.types.is_empty() {
+        if self.0.is_empty() {
             Ok(())
         } else {
             Err(syn::Error::new(
                 span,
                 format!(
                     "Unknown arguments provided: {:?}",
-                    self.types.keys().collect::<Vec<_>>()
+                    self.0.keys().collect::<Vec<_>>()
                 ),
             ))
         }
@@ -472,7 +524,7 @@ impl NamedTypeArgs {
 }
 
 /// Parse the rpc args as a comma separated list of name=type pairs
-impl Parse for NamedTypeArgs {
+impl Parse for VariantArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut types = BTreeMap::new();
 
@@ -483,6 +535,19 @@ impl Parse for NamedTypeArgs {
 
             let key: Ident = input.parse()?;
             let _: Token![=] = input.parse()?;
+
+            if key == "nested" {
+                return if types.is_empty() {
+                    let value: Ident = input.parse()?;
+                    Ok(VariantArgs::Nested(value))
+                } else {
+                    Err(syn::Error::new(
+                        input.span(),
+                        format!("nested may not be combined with other arguments"),
+                    ))
+                };
+            }
+
             let value: Type = input.parse()?;
 
             types.insert(key.to_string(), value);
@@ -493,6 +558,6 @@ impl Parse for NamedTypeArgs {
             let _: Token![,] = input.parse()?;
         }
 
-        Ok(NamedTypeArgs { types })
+        Ok(VariantArgs::NamedTypes(NamedTypes(types)))
     }
 }
