@@ -1,13 +1,12 @@
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
 };
 
 use anyhow::bail;
 use irpc::{
     channel::{mpsc, none::NoReceiver, oneshot},
-    rpc::{listen, Handler},
+    rpc::{listen, RemoteService},
     util::{make_client_endpoint, make_server_endpoint},
     Channels, Client, Request, Service, WithChannels,
 };
@@ -17,7 +16,6 @@ use tracing::info;
 
 impl Service for StorageProtocol {
     type Message = StorageMessage;
-    type WireMessage = Self;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,6 +59,16 @@ enum StorageMessage {
     Get(WithChannels<Get, StorageProtocol>),
     Set(WithChannels<Set, StorageProtocol>),
     List(WithChannels<List, StorageProtocol>),
+}
+
+impl RemoteService for StorageProtocol {
+    fn with_remote_channels(self, rx: quinn::RecvStream, tx: quinn::SendStream) -> Self::Message {
+        match self {
+            StorageProtocol::Get(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::Set(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::List(msg) => WithChannels::from((msg, tx, rx)).into(),
+        }
+    }
 }
 
 struct StorageActor {
@@ -127,14 +135,7 @@ impl StorageApi {
         let Some(local) = self.inner.as_local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler: Handler<StorageProtocol> = Arc::new(move |msg, _rx, tx| {
-            let local = local.clone();
-            Box::pin(match msg {
-                StorageProtocol::Get(msg) => local.send((msg, tx)),
-                StorageProtocol::Set(msg) => local.send((msg, tx)),
-                StorageProtocol::List(msg) => local.send((msg, tx)),
-            })
-        });
+        let handler = StorageProtocol::remote_handler(local);
         Ok(AbortOnDropHandle::new(task::spawn(listen(
             endpoint, handler,
         ))))

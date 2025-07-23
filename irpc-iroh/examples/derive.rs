@@ -170,7 +170,7 @@ mod storage {
                 .inner
                 .as_local()
                 .context("can not listen on remote service")?;
-            Ok(IrohProtocol::new(StorageProtocol::forwarding_handler(
+            Ok(IrohProtocol::new(StorageProtocol::remote_handler(
                 local,
             )))
         }

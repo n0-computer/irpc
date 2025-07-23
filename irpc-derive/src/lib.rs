@@ -135,12 +135,12 @@ fn generate_remote_service_impl(
 
     quote! {
         impl ::irpc::rpc::RemoteService for #proto_enum_name {
-            fn with_channels(
-                msg: Self::WireMessage,
+            fn with_remote_channels(
+                self,
                 rx: ::irpc::rpc::quinn::RecvStream,
                 tx: ::irpc::rpc::quinn::SendStream
             ) -> Self::Message {
-                match msg {
+                match self {
                     #(#variants),*
                 }
             }
@@ -239,8 +239,6 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let alias_suffix = args.alias_suffix;
 
     let enum_name = &input.ident;
-    let should_impl_service = args.service_enum_name.is_none();
-    let service_name = args.service_enum_name.as_ref().unwrap_or(enum_name);
     let vis = &input.vis;
     let input_span = input.span();
 
@@ -310,7 +308,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                 Err(e) => return e.to_compile_error().into(),
             };
 
-            match generate_channels_impl(args, service_name, request_type, attr.span()) {
+            match generate_channels_impl(args, enum_name, request_type, attr.span()) {
                 Ok(impls) => channel_impls.push(impls),
                 Err(e) => return e.to_compile_error().into(),
             }
@@ -323,7 +321,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate type aliases if requested
     let type_aliases = if let Some(suffix) = alias_suffix {
         // Use all variants for type aliases, not just those with rpc attributes
-        generate_type_aliases(&all_variants, service_name, &suffix)
+        generate_type_aliases(&all_variants, enum_name, &suffix)
     } else {
         quote! {}
     };
@@ -335,7 +333,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             .map(|(variant_name, inner_type)| {
                 quote! {
                     #[allow(missing_docs)]
-                    #variant_name(::irpc::WithChannels<#inner_type, #service_name>)
+                    #variant_name(::irpc::WithChannels<#inner_type, #enum_name>)
                 }
             })
             .collect::<Vec<_>>();
@@ -357,13 +355,10 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // Generate From implementations for the message enum (only for variants with rpc attributes)
         let message_from_impls =
-            generate_message_enum_from_impls(&message_enum_name, &variants_with_attr, service_name);
+            generate_message_enum_from_impls(&message_enum_name, &variants_with_attr, enum_name);
 
-        let remote_service_impl = if should_impl_service {
-            generate_remote_service_impl(&message_enum_name, enum_name, &variants_with_attr)
-        } else {
-            quote! {}
-        };
+        let remote_service_impl =
+            generate_remote_service_impl(&message_enum_name, enum_name, &variants_with_attr);
 
         quote! {
             #message_enum
@@ -373,15 +368,10 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let service_impl = if should_impl_service {
-        quote! {
-            impl ::irpc::Service for #service_name {
-                type Message = #message_enum_name;
-                type WireMessage = #enum_name;
-            }
+    let service_impl = quote! {
+        impl ::irpc::Service for #enum_name {
+            type Message = #message_enum_name;
         }
-    } else {
-        quote! {}
     };
 
     // Combine everything
@@ -409,7 +399,6 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 // Parse arguments for the macro
 struct MacroArgs {
     message_enum_name: Ident,
-    service_enum_name: Option<Ident>,
     alias_suffix: Option<String>,
 }
 
@@ -417,7 +406,6 @@ impl Parse for MacroArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let message_enum_name: Ident = input.parse()?;
         // Initialize optional parameters
-        let mut service_enum_name = None;
         let mut alias_suffix = None;
 
         // Parse any additional named parameters
@@ -427,10 +415,6 @@ impl Parse for MacroArgs {
             input.parse::<Token![=]>()?;
 
             match param_name.to_string().as_str() {
-                "service" => {
-                    let name: Ident = input.parse()?;
-                    service_enum_name = Some(name);
-                }
                 "alias" => {
                     let lit: LitStr = input.parse()?;
                     alias_suffix = Some(lit.value());
@@ -445,7 +429,6 @@ impl Parse for MacroArgs {
         }
 
         Ok(MacroArgs {
-            service_enum_name,
             message_enum_name,
             alias_suffix,
         })

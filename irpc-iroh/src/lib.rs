@@ -145,9 +145,9 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
 pub async fn read_request<S: RemoteService>(
     connection: &Connection,
 ) -> std::io::Result<Option<S::Message>> {
-    Ok(read_request_raw::<S::WireMessage>(connection)
+    Ok(read_request_raw::<S>(connection)
         .await?
-        .map(|(msg, rx, tx)| S::with_channels(msg, rx, tx)))
+        .map(|(msg, rx, tx)| S::with_remote_channels(msg, rx, tx)))
 }
 
 /// Reads a single request from the connection.

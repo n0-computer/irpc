@@ -132,7 +132,7 @@ impl StorageApi {
             .context("cannot listen on remote API")?;
         let join_handle = task::spawn(irpc::rpc::listen(
             endpoint,
-            StorageProtocol::forwarding_handler(local),
+            StorageProtocol::remote_handler(local),
         ));
         Ok(AbortOnDropHandle::new(join_handle))
     }

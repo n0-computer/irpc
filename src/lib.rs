@@ -113,8 +113,7 @@ impl<T> RpcMessage for T where
 ///
 /// A service acts as a scope for defining the tx and rx channels for each
 /// message type, and provides some type safety when sending messages.
-pub trait Service: Send + Sync + Debug + 'static {
-    type WireMessage: Serialize + DeserializeOwned + Send + 'static;
+pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static {
     type Message: Send + Unpin + 'static;
 }
 
@@ -860,9 +859,8 @@ impl<S: Service> Client<S> {
     /// Performs a request for which the server returns a oneshot receiver.
     pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
     where
-        S: Service,
+        S: Service + From<Req>,
         S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        S::WireMessage: From<Req> + Serialize + Send + Sync + 'static,
         Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
@@ -894,9 +892,8 @@ impl<S: Service> Client<S> {
         local_response_cap: usize,
     ) -> impl Future<Output = Result<channel::mpsc::Receiver<Res>>> + Send + 'static
     where
-        S: Service,
+        S: Service + From<Req>,
         S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        S::WireMessage: From<Req> + Serialize + Send + Sync + 'static,
         Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = NoReceiver> + Send + 'static,
         Res: RpcMessage,
     {
@@ -932,9 +929,8 @@ impl<S: Service> Client<S> {
         )>,
     >
     where
-        S: Service,
+        S: Service + From<Req>,
         S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        S::WireMessage: From<Req> + Serialize + 'static,
         Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>,
         Update: RpcMessage,
         Res: RpcMessage,
@@ -973,9 +969,8 @@ impl<S: Service> Client<S> {
            + Send
            + 'static
     where
-        S: Service,
+        S: Service + From<Req>,
         S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        S::WireMessage: From<Req> + Serialize + Send + 'static,
         Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>
             + Send
             + 'static,
@@ -1139,7 +1134,7 @@ pub mod rpc {
             oneshot, RecvError, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
-        LocalSender, RequestError, RpcMessage, Service,
+        LocalSender, RequestError, RpcMessage, Service, WithChannels,
     };
 
     /// This is used by irpc-derive to refer to quinn types (SendStream and RecvStream)
@@ -1309,7 +1304,7 @@ pub mod rpc {
 
         pub async fn write(
             self,
-            msg: impl Into<S::WireMessage>,
+            msg: impl Into<S>,
         ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
             let RemoteSender(mut send, recv, _) = self;
             let msg = msg.into();
@@ -1613,22 +1608,21 @@ pub mod rpc {
             + 'static,
     >;
 
-    /// Extension trait to [`Service`] to create a [`Service::Message`] from a [`Service::WireMessage`]
+    /// Extension trait to [`Service`] to create a [`Service::Message`] from a [`Service`]
     /// and a pair of QUIC streams.
     ///
     /// This trait is auto-implemented when using the [`crate::rpc_requests`] macro.
     pub trait RemoteService: Service + Sized {
-        /// Creates a message from a wire message and a pair of QUIC streams.
-        fn with_channels(
-            msg: Self::WireMessage,
+        fn with_remote_channels(
+            self,
             rx: quinn::RecvStream,
             tx: quinn::SendStream,
         ) -> Self::Message;
 
         /// Creates a [`Handler`] that forwards all messages to a [`LocalSender`].
-        fn forwarding_handler(local_sender: LocalSender<Self>) -> Handler<Self::WireMessage> {
+        fn remote_handler(local_sender: LocalSender<Self>) -> Handler<Self> {
             Arc::new(move |msg, rx, tx| {
-                let msg = Self::with_channels(msg, rx, tx);
+                let msg = Self::with_remote_channels(msg, rx, tx);
                 Box::pin(local_sender.send_raw(msg))
             })
         }
@@ -1675,9 +1669,9 @@ pub mod rpc {
     pub async fn read_request<S: RemoteService>(
         connection: &quinn::Connection,
     ) -> std::io::Result<Option<S::Message>> {
-        Ok(read_request_raw::<S::WireMessage>(connection)
+        Ok(read_request_raw::<S>(connection)
             .await?
-            .map(|(msg, rx, tx)| S::with_channels(msg, rx, tx)))
+            .map(|(msg, rx, tx)| S::with_remote_channels(msg, rx, tx)))
     }
 
     /// Reads a single request from the connection.
