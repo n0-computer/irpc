@@ -97,10 +97,10 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, resul
 ///     * Generates a [`RemoteService`] implementation for the protocol enum.
 /// * `alias = "<suffix>"` *(optional)*: Generate type aliases with the given suffix for each [`WithChannels<T, Service>`].
 /// * `rpc_feature = "<feature>"` *(optional)*: If set, the [`RemoteService`] implementation will be feature-flagged
-///    with this feature. Set this if your crate only optionally enables the `rpc` feature
-///    of [`irpc`].
+///   with this feature. Set this if your crate only optionally enables the `rpc` feature
+///   of [`irpc`].
 /// * `no_rpc` *(optional, no value)*: If set, no implementation of [`RemoteService`] will be generated and the generated
-///    code works without the `rpc` feature of `irpc`.
+///   code works without the `rpc` feature of `irpc`.
 /// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
 ///
 /// # Variant Attributes

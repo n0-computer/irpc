@@ -304,14 +304,14 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // Generate parent_span method
         let parent_span_impl = if !args.no_spans {
-            generate_parent_span_impl(&message_enum_name, &variant_names)
+            generate_parent_span_impl(message_enum_name, &variant_names)
         } else {
             quote! {}
         };
 
         // Generate From implementations for the message enum (only for variants with rpc attributes)
         let message_from_impls =
-            generate_message_enum_from_impls(&message_enum_name, &variants_with_attr, enum_name);
+            generate_message_enum_from_impls(message_enum_name, &variants_with_attr, enum_name);
 
         let service_impl = quote! {
             impl ::irpc::Service for #enum_name {
@@ -321,7 +321,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         let remote_service_impl = if !args.no_rpc {
             let block =
-                generate_remote_service_impl(&message_enum_name, enum_name, &variants_with_attr);
+                generate_remote_service_impl(message_enum_name, enum_name, &variants_with_attr);
             quote! {
                 #cfg_feature_rpc
                 #block
