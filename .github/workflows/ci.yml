@@ -65,6 +65,8 @@ jobs:
         run: cargo test --locked --workspace --no-default-features --bins --tests --examples
       - name: cargo check (irpc, no default features)
         run: cargo check --locked --no-default-features --bins --tests --examples
+      - name: cargo check (irpc, feature derive)
+        run: cargo check --locked --no-default-features --features derive --bins --tests --examples
       - name: cargo check (irpc, feature spans)
         run: cargo check --locked --no-default-features --features spans --bins --tests --examples
       - name: cargo check (irpc, feature rpc)

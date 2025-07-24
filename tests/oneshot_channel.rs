@@ -1,3 +1,5 @@
+#![cfg(feature = "rpc")]
+
 use std::io::{self, ErrorKind};
 
 use irpc::{

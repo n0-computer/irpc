@@ -1,5 +1,3 @@
-#![cfg(feature = "rpc")]
-
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},

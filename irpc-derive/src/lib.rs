@@ -399,7 +399,7 @@ impl Parse for MacroArgs {
                     if no_rpc {
                         return Err(syn::Error::new(
                             param_name.span(),
-                            format!("rpc_feature is incompatible with no_rpc"),
+                            "rpc_feature is incompatible with no_rpc",
                         ));
                     }
                     let lit: LitStr = input.parse()?;
@@ -407,12 +407,10 @@ impl Parse for MacroArgs {
                 }
                 "no_rpc" => {
                     if rpc_feature.is_some() {
-                        if no_rpc {
-                            return Err(syn::Error::new(
-                                param_name.span(),
-                                format!("rpc_feature is incompatible with no_rpc"),
-                            ));
-                        }
+                        return Err(syn::Error::new(
+                            param_name.span(),
+                            "rpc_feature is incompatible with no_rpc",
+                        ));
                     }
                     no_rpc = true;
                 }

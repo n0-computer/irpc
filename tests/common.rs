@@ -1,3 +1,5 @@
+#![cfg(feature = "rpc")]
+
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use irpc::util::{make_client_endpoint, make_server_endpoint};
