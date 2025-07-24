@@ -1,3 +1,5 @@
+#![cfg(feature = "rpc")]
+
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -41,7 +43,7 @@ struct SetMany;
 
 // Use the macro to generate both the StorageProtocol and StorageMessage enums
 // plus implement Channels for each type
-#[rpc_requests(StorageMessage)]
+#[rpc_requests(message = StorageMessage)]
 #[derive(Serialize, Deserialize, Debug)]
 enum StorageProtocol {
     #[rpc(tx=oneshot::Sender<Option<String>>)]

@@ -57,16 +57,18 @@ jobs:
           toolchain: ${{ matrix.channel }}
           targets: ${{ matrix.target.toolchain }}
       - uses: swatinem/rust-cache@v2
-      - name: cargo test (all features)
+      - name: cargo test (workspace, all features)
         run: cargo test --locked --workspace --all-features --bins --tests --examples
-      - name: cargo test (default features)
+      - name: cargo test (workspace, default features)
         run: cargo test --locked --workspace --bins --tests --examples
-      - name: cargo test (no default features)
+      - name: cargo test (workspace, no default features)
         run: cargo test --locked --workspace --no-default-features --bins --tests --examples
-      - name: cargo check (feature message_spans)
-        run: cargo check --no-default-features --features message_spans
-      - name: cargo check (feature rpc)
-        run: cargo check --no-default-features --features rpc
+      - name: cargo check (irpc, no default features)
+        run: cargo check --locked --no-default-features --bins --tests --examples
+      - name: cargo check (irpc, feature spans)
+        run: cargo check --locked --no-default-features --features spans --bins --tests --examples
+      - name: cargo check (irpc, feature rpc)
+        run: cargo check --locked --no-default-features --features rpc --bins --tests --examples
 
   test-release:
     runs-on: ${{ matrix.target.os }}

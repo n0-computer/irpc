@@ -62,7 +62,7 @@
 //! - `rpc`: Enable the rpc features. Enabled by default.
 //!   By disabling this feature, all rpc related dependencies are removed.
 //!   The remaining dependencies are just serde, tokio and tokio-util.
-//! - `message_spans`: Enable tracing spans for messages. Enabled by default.
+//! - `spans`: Enable tracing spans for messages. Enabled by default.
 //!   This is useful even without rpc, to not lose tracing context when message
 //!   passing. This is frequently done manually. This obviously requires
 //!   a dependency on tracing.
@@ -78,9 +78,71 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
+/// Processes an RPC request enum and generates channel implementations.
+///
+/// This macro takes a protocol enum where each variant represents a different RPC request type
+/// and generates the necessary [`Channels`] implementations for each request. It also creates [`From`]
+/// implementations to convert the inner types of each variant into the enum.
+///
+/// When the `message` argument is set, the macro will also create a message enum and implement the
+/// [`Service`] and [`RemoteService`] traits for the protocol enum.
+///
+/// # Macro Arguments
+///
+/// * `message = <name>` *(optional but recommended)*:
+///     * Generates an extended enum wrapping each type in [`WithChannels<T, Service>`].
+///       The value is the name of the message enum.
+///     * Generates a [`Service`] implementation for the protocol enum, with the `Message`
+///       type set to the message enum.
+///     * Generates a [`RemoteService`] implementation for the protocol enum.
+/// * `alias = "<suffix>"` *(optional)*: Generate type aliases with the given suffix for each [`WithChannels<T, Service>`].
+/// * `rpc_feature = "<feature>"` *(optional)*: If set, the [`RemoteService`] implementation will be feature-flagged
+///    with this feature. Set this if your crate only optionally enables the `rpc` feature
+///    of [`irpc`].
+/// * `no_rpc` *(optional, no value)*: If set, no implementation of [`RemoteService`] will be generated and the generated
+///    code works without the `rpc` feature of `irpc`.
+/// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
+///
+/// # Variant Attributes
+///
+/// Individual enum variants can be annotated with the `#[rpc(...)]` attribute to specify channel types:
+///
+/// * `#[rpc(tx=SomeType)]`: Specify the transmitter/sender channel type (required)
+/// * `#[rpc(tx=SomeType, rx=OtherType)]`: Also specify a receiver channel type (optional)
+///
+/// If `rx` is not specified, it defaults to `NoReceiver`.
+///
+/// # Examples
+///
+/// Basic usage:
+/// ```no_compile
+/// #[rpc_requests(message = ComputeMessage)]
+/// enum ComputeProtocol {
+///     #[rpc(tx=oneshot::Sender<u128>)]
+///     Sqr(Sqr),
+///     #[rpc(tx=mpsc::Sender<i64>)]
+///     Sum(Sum),
+/// }
+/// ```
+///
+/// With type aliases:
+/// ```no_compile
+/// #[rpc_requests(message = ComputeMessage, alias = "Msg")]
+/// enum ComputeProtocol {
+///     #[rpc(tx=oneshot::Sender<u128>)]
+///     Sqr(Sqr), // Generates type SqrMsg = WithChannels<Sqr, ComputeService>
+///     #[rpc(tx=mpsc::Sender<i64>)]
+///     Sum(Sum), // Generates type SumMsg = WithChannels<Sum, ComputeService>
+/// }
+/// ```
+///
+/// [`irpc`]: crate
+/// [`RemoteService`]: rpc::RemoteService
+/// [`WithChannels<T, Service>`]: WithChannels
 #[cfg(feature = "derive")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
 pub use irpc_derive::rpc_requests;
+
 use sealed::Sealed;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -106,14 +168,19 @@ impl<T> RpcMessage for T where
 {
 }
 
-/// Marker trait for a service
+/// Trait for a service
 ///
-/// This is usually implemented by a zero-sized struct.
-/// It has various bounds to make derives easier.
+/// This is implemented on the protocol enum.
+/// It is usually auto-implemented via the [`rpc_requests] macro.
 ///
 /// A service acts as a scope for defining the tx and rx channels for each
 /// message type, and provides some type safety when sending messages.
 pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static {
+    /// Message enum for this protocol.
+    ///
+    /// This is expected to be an enum with identical variant names than the
+    /// protocol enum, but its single unit field is the [`WithChannels`] struct
+    /// that contains the inner request plus the `tx` and `rx` channels.
     type Message: Send + Unpin + 'static;
 }
 
@@ -454,8 +521,8 @@ pub mod channel {
             /// ## Cancellation safety
             ///
             /// If the future is dropped before completion, and if this is a remote sender,
-            /// then the sender will be closed and further sends will return an [`io::Error`]
-            /// with [`io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+            /// then the sender will be closed and further sends will return an [`SendError::Io`]
+            /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
             /// future until completion if you want to reuse the sender or any clone afterwards.
             pub async fn send(&self, value: T) -> std::result::Result<(), SendError> {
                 match self {
@@ -484,8 +551,8 @@ pub mod channel {
             /// ## Cancellation safety
             ///
             /// If the future is dropped before completion, and if this is a remote sender,
-            /// then the sender will be closed and further sends will return an [`io::Error`]
-            /// with [`io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+            /// then the sender will be closed and further sends will return an [`SendError::Io`]
+            /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
             /// future until completion if you want to reuse the sender or any clone afterwards.
             pub async fn try_send(&mut self, value: T) -> std::result::Result<bool, SendError> {
                 match self {
@@ -598,6 +665,8 @@ pub mod channel {
         #[error("receiver closed")]
         ReceiverClosed,
         /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+        ///
+        /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
         #[error("maximum message size exceeded")]
         MaxMessageSizeExceeded,
         /// The underlying io error. This can occur for remote communication,
@@ -627,7 +696,9 @@ pub mod channel {
         /// for local communication.
         #[error("sender closed")]
         SenderClosed,
-        /// The message exceeded the maximum allowed message size [`MAX_MESSAGE_SIZE`].
+        /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+        ///
+        /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
         #[error("maximum message size exceeded")]
         MaxMessageSizeExceeded,
         /// An io error occurred. This can occur for remote communication,
@@ -654,7 +725,7 @@ pub mod channel {
 /// The channel kind for rx and tx is defined by implementing the `Channels`
 /// trait, either manually or using a macro.
 ///
-/// When the `message_spans` feature is enabled, this also includes a tracing
+/// When the `spans` feature is enabled, this also includes a tracing
 /// span to carry the tracing context during message passing.
 pub struct WithChannels<I: Channels<S>, S: Service> {
     /// The inner message.
@@ -664,8 +735,8 @@ pub struct WithChannels<I: Channels<S>, S: Service> {
     /// The request channel to receive the request from. Can be set to [`NoReceiver`] if not needed.
     pub rx: <I as Channels<S>>::Rx,
     /// The current span where the full message was created.
-    #[cfg(feature = "message_spans")]
-    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "message_spans")))]
+    #[cfg(feature = "spans")]
+    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
     pub span: tracing::Span,
 }
 
@@ -681,7 +752,7 @@ impl<I: Channels<S> + Debug, S: Service> Debug for WithChannels<I, S> {
 
 impl<I: Channels<S>, S: Service> WithChannels<I, S> {
     /// Get the parent span
-    #[cfg(feature = "message_spans")]
+    #[cfg(feature = "spans")]
     pub fn parent_span_opt(&self) -> Option<&tracing::Span> {
         Some(&self.span)
     }
@@ -702,8 +773,8 @@ where
             inner,
             tx: tx.into(),
             rx: rx.into(),
-            #[cfg(feature = "message_spans")]
-            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "message_spans")))]
+            #[cfg(feature = "spans")]
+            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
             span: tracing::Span::current(),
         }
     }
@@ -724,8 +795,8 @@ where
             inner,
             tx: tx.into(),
             rx: NoReceiver,
-            #[cfg(feature = "message_spans")]
-            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "message_spans")))]
+            #[cfg(feature = "spans")]
+            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
             span: tracing::Span::current(),
         }
     }
@@ -1613,6 +1684,8 @@ pub mod rpc {
     ///
     /// This trait is auto-implemented when using the [`crate::rpc_requests`] macro.
     pub trait RemoteService: Service + Sized {
+        /// Returns the message enum for this request by combining `self` (the protocol enum)
+        /// with a pair of QUIC streams for `tx` and `rx` channels.
         fn with_remote_channels(
             self,
             rx: quinn::RecvStream,

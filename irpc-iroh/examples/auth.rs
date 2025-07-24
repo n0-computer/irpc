@@ -108,7 +108,7 @@ mod storage {
 
     // Use the macro to generate both the StorageProtocol and StorageMessage enums
     // plus implement Channels for each type
-    #[rpc_requests(StorageMessage)]
+    #[rpc_requests(message = StorageMessage)]
     #[derive(Serialize, Deserialize, Debug)]
     enum StorageProtocol {
         #[rpc(tx=oneshot::Sender<Result<(), String>>)]

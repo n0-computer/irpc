@@ -29,7 +29,7 @@ fn generate_parent_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> Tok
     quote! {
         impl #enum_name {
             /// Get the parent span of the message
-            pub fn parent_span(&self) -> tracing::Span {
+            pub fn parent_span(&self) -> ::tracing::Span {
                 let span = match self {
                     #(#enum_name::#variant_names(inner) => inner.parent_span_opt()),*
                 };
@@ -176,75 +176,27 @@ fn generate_type_aliases(
     aliases
 }
 
-/// Processes an RPC request enum and generates channel implementations.
-///
-/// This macro takes a protocol enum where each variant represents a different RPC request type
-/// and generates the necessary channel implementations for each request.
-///
-/// # Macro Arguments
-///
-/// * First positional argument (required): The service type that will handle these requests
-/// * `message` (optional): Generate an extended enum wrapping each type in `WithChannels<T, Service>`
-/// * `alias` (optional): Generate type aliases with the given suffix for each `WithChannels<T, Service>`
-///
-/// # Variant Attributes
-///
-/// Individual enum variants can be annotated with the `#[rpc(...)]` attribute to specify channel types:
-///
-/// * `#[rpc(tx=SomeType)]`: Specify the transmitter/sender channel type (required)
-/// * `#[rpc(tx=SomeType, rx=OtherType)]`: Also specify a receiver channel type (optional)
-///
-/// If `rx` is not specified, it defaults to `NoReceiver`.
-///
-/// # Examples
-///
-/// Basic usage:
-/// ```
-/// #[rpc_requests(ComputeService)]
-/// enum ComputeProtocol {
-///     #[rpc(tx=oneshot::Sender<u128>)]
-///     Sqr(Sqr),
-///     #[rpc(tx=oneshot::Sender<i64>)]
-///     Sum(Sum),
-/// }
-/// ```
-///
-/// With a message enum:
-/// ```
-/// #[rpc_requests(ComputeService, message = ComputeMessage)]
-/// enum ComputeProtocol {
-///     #[rpc(tx=oneshot::Sender<u128>)]
-///     Sqr(Sqr),
-///     #[rpc(tx=oneshot::Sender<i64>)]
-///     Sum(Sum),
-/// }
-/// ```
-///
-/// With type aliases:
-/// ```
-/// #[rpc_requests(ComputeService, alias = "Msg")]
-/// enum ComputeProtocol {
-///     #[rpc(tx=oneshot::Sender<u128>)]
-///     Sqr(Sqr), // Generates type SqrMsg = WithChannels<Sqr, ComputeService>
-///     #[rpc(tx=oneshot::Sender<i64>)]
-///     Sum(Sum), // Generates type SumMsg = WithChannels<Sum, ComputeService>
-/// }
-/// ```
 #[proc_macro_attribute]
 pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as DeriveInput);
     let args = parse_macro_input!(attr as MacroArgs);
 
-    let message_enum_name = args.message_enum_name;
-    let alias_suffix = args.alias_suffix;
-
     let enum_name = &input.ident;
     let vis = &input.vis;
     let input_span = input.span();
+    let cfg_feature_rpc = match args.rpc_feature.as_ref() {
+        None => quote!(),
+        Some(feature) => quote!(#[cfg(feature = #feature)]),
+    };
 
     let data_enum = match &mut input.data {
         Data::Enum(data_enum) => data_enum,
-        _ => return error_tokens(input.span(), "RpcRequests can only be applied to enums"),
+        _ => {
+            return error_tokens(
+                input.span(),
+                "The rpc_requests macro can only be applied to enums",
+            )
+        }
     };
 
     // Collect trait implementations
@@ -319,7 +271,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let original_from_impls = generate_case_from_impls(enum_name, &variants_with_attr);
 
     // Generate type aliases if requested
-    let type_aliases = if let Some(suffix) = alias_suffix {
+    let type_aliases = if let Some(suffix) = args.alias_suffix {
         // Use all variants for type aliases, not just those with rpc attributes
         generate_type_aliases(&all_variants, enum_name, &suffix)
     } else {
@@ -327,7 +279,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     // Generate the extended message enum if requested
-    let extended_enum_code = {
+    let extended_enum_code = if let Some(message_enum_name) = args.message_enum_name.as_ref() {
         let message_variants = all_variants
             .iter()
             .map(|(variant_name, inner_type)| {
@@ -351,34 +303,47 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         };
 
         // Generate parent_span method
-        let parent_span_impl = generate_parent_span_impl(&message_enum_name, &variant_names);
+        let parent_span_impl = if !args.no_spans {
+            generate_parent_span_impl(&message_enum_name, &variant_names)
+        } else {
+            quote! {}
+        };
 
         // Generate From implementations for the message enum (only for variants with rpc attributes)
         let message_from_impls =
             generate_message_enum_from_impls(&message_enum_name, &variants_with_attr, enum_name);
 
-        let remote_service_impl =
-            generate_remote_service_impl(&message_enum_name, enum_name, &variants_with_attr);
+        let service_impl = quote! {
+            impl ::irpc::Service for #enum_name {
+                type Message = #message_enum_name;
+            }
+        };
+
+        let remote_service_impl = if !args.no_rpc {
+            let block =
+                generate_remote_service_impl(&message_enum_name, enum_name, &variants_with_attr);
+            quote! {
+                #cfg_feature_rpc
+                #block
+            }
+        } else {
+            quote! {}
+        };
 
         quote! {
             #message_enum
+            #service_impl
             #remote_service_impl
             #parent_span_impl
             #message_from_impls
         }
-    };
-
-    let service_impl = quote! {
-        impl ::irpc::Service for #enum_name {
-            type Message = #message_enum_name;
-        }
+    } else {
+        quote! {}
     };
 
     // Combine everything
     let output = quote! {
         #input
-
-        #service_impl
 
         // Channel implementations
         #(#channel_impls)*
@@ -398,26 +363,61 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 // Parse arguments for the macro
 struct MacroArgs {
-    message_enum_name: Ident,
+    message_enum_name: Option<Ident>,
     alias_suffix: Option<String>,
+    rpc_feature: Option<String>,
+    no_rpc: bool,
+    no_spans: bool,
 }
 
 impl Parse for MacroArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let message_enum_name: Ident = input.parse()?;
         // Initialize optional parameters
+        let mut message_enum_name = None;
         let mut alias_suffix = None;
+        let mut rpc_feature = None;
+        let mut no_rpc = false;
+        let mut no_spans = false;
 
-        // Parse any additional named parameters
-        while input.peek(Token![,]) {
-            input.parse::<Token![,]>()?;
+        // Parse names parameters.
+        loop {
             let param_name: Ident = input.parse()?;
-            input.parse::<Token![=]>()?;
 
             match param_name.to_string().as_str() {
+                "message" => {
+                    input.parse::<Token![=]>()?;
+                    let ident: Ident = input.parse()?;
+                    message_enum_name = Some(ident);
+                }
                 "alias" => {
+                    input.parse::<Token![=]>()?;
                     let lit: LitStr = input.parse()?;
                     alias_suffix = Some(lit.value());
+                }
+                "rpc_feature" => {
+                    input.parse::<Token![=]>()?;
+                    if no_rpc {
+                        return Err(syn::Error::new(
+                            param_name.span(),
+                            format!("rpc_feature is incompatible with no_rpc"),
+                        ));
+                    }
+                    let lit: LitStr = input.parse()?;
+                    rpc_feature = Some(lit.value());
+                }
+                "no_rpc" => {
+                    if rpc_feature.is_some() {
+                        if no_rpc {
+                            return Err(syn::Error::new(
+                                param_name.span(),
+                                format!("rpc_feature is incompatible with no_rpc"),
+                            ));
+                        }
+                    }
+                    no_rpc = true;
+                }
+                "no_spans" => {
+                    no_spans = true;
                 }
                 _ => {
                     return Err(syn::Error::new(
@@ -426,11 +426,20 @@ impl Parse for MacroArgs {
                     ));
                 }
             }
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            } else {
+                break;
+            }
         }
 
         Ok(MacroArgs {
             message_enum_name,
             alias_suffix,
+            no_rpc,
+            no_spans,
+            rpc_feature,
         })
     }
 }

@@ -86,7 +86,7 @@ mod storage {
 
     // Use the macro to generate both the StorageProtocol and StorageMessage enums
     // plus implement Channels for each type
-    #[rpc_requests(StorageMessage)]
+    #[rpc_requests(message = StorageMessage)]
     #[derive(Serialize, Deserialize, Debug)]
     enum StorageProtocol {
         #[rpc(tx=oneshot::Sender<Option<String>>)]
@@ -170,9 +170,7 @@ mod storage {
                 .inner
                 .as_local()
                 .context("can not listen on remote service")?;
-            Ok(IrohProtocol::new(StorageProtocol::remote_handler(
-                local,
-            )))
+            Ok(IrohProtocol::new(StorageProtocol::remote_handler(local)))
         }
 
         pub async fn get(&self, key: String) -> irpc::Result<Option<String>> {

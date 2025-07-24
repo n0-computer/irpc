@@ -65,10 +65,26 @@ rpc = ["dep:quinn", "dep:postcard", "dep:anyhow", "dep:smallvec", "dep:tracing",
 # add test utilities
 quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:anyhow", "dep:futures-buffered", "quinn/rustls-ring"]
 # pick up parent span when creating channel messages
-message_spans = ["dep:tracing"]
+spans = ["dep:tracing"]
 stream = ["dep:futures-util"]
 derive = ["dep:irpc-derive"]
-default = ["rpc", "quinn_endpoint_setup", "message_spans", "stream", "derive"]
+default = ["rpc", "quinn_endpoint_setup", "spans", "stream", "derive"]
+
+[[example]]
+name = "derive"
+required-features = ["rpc", "derive", "quinn_endpoint_setup"]
+
+[[example]]
+name = "compute"
+required-features = ["rpc", "derive", "quinn_endpoint_setup"]
+
+[[example]]
+name = "local"
+required-features = ["derive"]
+
+[[example]]
+name = "storage"
+required-features = ["rpc", "quinn_endpoint_setup"]
 
 [workspace]
 members = ["irpc-derive", "irpc-iroh"]
@@ -84,7 +100,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(quicrpc_docsrs)"] }
 anyhow = { version = "1.0.98" }
 tokio = { version = "1.44", default-features = false }
 postcard = { version = "1.1.1", default-features = false }
-serde = { version = "1", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive"] }
 tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.1.2", default-features = false }
 tracing-subscriber = { version = "0.3.19" }

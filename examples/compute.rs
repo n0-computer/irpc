@@ -21,7 +21,7 @@ use thousands::Separable;
 use tracing::trace;
 
 // Define the protocol and message enums using the macro
-#[rpc_requests(ComputeMessage)]
+#[rpc_requests(message = ComputeMessage)]
 #[derive(Serialize, Deserialize, Debug)]
 enum ComputeProtocol {
     #[rpc(tx=oneshot::Sender<u128>)]
