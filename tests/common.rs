@@ -1,4 +1,4 @@
-#![cfg(feature = "rpc")]
+#![cfg(feature = "quinn_endpoint_setup")]
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
