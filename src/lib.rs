@@ -155,9 +155,9 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, resul
 /// #[rpc_requests(message = ComputeMessage, alias = "Msg")]
 /// enum ComputeProtocol {
 ///     #[rpc(tx=oneshot::Sender<u128>)]
-///     Sqr(Sqr), // Generates type SqrMsg = WithChannels<Sqr, ComputeService>
+///     Sqr(Sqr), // Generates type SqrMsg = WithChannels<Sqr, ComputeProtocol>
 ///     #[rpc(tx=mpsc::Sender<i64>)]
-///     Sum(Sum), // Generates type SumMsg = WithChannels<Sum, ComputeService>
+///     Sum(Sum), // Generates type SumMsg = WithChannels<Sum, ComputeProtocol>
 /// }
 /// ```
 ///
