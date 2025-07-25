@@ -8,7 +8,11 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
 };
 use irpc::{
-    rpc::{Handler, RemoteConnection},
+    channel::RecvError,
+    rpc::{
+        Handler, RemoteConnection, RemoteService, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
+        MAX_MESSAGE_SIZE,
+    },
     util::AsyncReadVarintExt,
     RequestError,
 };
@@ -131,11 +135,19 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     handler: Handler<R>,
 ) -> io::Result<()> {
     loop {
-        let Some((msg, rx, tx)) = read_request(&connection).await? else {
+        let Some((msg, rx, tx)) = read_request_raw(&connection).await? else {
             return Ok(());
         };
         handler(msg, rx, tx).await?;
     }
+}
+
+pub async fn read_request<S: RemoteService>(
+    connection: &Connection,
+) -> std::io::Result<Option<S::Message>> {
+    Ok(read_request_raw::<S>(connection)
+        .await?
+        .map(|(msg, rx, tx)| S::with_remote_channels(msg, rx, tx)))
 }
 
 /// Reads a single request from the connection.
@@ -145,7 +157,7 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
 /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
 /// Returns None if the remote closed the connection with error code `0`.
 /// Returns an error for all other failure cases.
-pub async fn read_request<R: DeserializeOwned + 'static>(
+pub async fn read_request_raw<R: DeserializeOwned + 'static>(
     connection: &Connection,
 ) -> std::io::Result<Option<(R, RecvStream, SendStream)>> {
     let (send, mut recv) = match connection.accept_bi().await {
@@ -163,6 +175,13 @@ pub async fn read_request<R: DeserializeOwned + 'static>(
         .read_varint_u64()
         .await?
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
+    if size > MAX_MESSAGE_SIZE {
+        connection.close(
+            ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
+            b"request exceeded max message size",
+        );
+        return Err(RecvError::MaxMessageSizeExceeded.into());
+    }
     let mut buf = vec![0; size as usize];
     recv.read_exact(&mut buf)
         .await

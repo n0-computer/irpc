@@ -1,27 +1,20 @@
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
 };
 
 use anyhow::{Context, Result};
 use irpc::{
     channel::{mpsc, oneshot},
-    rpc::Handler,
+    rpc::RemoteService,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, Service, WithChannels,
+    Client, WithChannels,
 };
 // Import the macro
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-
-/// A simple storage service, just to try it out
-#[derive(Debug, Clone, Copy)]
-struct StorageService;
-
-impl Service for StorageService {}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Get {
@@ -48,8 +41,8 @@ struct SetMany;
 
 // Use the macro to generate both the StorageProtocol and StorageMessage enums
 // plus implement Channels for each type
-#[rpc_requests(StorageService, message = StorageMessage)]
-#[derive(Serialize, Deserialize)]
+#[rpc_requests(message = StorageMessage)]
+#[derive(Serialize, Deserialize, Debug)]
 enum StorageProtocol {
     #[rpc(tx=oneshot::Sender<Option<String>>)]
     Get(Get),
@@ -74,9 +67,8 @@ impl StorageActor {
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<StorageMessage, StorageService>::from(tx);
         StorageApi {
-            inner: local.into(),
+            inner: Client::local(tx),
         }
     }
 
@@ -123,7 +115,7 @@ impl StorageActor {
 }
 
 struct StorageApi {
-    inner: Client<StorageMessage, StorageProtocol, StorageService>,
+    inner: Client<StorageProtocol>,
 }
 
 impl StorageApi {
@@ -134,17 +126,14 @@ impl StorageApi {
     }
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> Result<AbortOnDropHandle<()>> {
-        let local = self.inner.local().context("cannot listen on remote API")?;
-        let handler: Handler<StorageProtocol> = Arc::new(move |msg, rx, tx| {
-            let local = local.clone();
-            Box::pin(match msg {
-                StorageProtocol::Get(msg) => local.send((msg, tx)),
-                StorageProtocol::Set(msg) => local.send((msg, tx)),
-                StorageProtocol::SetMany(msg) => local.send((msg, tx, rx)),
-                StorageProtocol::List(msg) => local.send((msg, tx)),
-            })
-        });
-        let join_handle = task::spawn(irpc::rpc::listen(endpoint, handler));
+        let local = self
+            .inner
+            .as_local()
+            .context("cannot listen on remote API")?;
+        let join_handle = task::spawn(irpc::rpc::listen(
+            endpoint,
+            StorageProtocol::remote_handler(local),
+        ));
         Ok(AbortOnDropHandle::new(join_handle))
     }
 

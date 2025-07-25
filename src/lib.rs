@@ -62,7 +62,7 @@
 //! - `rpc`: Enable the rpc features. Enabled by default.
 //!   By disabling this feature, all rpc related dependencies are removed.
 //!   The remaining dependencies are just serde, tokio and tokio-util.
-//! - `message_spans`: Enable tracing spans for messages. Enabled by default.
+//! - `spans`: Enable tracing spans for messages. Enabled by default.
 //!   This is useful even without rpc, to not lose tracing context when message
 //!   passing. This is frequently done manually. This obviously requires
 //!   a dependency on tracing.
@@ -78,9 +78,98 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
+use channel::{mpsc, oneshot};
+/// Processes an RPC request enum and generates trait implementations for use with `irpc`.
+///
+/// This attribute macro may be applied to an enum where each variant represents
+/// a different RPC request type. Each variant of the enum must contain a single unnamed field
+/// of a distinct type, otherwise compilation fails.
+///
+/// Basic usage example:
+/// ```
+/// use serde::{Serialize, Deserialize};
+/// use irpc::{rpc_requests, channel::{oneshot, mpsc}};
+///
+/// #[rpc_requests(message = ComputeMessage)]
+/// #[derive(Debug, Serialize, Deserialize)]
+/// enum ComputeProtocol {
+///     /// Multiply two numbers, return the result over a oneshot channel.
+///     #[rpc(tx=oneshot::Sender<i64>)]
+///     Multiply(Multiply),
+///     /// Sum all numbers received via the `rx` stream,
+///     /// reply with the updating sum over the `tx` stream.
+///     #[rpc(tx=mpsc::Sender<i64>, rx=mpsc::Receiver<i64>)]
+///     Sum(Sum),
+/// }
+///
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct Multiply(i64, i64);
+///
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct Sum;
+/// ```
+///
+/// ## Generated code
+///
+/// If no further arguments are set, the macro generates:
+///
+/// * A [`Channels<S>`] implementation for each request type (i.e. the type of the variant's
+///   single unnamed field).
+///   The `Tx` and `Rx` types are set to the types provided via the variant's `rpc` attribute.
+/// * A [`From`] implementation to convert from each request type to the protocol enum.
+///
+/// When the `message` argument is set, the macro will also create a message enum and implement the
+/// [`Service`] and [`RemoteService`] traits for the protocol enum. This is recommended for the
+/// typical use of the macro.
+///
+/// ## Macro arguments
+///
+/// * `message = <name>` *(optional but recommended)*:
+///     * Generates an extended enum wrapping each type in [`WithChannels<T, Service>`].
+///       The attribute value is the name of the message enum type.
+///     * Generates a [`Service`] implementation for the protocol enum, with the `Message`
+///       type set to the message enum.
+///     * Generates a [`RemoteService`] implementation for the protocol enum.
+/// * `alias = "<suffix>"` *(optional)*: Generate type aliases with the given suffix for each [`WithChannels<T, Service>`].
+/// * `rpc_feature = "<feature>"` *(optional)*: If set, the [`RemoteService`] implementation will be feature-flagged
+///   with this feature. Set this if your crate only optionally enables the `rpc` feature
+///   of [`irpc`].
+/// * `no_rpc` *(optional, no value)*: If set, no implementation of [`RemoteService`] will be generated and the generated
+///   code works without the `rpc` feature of `irpc`.
+/// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
+///
+/// ## Variant attributes
+///
+/// Individual enum variants are annotated with the `#[rpc(...)]` attribute to specify channel types.
+/// The `rpc` attribute contains a key-value list with these arguments:
+///
+/// * `tx = SomeType` *(required)*: Set the kind of channel for sending responses from the server to the client.
+///   Must be a `Sender` type from the [`crate::channel`] module.
+/// * `rx = OtherType` *(optional)*: Set the kind of channel for receiving updates from the client at the server.
+///   Must be a `Receiver` type from the [`crate::channel`] module. If `rx` is not set,
+///   it defaults to [`crate::channel::none::NoReceiver`].
+///
+/// ## Examples
+///
+/// With type aliases:
+/// ```no_compile
+/// #[rpc_requests(message = ComputeMessage, alias = "Msg")]
+/// enum ComputeProtocol {
+///     #[rpc(tx=oneshot::Sender<u128>)]
+///     Sqr(Sqr), // Generates type SqrMsg = WithChannels<Sqr, ComputeProtocol>
+///     #[rpc(tx=mpsc::Sender<i64>)]
+///     Sum(Sum), // Generates type SumMsg = WithChannels<Sum, ComputeProtocol>
+/// }
+/// ```
+///
+/// [`irpc`]: crate
+/// [`RemoteService`]: rpc::RemoteService
+/// [`WithChannels<T, Service>`]: WithChannels
+/// [`Channels<S>`]: Channels
 #[cfg(feature = "derive")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
 pub use irpc_derive::rpc_requests;
+
 use sealed::Sealed;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -106,14 +195,21 @@ impl<T> RpcMessage for T where
 {
 }
 
-/// Marker trait for a service
+/// Trait for a service
 ///
-/// This is usually implemented by a zero-sized struct.
-/// It has various bounds to make derives easier.
+/// This is implemented on the protocol enum.
+/// It is usually auto-implemented via the [`rpc_requests] macro.
 ///
 /// A service acts as a scope for defining the tx and rx channels for each
 /// message type, and provides some type safety when sending messages.
-pub trait Service: Send + Sync + Debug + Clone + 'static {}
+pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static {
+    /// Message enum for this protocol.
+    ///
+    /// This is expected to be an enum with identical variant names than the
+    /// protocol enum, but its single unit field is the [`WithChannels`] struct
+    /// that contains the inner request plus the `tx` and `rx` channels.
+    type Message: Send + Unpin + 'static;
+}
 
 mod sealed {
     pub trait Sealed {}
@@ -126,7 +222,7 @@ pub trait Sender: Debug + Sealed {}
 pub trait Receiver: Debug + Sealed {}
 
 /// Trait to specify channels for a message and service
-pub trait Channels<S: Service> {
+pub trait Channels<S: Service>: Send + 'static {
     /// The sender type, can be either mpsc, oneshot or none
     type Tx: Sender;
     /// The receiver type, can be either mpsc, oneshot or none
@@ -452,8 +548,8 @@ pub mod channel {
             /// ## Cancellation safety
             ///
             /// If the future is dropped before completion, and if this is a remote sender,
-            /// then the sender will be closed and further sends will return an [`io::Error`]
-            /// with [`io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+            /// then the sender will be closed and further sends will return an [`SendError::Io`]
+            /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
             /// future until completion if you want to reuse the sender or any clone afterwards.
             pub async fn send(&self, value: T) -> std::result::Result<(), SendError> {
                 match self {
@@ -482,8 +578,8 @@ pub mod channel {
             /// ## Cancellation safety
             ///
             /// If the future is dropped before completion, and if this is a remote sender,
-            /// then the sender will be closed and further sends will return an [`io::Error`]
-            /// with [`io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+            /// then the sender will be closed and further sends will return an [`SendError::Io`]
+            /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
             /// future until completion if you want to reuse the sender or any clone afterwards.
             pub async fn try_send(&mut self, value: T) -> std::result::Result<bool, SendError> {
                 match self {
@@ -596,6 +692,8 @@ pub mod channel {
         #[error("receiver closed")]
         ReceiverClosed,
         /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+        ///
+        /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
         #[error("maximum message size exceeded")]
         MaxMessageSizeExceeded,
         /// The underlying io error. This can occur for remote communication,
@@ -625,7 +723,9 @@ pub mod channel {
         /// for local communication.
         #[error("sender closed")]
         SenderClosed,
-        /// The message exceeded the maximum allowed message size [`MAX_MESSAGE_SIZE`].
+        /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+        ///
+        /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
         #[error("maximum message size exceeded")]
         MaxMessageSizeExceeded,
         /// An io error occurred. This can occur for remote communication,
@@ -652,7 +752,7 @@ pub mod channel {
 /// The channel kind for rx and tx is defined by implementing the `Channels`
 /// trait, either manually or using a macro.
 ///
-/// When the `message_spans` feature is enabled, this also includes a tracing
+/// When the `spans` feature is enabled, this also includes a tracing
 /// span to carry the tracing context during message passing.
 pub struct WithChannels<I: Channels<S>, S: Service> {
     /// The inner message.
@@ -662,8 +762,8 @@ pub struct WithChannels<I: Channels<S>, S: Service> {
     /// The request channel to receive the request from. Can be set to [`NoReceiver`] if not needed.
     pub rx: <I as Channels<S>>::Rx,
     /// The current span where the full message was created.
-    #[cfg(feature = "message_spans")]
-    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "message_spans")))]
+    #[cfg(feature = "spans")]
+    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
     pub span: tracing::Span,
 }
 
@@ -679,7 +779,7 @@ impl<I: Channels<S> + Debug, S: Service> Debug for WithChannels<I, S> {
 
 impl<I: Channels<S>, S: Service> WithChannels<I, S> {
     /// Get the parent span
-    #[cfg(feature = "message_spans")]
+    #[cfg(feature = "spans")]
     pub fn parent_span_opt(&self) -> Option<&tracing::Span> {
         Some(&self.span)
     }
@@ -700,8 +800,8 @@ where
             inner,
             tx: tx.into(),
             rx: rx.into(),
-            #[cfg(feature = "message_spans")]
-            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "message_spans")))]
+            #[cfg(feature = "spans")]
+            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
             span: tracing::Span::current(),
         }
     }
@@ -722,8 +822,8 @@ where
             inner,
             tx: tx.into(),
             rx: NoReceiver,
-            #[cfg(feature = "message_spans")]
-            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "message_spans")))]
+            #[cfg(feature = "spans")]
+            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
             span: tracing::Span::current(),
         }
     }
@@ -758,27 +858,27 @@ impl<I: Channels<S>, S: Service> Deref for WithChannels<I, S> {
 /// The service type `S` provides a scope for the protocol messages. It exists
 /// so you can use the same message with multiple services.
 #[derive(Debug)]
-pub struct Client<M, R, S>(ClientInner<M>, PhantomData<(R, S)>);
+pub struct Client<S: Service>(ClientInner<S::Message>, PhantomData<S>);
 
-impl<M, R, S> Clone for Client<M, R, S> {
+impl<S: Service> Clone for Client<S> {
     fn clone(&self) -> Self {
         Self(self.0.clone(), PhantomData)
     }
 }
 
-impl<M, R, S> From<LocalSender<M, S>> for Client<M, R, S> {
-    fn from(tx: LocalSender<M, S>) -> Self {
+impl<S: Service> From<LocalSender<S>> for Client<S> {
+    fn from(tx: LocalSender<S>) -> Self {
         Self(ClientInner::Local(tx.0), PhantomData)
     }
 }
 
-impl<M, R, S> From<tokio::sync::mpsc::Sender<M>> for Client<M, R, S> {
-    fn from(tx: tokio::sync::mpsc::Sender<M>) -> Self {
+impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for Client<S> {
+    fn from(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
         LocalSender::from(tx).into()
     }
 }
 
-impl<M, R, S> Client<M, R, S> {
+impl<S: Service> Client<S> {
     /// Create a new client to a remote service using the given quinn `endpoint`
     /// and a socket `addr` of the remote service.
     #[cfg(feature = "rpc")]
@@ -794,9 +894,14 @@ impl<M, R, S> Client<M, R, S> {
         Self(ClientInner::Remote(Box::new(remote)), PhantomData)
     }
 
+    /// Creates a new client from a `tokio::sync::mpsc::Sender`.
+    pub fn local(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
+        tx.into()
+    }
+
     /// Get the local sender. This is useful if you don't care about remote
     /// requests.
-    pub fn local(&self) -> Option<LocalSender<M, S>> {
+    pub fn as_local(&self) -> Option<LocalSender<S>> {
         match &self.0 {
             ClientInner::Local(tx) => Some(tx.clone().into()),
             ClientInner::Remote(..) => None,
@@ -818,13 +923,8 @@ impl<M, R, S> Client<M, R, S> {
     pub fn request(
         &self,
     ) -> impl Future<
-        Output = result::Result<Request<LocalSender<M, S>, rpc::RemoteSender<R, S>>, RequestError>,
-    > + 'static
-    where
-        S: Service,
-        M: Send + Sync + 'static,
-        R: 'static,
-    {
+        Output = result::Result<Request<LocalSender<S>, rpc::RemoteSender<S>>, RequestError>,
+    > + 'static {
         #[cfg(feature = "rpc")]
         {
             let cloned = match &self.0 {
@@ -854,17 +954,16 @@ impl<M, R, S> Client<M, R, S> {
     /// Performs a request for which the server returns a oneshot receiver.
     pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
     where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + Send + Sync + 'static,
-        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver> + Send + 'static,
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = NoReceiver>,
         Res: RpcMessage,
     {
         let request = self.request();
         async move {
-            let recv: channel::oneshot::Receiver<Res> = match request.await? {
+            let recv: oneshot::Receiver<Res> = match request.await? {
                 Request::Local(request) => {
-                    let (tx, rx) = channel::oneshot::channel();
+                    let (tx, rx) = oneshot::channel();
                     request.send((msg, tx)).await?;
                     rx
                 }
@@ -886,19 +985,18 @@ impl<M, R, S> Client<M, R, S> {
         &self,
         msg: Req,
         local_response_cap: usize,
-    ) -> impl Future<Output = Result<channel::mpsc::Receiver<Res>>> + Send + 'static
+    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
     where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + Send + Sync + 'static,
-        Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = NoReceiver> + Send + 'static,
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = NoReceiver>,
         Res: RpcMessage,
     {
         let request = self.request();
         async move {
-            let recv: channel::mpsc::Receiver<Res> = match request.await? {
+            let recv: mpsc::Receiver<Res> = match request.await? {
                 Request::Local(request) => {
-                    let (tx, rx) = channel::mpsc::channel(local_response_cap);
+                    let (tx, rx) = mpsc::channel(local_response_cap);
                     request.send((msg, tx)).await?;
                     rx
                 }
@@ -919,40 +1017,32 @@ impl<M, R, S> Client<M, R, S> {
         &self,
         msg: Req,
         local_update_cap: usize,
-    ) -> impl Future<
-        Output = Result<(
-            channel::mpsc::Sender<Update>,
-            channel::oneshot::Receiver<Res>,
-        )>,
-    >
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>>
     where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + 'static,
-        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>,
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = mpsc::Receiver<Update>>,
         Update: RpcMessage,
         Res: RpcMessage,
     {
         let request = self.request();
         async move {
-            let (update_tx, res_rx): (
-                channel::mpsc::Sender<Update>,
-                channel::oneshot::Receiver<Res>,
-            ) = match request.await? {
-                Request::Local(request) => {
-                    let (req_tx, req_rx) = channel::mpsc::channel(local_update_cap);
-                    let (res_tx, res_rx) = channel::oneshot::channel();
-                    request.send((msg, res_tx, req_rx)).await?;
-                    (req_tx, res_rx)
-                }
-                #[cfg(not(feature = "rpc"))]
-                Request::Remote(_request) => unreachable!(),
-                #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
-                    let (tx, rx) = request.write(msg).await?;
-                    (tx.into(), rx.into())
-                }
-            };
+            let (update_tx, res_rx): (mpsc::Sender<Update>, oneshot::Receiver<Res>) =
+                match request.await? {
+                    Request::Local(request) => {
+                        let (req_tx, req_rx) = mpsc::channel(local_update_cap);
+                        let (res_tx, res_rx) = oneshot::channel();
+                        request.send((msg, res_tx, req_rx)).await?;
+                        (req_tx, res_rx)
+                    }
+                    #[cfg(not(feature = "rpc"))]
+                    Request::Remote(_request) => unreachable!(),
+                    #[cfg(feature = "rpc")]
+                    Request::Remote(request) => {
+                        let (tx, rx) = request.write(msg).await?;
+                        (tx.into(), rx.into())
+                    }
+                };
             Ok((update_tx, res_rx))
         }
     }
@@ -963,26 +1053,21 @@ impl<M, R, S> Client<M, R, S> {
         msg: Req,
         local_update_cap: usize,
         local_response_cap: usize,
-    ) -> impl Future<Output = Result<(channel::mpsc::Sender<Update>, channel::mpsc::Receiver<Res>)>>
-           + Send
-           + 'static
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, mpsc::Receiver<Res>)>> + Send + 'static
     where
-        S: Service,
-        M: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        R: From<Req> + Serialize + Send + 'static,
-        Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>
-            + Send
-            + 'static,
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = mpsc::Receiver<Update>>,
         Update: RpcMessage,
         Res: RpcMessage,
     {
         let request = self.request();
         async move {
-            let (update_tx, res_rx): (channel::mpsc::Sender<Update>, channel::mpsc::Receiver<Res>) =
+            let (update_tx, res_rx): (mpsc::Sender<Update>, mpsc::Receiver<Res>) =
                 match request.await? {
                     Request::Local(request) => {
-                        let (update_tx, update_rx) = channel::mpsc::channel(local_update_cap);
-                        let (res_tx, res_rx) = channel::mpsc::channel(local_response_cap);
+                        let (update_tx, update_rx) = mpsc::channel(local_update_cap);
+                        let (res_tx, res_rx) = mpsc::channel(local_response_cap);
                         request.send((msg, res_tx, update_rx)).await?;
                         (update_tx, res_rx)
                     }
@@ -1093,23 +1178,23 @@ impl From<RequestError> for io::Error {
 /// [`WithChannels`].
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct LocalSender<M, S>(tokio::sync::mpsc::Sender<M>, std::marker::PhantomData<S>);
+pub struct LocalSender<S: Service>(tokio::sync::mpsc::Sender<S::Message>);
 
-impl<M, S> Clone for LocalSender<M, S> {
+impl<S: Service> Clone for LocalSender<S> {
     fn clone(&self) -> Self {
-        Self(self.0.clone(), PhantomData)
+        Self(self.0.clone())
     }
 }
 
-impl<M, S> From<tokio::sync::mpsc::Sender<M>> for LocalSender<M, S> {
-    fn from(tx: tokio::sync::mpsc::Sender<M>) -> Self {
-        Self(tx, PhantomData)
+impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for LocalSender<S> {
+    fn from(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
+        Self(tx)
     }
 }
 
 #[cfg(not(feature = "rpc"))]
 pub mod rpc {
-    pub struct RemoteSender<R, S>(std::marker::PhantomData<(R, S)>);
+    pub struct RemoteSender<S>(std::marker::PhantomData<S>);
 }
 
 #[cfg(feature = "rpc")]
@@ -1122,7 +1207,7 @@ pub mod rpc {
 
     use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
     use quinn::ConnectionError;
-    use serde::{de::DeserializeOwned, Serialize};
+    use serde::de::DeserializeOwned;
     use smallvec::SmallVec;
     use tracing::{trace, trace_span, warn, Instrument};
 
@@ -1133,17 +1218,23 @@ pub mod rpc {
             oneshot, RecvError, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
-        RequestError, RpcMessage,
+        LocalSender, RequestError, RpcMessage, Service,
     };
 
+    /// This is used by irpc-derive to refer to quinn types (SendStream and RecvStream)
+    /// to make generated code work for users without having to depend on quinn directly
+    /// (i.e. when using iroh).
+    #[doc(hidden)]
+    pub use quinn;
+
     /// Default max message size (16 MiB).
-    const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
+    pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 
     /// Error code on streams if the max message size was exceeded.
-    const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
+    pub const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
 
     /// Error code on streams if the sender tried to send an message that could not be postcard serialized.
-    const ERROR_CODE_INVALID_POSTCARD: u32 = 2;
+    pub const ERROR_CODE_INVALID_POSTCARD: u32 = 2;
 
     /// Error that can occur when writing the initial message when doing a
     /// cross-process RPC.
@@ -1284,24 +1375,21 @@ pub mod rpc {
 
     /// A connection to a remote service that can be used to send the initial message.
     #[derive(Debug)]
-    pub struct RemoteSender<R, S>(
+    pub struct RemoteSender<S>(
         quinn::SendStream,
         quinn::RecvStream,
-        std::marker::PhantomData<(R, S)>,
+        std::marker::PhantomData<S>,
     );
 
-    impl<R, S> RemoteSender<R, S> {
+    impl<S: Service> RemoteSender<S> {
         pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
             Self(send, recv, PhantomData)
         }
 
         pub async fn write(
             self,
-            msg: impl Into<R>,
-        ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError>
-        where
-            R: Serialize,
-        {
+            msg: impl Into<S>,
+        ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
             let RemoteSender(mut send, recv, _) = self;
             let msg = msg.into();
             if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
@@ -1604,6 +1692,28 @@ pub mod rpc {
             + 'static,
     >;
 
+    /// Extension trait to [`Service`] to create a [`Service::Message`] from a [`Service`]
+    /// and a pair of QUIC streams.
+    ///
+    /// This trait is auto-implemented when using the [`crate::rpc_requests`] macro.
+    pub trait RemoteService: Service + Sized {
+        /// Returns the message enum for this request by combining `self` (the protocol enum)
+        /// with a pair of QUIC streams for `tx` and `rx` channels.
+        fn with_remote_channels(
+            self,
+            rx: quinn::RecvStream,
+            tx: quinn::SendStream,
+        ) -> Self::Message;
+
+        /// Creates a [`Handler`] that forwards all messages to a [`LocalSender`].
+        fn remote_handler(local_sender: LocalSender<Self>) -> Handler<Self> {
+            Arc::new(move |msg, rx, tx| {
+                let msg = Self::with_remote_channels(msg, rx, tx);
+                Box::pin(local_sender.send_raw(msg))
+            })
+        }
+    }
+
     /// Utility function to listen for incoming connections and handle them with the provided handler
     pub async fn listen<R: DeserializeOwned + 'static>(
         endpoint: quinn::Endpoint,
@@ -1621,38 +1731,78 @@ pub mod rpc {
                         return io::Result::Ok(());
                     }
                 };
-                loop {
-                    let (send, mut recv) = match connection.accept_bi().await {
-                        Ok((s, r)) => (s, r),
-                        Err(ConnectionError::ApplicationClosed(cause))
-                            if cause.error_code.into_inner() == 0 =>
-                        {
-                            trace!("remote side closed connection {cause:?}");
-                            return Ok(());
-                        }
-                        Err(cause) => {
-                            warn!("failed to accept bi stream {cause:?}");
-                            return Err(cause.into());
-                        }
-                    };
-                    let size = recv.read_varint_u64().await?.ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size")
-                    })?;
-                    let mut buf = vec![0; size as usize];
-                    recv.read_exact(&mut buf)
-                        .await
-                        .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-                    let msg: R = postcard::from_bytes(&buf)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                    let rx = recv;
-                    let tx = send;
-                    handler(msg, rx, tx).await?;
-                }
+                handle_connection(connection, handler).await
             };
             let span = trace_span!("rpc", id = request_id);
             tasks.spawn(fut.instrument(span));
             request_id += 1;
         }
+    }
+
+    /// Handles a quic connection with the provided `handler`.
+    pub async fn handle_connection<R: DeserializeOwned + 'static>(
+        connection: quinn::Connection,
+        handler: Handler<R>,
+    ) -> io::Result<()> {
+        loop {
+            let Some((msg, rx, tx)) = read_request_raw(&connection).await? else {
+                return Ok(());
+            };
+            handler(msg, rx, tx).await?;
+        }
+    }
+
+    pub async fn read_request<S: RemoteService>(
+        connection: &quinn::Connection,
+    ) -> std::io::Result<Option<S::Message>> {
+        Ok(read_request_raw::<S>(connection)
+            .await?
+            .map(|(msg, rx, tx)| S::with_remote_channels(msg, rx, tx)))
+    }
+
+    /// Reads a single request from the connection.
+    ///
+    /// This accepts a bi-directional stream from the connection and reads and parses the request.
+    ///
+    /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
+    /// Returns None if the remote closed the connection with error code `0`.
+    /// Returns an error for all other failure cases.
+    pub async fn read_request_raw<R: DeserializeOwned + 'static>(
+        connection: &quinn::Connection,
+    ) -> std::io::Result<Option<(R, quinn::RecvStream, quinn::SendStream)>> {
+        let (send, mut recv) = match connection.accept_bi().await {
+            Ok((s, r)) => (s, r),
+            Err(ConnectionError::ApplicationClosed(cause))
+                if cause.error_code.into_inner() == 0 =>
+            {
+                trace!("remote side closed connection {cause:?}");
+                return Ok(None);
+            }
+            Err(cause) => {
+                warn!("failed to accept bi stream {cause:?}");
+                return Err(cause.into());
+            }
+        };
+        let size = recv
+            .read_varint_u64()
+            .await?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
+        if size > MAX_MESSAGE_SIZE {
+            connection.close(
+                ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
+                b"request exceeded max message size",
+            );
+            return Err(RecvError::MaxMessageSizeExceeded.into());
+        }
+        let mut buf = vec![0; size as usize];
+        recv.read_exact(&mut buf)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
+        let msg: R = postcard::from_bytes(&buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let rx = recv;
+        let tx = send;
+        Ok(Some((msg, rx, tx)))
     }
 }
 
@@ -1665,19 +1815,19 @@ pub enum Request<L, R> {
     Remote(R),
 }
 
-impl<M: Send, S: Service> LocalSender<M, S> {
+impl<S: Service> LocalSender<S> {
     /// Send a message to the service
-    pub fn send<T>(&self, value: impl Into<WithChannels<T, S>>) -> SendFut<M>
+    pub fn send<T>(&self, value: impl Into<WithChannels<T, S>>) -> SendFut<S::Message>
     where
         T: Channels<S>,
-        M: From<WithChannels<T, S>>,
+        S::Message: From<WithChannels<T, S>>,
     {
-        let value: M = value.into().into();
+        let value: S::Message = value.into().into();
         SendFut::new(self.0.clone(), value)
     }
 
     /// Send a message to the service without the type conversion magic
-    pub fn send_raw(&self, value: M) -> SendFut<M> {
+    pub fn send_raw(&self, value: S::Message) -> SendFut<S::Message> {
         SendFut::new(self.0.clone(), value)
     }
 }

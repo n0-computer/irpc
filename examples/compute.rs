@@ -1,17 +1,16 @@
 use std::{
     io::{self, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
 };
 
 use anyhow::bail;
 use futures_buffered::BufferedStreamExt;
 use irpc::{
     channel::{mpsc, oneshot},
-    rpc::{listen, Handler},
+    rpc::{listen, RemoteService},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, LocalSender, Request, Service, WithChannels,
+    Client, Request, WithChannels,
 };
 use n0_future::{
     stream::StreamExt,
@@ -21,11 +20,19 @@ use serde::{Deserialize, Serialize};
 use thousands::Separable;
 use tracing::trace;
 
-// Define the ComputeService
-#[derive(Debug, Clone, Copy)]
-struct ComputeService;
-
-impl Service for ComputeService {}
+// Define the protocol and message enums using the macro
+#[rpc_requests(message = ComputeMessage)]
+#[derive(Serialize, Deserialize, Debug)]
+enum ComputeProtocol {
+    #[rpc(tx=oneshot::Sender<u128>)]
+    Sqr(Sqr),
+    #[rpc(rx=mpsc::Receiver<i64>, tx=oneshot::Sender<i64>)]
+    Sum(Sum),
+    #[rpc(tx=mpsc::Sender<u64>)]
+    Fibonacci(Fibonacci),
+    #[rpc(rx=mpsc::Receiver<u64>, tx=mpsc::Sender<u64>)]
+    Multiply(Multiply),
+}
 
 // Define ComputeRequest sub-messages
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,20 +62,6 @@ enum ComputeRequest {
     Multiply(Multiply),
 }
 
-// Define the protocol and message enums using the macro
-#[rpc_requests(ComputeService, message = ComputeMessage)]
-#[derive(Serialize, Deserialize)]
-enum ComputeProtocol {
-    #[rpc(tx=oneshot::Sender<u128>)]
-    Sqr(Sqr),
-    #[rpc(rx=mpsc::Receiver<i64>, tx=oneshot::Sender<i64>)]
-    Sum(Sum),
-    #[rpc(tx=mpsc::Sender<u64>)]
-    Fibonacci(Fibonacci),
-    #[rpc(rx=mpsc::Receiver<u64>, tx=mpsc::Sender<u64>)]
-    Multiply(Multiply),
-}
-
 // The actor that processes requests
 struct ComputeActor {
     recv: tokio::sync::mpsc::Receiver<ComputeMessage>,
@@ -79,9 +72,8 @@ impl ComputeActor {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let actor = Self { recv: rx };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<ComputeMessage, ComputeService>::from(tx);
         ComputeApi {
-            inner: local.into(),
+            inner: Client::local(tx),
         }
     }
 
@@ -157,7 +149,7 @@ impl ComputeActor {
 // The API for interacting with the ComputeService
 #[derive(Clone)]
 struct ComputeApi {
-    inner: Client<ComputeMessage, ComputeProtocol, ComputeService>,
+    inner: Client<ComputeProtocol>,
 }
 
 impl ComputeApi {
@@ -168,18 +160,10 @@ impl ComputeApi {
     }
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
-        let Some(local) = self.inner.local() else {
+        let Some(local) = self.inner.as_local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler: Handler<ComputeProtocol> = Arc::new(move |msg, rx, tx| {
-            let local = local.clone();
-            Box::pin(match msg {
-                ComputeProtocol::Sqr(msg) => local.send((msg, tx)),
-                ComputeProtocol::Sum(msg) => local.send((msg, tx, rx)),
-                ComputeProtocol::Fibonacci(msg) => local.send((msg, tx)),
-                ComputeProtocol::Multiply(msg) => local.send((msg, tx, rx)),
-            })
-        });
+        let handler = ComputeProtocol::remote_handler(local);
         Ok(AbortOnDropHandle::new(task::spawn(listen(
             endpoint, handler,
         ))))

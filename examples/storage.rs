@@ -1,32 +1,29 @@
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
 };
 
 use anyhow::bail;
 use irpc::{
     channel::{mpsc, none::NoReceiver, oneshot},
-    rpc::{listen, Handler},
+    rpc::{listen, RemoteService},
     util::{make_client_endpoint, make_server_endpoint},
-    Channels, Client, LocalSender, Request, Service, WithChannels,
+    Channels, Client, Request, Service, WithChannels,
 };
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-/// A simple storage service, just to try it out
-#[derive(Debug, Clone, Copy)]
-struct StorageService;
-
-impl Service for StorageService {}
+impl Service for StorageProtocol {
+    type Message = StorageMessage;
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Get {
     key: String,
 }
 
-impl Channels<StorageService> for Get {
+impl Channels<StorageProtocol> for Get {
     type Rx = NoReceiver;
     type Tx = oneshot::Sender<Option<String>>;
 }
@@ -34,7 +31,7 @@ impl Channels<StorageService> for Get {
 #[derive(Debug, Serialize, Deserialize)]
 struct List;
 
-impl Channels<StorageService> for List {
+impl Channels<StorageProtocol> for List {
     type Rx = NoReceiver;
     type Tx = mpsc::Sender<String>;
 }
@@ -45,12 +42,12 @@ struct Set {
     value: String,
 }
 
-impl Channels<StorageService> for Set {
+impl Channels<StorageProtocol> for Set {
     type Rx = NoReceiver;
     type Tx = oneshot::Sender<()>;
 }
 
-#[derive(derive_more::From, Serialize, Deserialize)]
+#[derive(derive_more::From, Serialize, Deserialize, Debug)]
 enum StorageProtocol {
     Get(Get),
     Set(Set),
@@ -59,9 +56,19 @@ enum StorageProtocol {
 
 #[derive(derive_more::From)]
 enum StorageMessage {
-    Get(WithChannels<Get, StorageService>),
-    Set(WithChannels<Set, StorageService>),
-    List(WithChannels<List, StorageService>),
+    Get(WithChannels<Get, StorageProtocol>),
+    Set(WithChannels<Set, StorageProtocol>),
+    List(WithChannels<List, StorageProtocol>),
+}
+
+impl RemoteService for StorageProtocol {
+    fn with_remote_channels(self, rx: quinn::RecvStream, tx: quinn::SendStream) -> Self::Message {
+        match self {
+            StorageProtocol::Get(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::Set(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::List(msg) => WithChannels::from((msg, tx, rx)).into(),
+        }
+    }
 }
 
 struct StorageActor {
@@ -77,9 +84,8 @@ impl StorageActor {
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        let local = LocalSender::<StorageMessage, StorageService>::from(tx);
         StorageApi {
-            inner: local.into(),
+            inner: Client::local(tx),
         }
     }
 
@@ -115,7 +121,7 @@ impl StorageActor {
     }
 }
 struct StorageApi {
-    inner: Client<StorageMessage, StorageProtocol, StorageService>,
+    inner: Client<StorageProtocol>,
 }
 
 impl StorageApi {
@@ -126,17 +132,10 @@ impl StorageApi {
     }
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
-        let Some(local) = self.inner.local() else {
+        let Some(local) = self.inner.as_local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler: Handler<StorageProtocol> = Arc::new(move |msg, _rx, tx| {
-            let local = local.clone();
-            Box::pin(match msg {
-                StorageProtocol::Get(msg) => local.send((msg, tx)),
-                StorageProtocol::Set(msg) => local.send((msg, tx)),
-                StorageProtocol::List(msg) => local.send((msg, tx)),
-            })
-        });
+        let handler = StorageProtocol::remote_handler(local);
         Ok(AbortOnDropHandle::new(task::spawn(listen(
             endpoint, handler,
         ))))

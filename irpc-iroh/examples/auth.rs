@@ -68,13 +68,13 @@ mod storage {
 
     use anyhow::Result;
     use iroh::{
-        endpoint::{Connection, RecvStream, SendStream},
+        endpoint::Connection,
         protocol::{AcceptError, ProtocolHandler},
         Endpoint,
     };
     use irpc::{
         channel::{mpsc, oneshot},
-        Client, Service, WithChannels,
+        Client, WithChannels,
     };
     // Import the macro
     use irpc_derive::rpc_requests;
@@ -83,12 +83,6 @@ mod storage {
     use tracing::info;
 
     const ALPN: &[u8] = b"storage-api/0";
-
-    /// A simple storage service, just to try it out
-    #[derive(Debug, Clone, Copy)]
-    struct StorageService;
-
-    impl Service for StorageService {}
 
     #[derive(Debug, Serialize, Deserialize)]
     struct Auth {
@@ -114,8 +108,8 @@ mod storage {
 
     // Use the macro to generate both the StorageProtocol and StorageMessage enums
     // plus implement Channels for each type
-    #[rpc_requests(StorageService, message = StorageMessage)]
-    #[derive(Serialize, Deserialize)]
+    #[rpc_requests(message = StorageMessage)]
+    #[derive(Serialize, Deserialize, Debug)]
     enum StorageProtocol {
         #[rpc(tx=oneshot::Sender<Result<(), String>>)]
         Auth(Auth),
@@ -136,52 +130,35 @@ mod storage {
     }
 
     impl ProtocolHandler for StorageServer {
-        fn accept(
-            &self,
-            conn: Connection,
-        ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
-            let this = self.clone();
-            Box::pin(async move {
-                let mut authed = false;
-                while let Some((msg, rx, tx)) = read_request(&conn).await? {
-                    let msg_with_channels = upcast_message(msg, rx, tx);
-                    match msg_with_channels {
-                        StorageMessage::Auth(msg) => {
-                            let WithChannels { inner, tx, .. } = msg;
-                            if authed {
-                                conn.close(1u32.into(), b"invalid message");
-                                break;
-                            } else if inner.token != this.auth_token {
-                                conn.close(1u32.into(), b"permission denied");
-                                break;
-                            } else {
-                                authed = true;
-                                tx.send(Ok(())).await.ok();
-                            }
+        async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+            let mut authed = false;
+            while let Some(msg) = read_request::<StorageProtocol>(&conn).await? {
+                match msg {
+                    StorageMessage::Auth(msg) => {
+                        let WithChannels { inner, tx, .. } = msg;
+                        if authed {
+                            conn.close(1u32.into(), b"invalid message");
+                            break;
+                        } else if inner.token != self.auth_token {
+                            conn.close(1u32.into(), b"permission denied");
+                            break;
+                        } else {
+                            authed = true;
+                            tx.send(Ok(())).await.ok();
                         }
-                        _ => {
-                            if !authed {
-                                conn.close(1u32.into(), b"permission denied");
-                                break;
-                            } else {
-                                this.handle_authenticated(msg_with_channels).await;
-                            }
+                    }
+                    msg => {
+                        if !authed {
+                            conn.close(1u32.into(), b"permission denied");
+                            break;
+                        } else {
+                            self.handle_authenticated(msg).await;
                         }
                     }
                 }
-                conn.closed().await;
-                Ok(())
-            })
-        }
-    }
-
-    fn upcast_message(msg: StorageProtocol, rx: RecvStream, tx: SendStream) -> StorageMessage {
-        match msg {
-            StorageProtocol::Auth(msg) => WithChannels::from((msg, tx, rx)).into(),
-            StorageProtocol::Get(msg) => WithChannels::from((msg, tx, rx)).into(),
-            StorageProtocol::Set(msg) => WithChannels::from((msg, tx, rx)).into(),
-            StorageProtocol::SetMany(msg) => WithChannels::from((msg, tx, rx)).into(),
-            StorageProtocol::List(msg) => WithChannels::from((msg, tx, rx)).into(),
+            }
+            conn.closed().await;
+            Ok(())
         }
     }
 
@@ -243,7 +220,7 @@ mod storage {
     }
 
     pub struct StorageClient {
-        inner: Client<StorageMessage, StorageProtocol, StorageService>,
+        inner: Client<StorageProtocol>,
     }
 
     impl StorageClient {

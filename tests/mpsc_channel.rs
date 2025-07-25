@@ -1,3 +1,5 @@
+#![cfg(feature = "quinn_endpoint_setup")]
+
 use std::{
     io::{self, ErrorKind},
     time::Duration,

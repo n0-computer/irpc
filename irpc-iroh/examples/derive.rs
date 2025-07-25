@@ -56,24 +56,19 @@ mod storage {
     //!
     //! The only `pub` item is [`StorageApi`], everything else is private.
 
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::collections::BTreeMap;
 
     use anyhow::{Context, Result};
     use iroh::{protocol::ProtocolHandler, Endpoint};
     use irpc::{
         channel::{mpsc, oneshot},
-        rpc::Handler,
-        rpc_requests, Client, LocalSender, Service, WithChannels,
+        rpc::RemoteService,
+        rpc_requests, Client, WithChannels,
     };
     // Import the macro
     use irpc_iroh::{IrohProtocol, IrohRemoteConnection};
     use serde::{Deserialize, Serialize};
     use tracing::info;
-    /// A simple storage service, just to try it out
-    #[derive(Debug, Clone, Copy)]
-    struct StorageService;
-
-    impl Service for StorageService {}
 
     #[derive(Debug, Serialize, Deserialize)]
     struct Get {
@@ -91,8 +86,8 @@ mod storage {
 
     // Use the macro to generate both the StorageProtocol and StorageMessage enums
     // plus implement Channels for each type
-    #[rpc_requests(StorageService, message = StorageMessage)]
-    #[derive(Serialize, Deserialize)]
+    #[rpc_requests(message = StorageMessage)]
+    #[derive(Serialize, Deserialize, Debug)]
     enum StorageProtocol {
         #[rpc(tx=oneshot::Sender<Option<String>>)]
         Get(Get),
@@ -115,9 +110,8 @@ mod storage {
                 state: BTreeMap::new(),
             };
             n0_future::task::spawn(actor.run());
-            let local = LocalSender::<StorageMessage, StorageService>::from(tx);
             StorageApi {
-                inner: local.into(),
+                inner: Client::local(tx),
             }
         }
 
@@ -154,7 +148,7 @@ mod storage {
     }
 
     pub struct StorageApi {
-        inner: Client<StorageMessage, StorageProtocol, StorageService>,
+        inner: Client<StorageProtocol>,
     }
 
     impl StorageApi {
@@ -174,17 +168,9 @@ mod storage {
         pub fn expose(&self) -> Result<impl ProtocolHandler> {
             let local = self
                 .inner
-                .local()
+                .as_local()
                 .context("can not listen on remote service")?;
-            let handler: Handler<StorageProtocol> = Arc::new(move |msg, _rx, tx| {
-                let local = local.clone();
-                Box::pin(match msg {
-                    StorageProtocol::Get(msg) => local.send((msg, tx)),
-                    StorageProtocol::Set(msg) => local.send((msg, tx)),
-                    StorageProtocol::List(msg) => local.send((msg, tx)),
-                })
-            });
-            Ok(IrohProtocol::new(handler))
+            Ok(IrohProtocol::new(StorageProtocol::remote_handler(local)))
         }
 
         pub async fn get(&self, key: String) -> irpc::Result<Option<String>> {
