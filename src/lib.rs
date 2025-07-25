@@ -78,6 +78,7 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
+use channel::{mpsc, oneshot};
 /// Processes an RPC request enum and generates trait implementations for use with `irpc`.
 ///
 /// This attribute macro may be applied to an enum where each variant represents
@@ -221,7 +222,7 @@ pub trait Sender: Debug + Sealed {}
 pub trait Receiver: Debug + Sealed {}
 
 /// Trait to specify channels for a message and service
-pub trait Channels<S: Service> {
+pub trait Channels<S: Service>: Send + 'static {
     /// The sender type, can be either mpsc, oneshot or none
     type Tx: Sender;
     /// The receiver type, can be either mpsc, oneshot or none
@@ -923,10 +924,7 @@ impl<S: Service> Client<S> {
         &self,
     ) -> impl Future<
         Output = result::Result<Request<LocalSender<S>, rpc::RemoteSender<S>>, RequestError>,
-    > + 'static
-    where
-        S: Service,
-    {
+    > + 'static {
         #[cfg(feature = "rpc")]
         {
             let cloned = match &self.0 {
@@ -956,16 +954,16 @@ impl<S: Service> Client<S> {
     /// Performs a request for which the server returns a oneshot receiver.
     pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
     where
-        S: Service + From<Req>,
-        S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = NoReceiver> + Send + 'static,
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = NoReceiver>,
         Res: RpcMessage,
     {
         let request = self.request();
         async move {
-            let recv: channel::oneshot::Receiver<Res> = match request.await? {
+            let recv: oneshot::Receiver<Res> = match request.await? {
                 Request::Local(request) => {
-                    let (tx, rx) = channel::oneshot::channel();
+                    let (tx, rx) = oneshot::channel();
                     request.send((msg, tx)).await?;
                     rx
                 }
@@ -987,18 +985,18 @@ impl<S: Service> Client<S> {
         &self,
         msg: Req,
         local_response_cap: usize,
-    ) -> impl Future<Output = Result<channel::mpsc::Receiver<Res>>> + Send + 'static
+    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
     where
-        S: Service + From<Req>,
-        S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = NoReceiver> + Send + 'static,
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = NoReceiver>,
         Res: RpcMessage,
     {
         let request = self.request();
         async move {
-            let recv: channel::mpsc::Receiver<Res> = match request.await? {
+            let recv: mpsc::Receiver<Res> = match request.await? {
                 Request::Local(request) => {
-                    let (tx, rx) = channel::mpsc::channel(local_response_cap);
+                    let (tx, rx) = mpsc::channel(local_response_cap);
                     request.send((msg, tx)).await?;
                     rx
                 }
@@ -1019,39 +1017,32 @@ impl<S: Service> Client<S> {
         &self,
         msg: Req,
         local_update_cap: usize,
-    ) -> impl Future<
-        Output = Result<(
-            channel::mpsc::Sender<Update>,
-            channel::oneshot::Receiver<Res>,
-        )>,
-    >
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>>
     where
-        S: Service + From<Req>,
-        S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        Req: Channels<S, Tx = channel::oneshot::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>,
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = mpsc::Receiver<Update>>,
         Update: RpcMessage,
         Res: RpcMessage,
     {
         let request = self.request();
         async move {
-            let (update_tx, res_rx): (
-                channel::mpsc::Sender<Update>,
-                channel::oneshot::Receiver<Res>,
-            ) = match request.await? {
-                Request::Local(request) => {
-                    let (req_tx, req_rx) = channel::mpsc::channel(local_update_cap);
-                    let (res_tx, res_rx) = channel::oneshot::channel();
-                    request.send((msg, res_tx, req_rx)).await?;
-                    (req_tx, res_rx)
-                }
-                #[cfg(not(feature = "rpc"))]
-                Request::Remote(_request) => unreachable!(),
-                #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
-                    let (tx, rx) = request.write(msg).await?;
-                    (tx.into(), rx.into())
-                }
-            };
+            let (update_tx, res_rx): (mpsc::Sender<Update>, oneshot::Receiver<Res>) =
+                match request.await? {
+                    Request::Local(request) => {
+                        let (req_tx, req_rx) = mpsc::channel(local_update_cap);
+                        let (res_tx, res_rx) = oneshot::channel();
+                        request.send((msg, res_tx, req_rx)).await?;
+                        (req_tx, res_rx)
+                    }
+                    #[cfg(not(feature = "rpc"))]
+                    Request::Remote(_request) => unreachable!(),
+                    #[cfg(feature = "rpc")]
+                    Request::Remote(request) => {
+                        let (tx, rx) = request.write(msg).await?;
+                        (tx.into(), rx.into())
+                    }
+                };
             Ok((update_tx, res_rx))
         }
     }
@@ -1062,25 +1053,21 @@ impl<S: Service> Client<S> {
         msg: Req,
         local_update_cap: usize,
         local_response_cap: usize,
-    ) -> impl Future<Output = Result<(channel::mpsc::Sender<Update>, channel::mpsc::Receiver<Res>)>>
-           + Send
-           + 'static
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, mpsc::Receiver<Res>)>> + Send + 'static
     where
-        S: Service + From<Req>,
-        S::Message: From<WithChannels<Req, S>> + Send + Sync + Unpin + 'static,
-        Req: Channels<S, Tx = channel::mpsc::Sender<Res>, Rx = channel::mpsc::Receiver<Update>>
-            + Send
-            + 'static,
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = mpsc::Receiver<Update>>,
         Update: RpcMessage,
         Res: RpcMessage,
     {
         let request = self.request();
         async move {
-            let (update_tx, res_rx): (channel::mpsc::Sender<Update>, channel::mpsc::Receiver<Res>) =
+            let (update_tx, res_rx): (mpsc::Sender<Update>, mpsc::Receiver<Res>) =
                 match request.await? {
                     Request::Local(request) => {
-                        let (update_tx, update_rx) = channel::mpsc::channel(local_update_cap);
-                        let (res_tx, res_rx) = channel::mpsc::channel(local_response_cap);
+                        let (update_tx, update_rx) = mpsc::channel(local_update_cap);
+                        let (res_tx, res_rx) = mpsc::channel(local_response_cap);
                         request.send((msg, res_tx, update_rx)).await?;
                         (update_tx, res_rx)
                     }
