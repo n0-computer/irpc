@@ -980,8 +980,8 @@ impl<S: Service> Client<S> {
     fn rpc_inner<Req, Res>(
         &self,
         msg: Req,
-        local: impl Fn(Req, oneshot::Sender<Res>) -> S::Message + Send + 'static,
-        remote: impl Fn(Req) -> S + Send + 'static,
+        map_local: impl Fn(Req, oneshot::Sender<Res>) -> S::Message + Send + 'static,
+        _map_remote: impl Fn(Req) -> S + Send + 'static,
     ) -> impl Future<Output = Result<Res>> + Send + 'static
     where
         Req: Send + Sync + 'static,
@@ -992,14 +992,14 @@ impl<S: Service> Client<S> {
             let recv: oneshot::Receiver<Res> = match request.await? {
                 Request::Local(request) => {
                     let (tx, rx) = oneshot::channel();
-                    request.send_raw(local(msg, tx)).await?;
+                    request.send_raw(map_local(msg, tx)).await?;
                     rx
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
-                    let msg = remote(msg);
+                    let msg = _map_remote(msg);
                     let (_tx, rx) = request.write(msg).await?;
                     rx.into()
                 }
@@ -1032,8 +1032,8 @@ impl<S: Service> Client<S> {
         &self,
         msg: Req,
         local_response_cap: usize,
-        local: impl Fn(Req, mpsc::Sender<Res>) -> S::Message + Send + 'static,
-        remote: impl Fn(Req) -> S + Send + 'static,
+        map_local: impl Fn(Req, mpsc::Sender<Res>) -> S::Message + Send + 'static,
+        _map_remote: impl Fn(Req) -> S + Send + 'static,
     ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
     where
         Req: Send + Sync + 'static,
@@ -1044,14 +1044,14 @@ impl<S: Service> Client<S> {
             let recv: mpsc::Receiver<Res> = match request.await? {
                 Request::Local(request) => {
                     let (tx, rx) = mpsc::channel(local_response_cap);
-                    request.send_raw(local(msg, tx)).await?;
+                    request.send_raw(map_local(msg, tx)).await?;
                     rx
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
-                    let (_tx, rx) = request.write(remote(msg)).await?;
+                    let (_tx, rx) = request.write(_map_remote(msg)).await?;
                     rx.into()
                 }
             };
@@ -1083,8 +1083,10 @@ impl<S: Service> Client<S> {
         &self,
         msg: Req,
         local_update_cap: usize,
-        local: impl Fn(Req, oneshot::Sender<Res>, mpsc::Receiver<Update>) -> S::Message + Send + 'static,
-        remote: impl Fn(Req) -> S + Send + 'static,
+        map_local: impl Fn(Req, oneshot::Sender<Res>, mpsc::Receiver<Update>) -> S::Message
+            + Send
+            + 'static,
+        _map_remote: impl Fn(Req) -> S + Send + 'static,
     ) -> impl Future<Output = Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>> + Send
     where
         Req: Send + Sync + 'static,
@@ -1097,14 +1099,14 @@ impl<S: Service> Client<S> {
                 Request::Local(request) => {
                     let (update_tx, update_rx) = mpsc::channel(local_update_cap);
                     let (res_tx, res_rx) = oneshot::channel();
-                    request.send_raw(local(msg, res_tx, update_rx)).await?;
+                    request.send_raw(map_local(msg, res_tx, update_rx)).await?;
                     Ok((update_tx, res_rx))
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
-                    let (tx, rx) = request.write(remote(msg)).await?;
+                    let (tx, rx) = request.write(_map_remote(msg)).await?;
                     Ok((tx.into(), rx.into()))
                 }
             }
@@ -1138,8 +1140,10 @@ impl<S: Service> Client<S> {
         msg: Req,
         local_update_cap: usize,
         local_response_cap: usize,
-        local: impl Fn(Req, mpsc::Sender<Res>, mpsc::Receiver<Update>) -> S::Message + Send + 'static,
-        remote: impl Fn(Req) -> S + Send + 'static,
+        map_local: impl Fn(Req, mpsc::Sender<Res>, mpsc::Receiver<Update>) -> S::Message
+            + Send
+            + 'static,
+        _map_remote: impl Fn(Req) -> S + Send + 'static,
     ) -> impl Future<Output = Result<(mpsc::Sender<Update>, mpsc::Receiver<Res>)>> + Send + 'static
     where
         Req: Send + Sync + 'static,
@@ -1152,14 +1156,14 @@ impl<S: Service> Client<S> {
                 Request::Local(request) => {
                     let (update_tx, update_rx) = mpsc::channel(local_update_cap);
                     let (res_tx, res_rx) = mpsc::channel(local_response_cap);
-                    request.send_raw(local(msg, res_tx, update_rx)).await?;
+                    request.send_raw(map_local(msg, res_tx, update_rx)).await?;
                     Ok((update_tx, res_rx))
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
-                    let (tx, rx) = request.write(remote(msg)).await?;
+                    let (tx, rx) = request.write(_map_remote(msg)).await?;
                     Ok((tx.into(), rx.into()))
                 }
             }

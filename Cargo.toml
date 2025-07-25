@@ -86,6 +86,10 @@ required-features = ["derive"]
 name = "storage"
 required-features = ["rpc", "quinn_endpoint_setup"]
 
+[[example]]
+name = "nested"
+required-features = ["rpc", "derive", "quinn_endpoint_setup"]
+
 [workspace]
 members = ["irpc-derive", "irpc-iroh"]
 
