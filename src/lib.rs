@@ -83,7 +83,7 @@ use channel::{mpsc, oneshot};
 ///
 /// This attribute macro may be applied to an enum where each variant represents
 /// a different RPC request type. Each variant of the enum must contain a single unnamed field
-/// of a distinct type, otherwise compilation fails.
+/// of a distinct type (unless the `wrap` attribute is used on a variant, see below).
 ///
 /// Basic usage example:
 /// ```
@@ -148,8 +148,31 @@ use channel::{mpsc, oneshot};
 /// * `rx = OtherType` *(optional)*: Set the kind of channel for receiving updates from the client at the server.
 ///   Must be a `Receiver` type from the [`crate::channel`] module. If `rx` is not set,
 ///   it defaults to [`crate::channel::none::NoReceiver`].
+/// * `wrap = TypeName` *(optional)*: If set, a struct `TypeName` will be generated from the variant's fields, and the variant
+///   will be changed to have a single, unnamed field of `TypeName`.
 ///
 /// ## Examples
+///
+/// With `wrap`:
+/// ```
+/// use serde::{Serialize, Deserialize};
+/// use irpc::{rpc_requests, channel::{oneshot, mpsc}, Client};
+///
+/// #[rpc_requests(message = StoreMessage)]
+/// #[derive(Debug, Serialize, Deserialize)]
+/// enum StoreProtocol {
+///     #[rpc(wrap=GetRequest, tx=oneshot::Sender<String>)]
+///     Get(String),
+///     #[rpc(wrap=SetRequest, tx=oneshot::Sender<()>)]
+///     Set { key: String, value: String }
+/// }
+///
+/// async fn client_usage(client: Client<StoreProtocol>) -> anyhow::Result<()> {
+///     client.rpc(SetRequest { key: "foo".to_string(), value: "bar".to_string() }).await?;
+///     let value = client.rpc(GetRequest("foo".to_string())).await?;
+///     Ok(())
+/// }
+/// ```
 ///
 /// With type aliases:
 /// ```no_compile
