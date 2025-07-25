@@ -76,9 +76,10 @@
 //! quic-rpc, this crate does not abstract over the stream type and is focused
 //! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [iroh quinn fork](https://docs.rs/iroh-quinn/latest/iroh-quinn/index.html).
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
-use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
+use std::{borrow::Cow, fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
 use channel::{mpsc, oneshot};
+
 /// Processes an RPC request enum and generates trait implementations for use with `irpc`.
 ///
 /// This attribute macro may be applied to an enum where each variant represents
@@ -208,7 +209,7 @@ pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static 
     /// This is expected to be an enum with identical variant names than the
     /// protocol enum, but its single unit field is the [`WithChannels`] struct
     /// that contains the inner request plus the `tx` and `rx` channels.
-    type Message: Send + Unpin + 'static;
+    type Message: Send + Sync + Unpin + 'static;
 }
 
 mod sealed {
@@ -222,7 +223,7 @@ pub trait Sender: Debug + Sealed {}
 pub trait Receiver: Debug + Sealed {}
 
 /// Trait to specify channels for a message and service
-pub trait Channels<S: Service>: Send + 'static {
+pub trait Channels<S: Service>: Send + Sync + 'static {
     /// The sender type, can be either mpsc, oneshot or none
     type Tx: Sender;
     /// The receiver type, can be either mpsc, oneshot or none
@@ -297,8 +298,8 @@ pub mod channel {
         impl<T> Debug for Sender<T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
-                    Self::Tokio(_) => f.debug_tuple("Tokio").finish(),
-                    Self::Boxed(_) => f.debug_tuple("Boxed").finish(),
+                    Self::Tokio(_) => f.debug_tuple("TokioOneshotSender").finish(),
+                    Self::Boxed(_) => f.debug_tuple("BoxedOneshotSender").finish(),
                 }
             }
         }
@@ -401,8 +402,8 @@ pub mod channel {
         impl<T> Debug for Receiver<T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
-                    Self::Tokio(_) => f.debug_tuple("Tokio").finish(),
-                    Self::Boxed(_) => f.debug_tuple("Boxed").finish(),
+                    Self::Tokio(_) => f.debug_tuple("TokioOneshotReceiver").finish(),
+                    Self::Boxed(_) => f.debug_tuple("BoxedOneshotReceiver").finish(),
                 }
             }
         }
@@ -780,8 +781,8 @@ impl<I: Channels<S> + Debug, S: Service> Debug for WithChannels<I, S> {
 impl<I: Channels<S>, S: Service> WithChannels<I, S> {
     /// Get the parent span
     #[cfg(feature = "spans")]
-    pub fn parent_span_opt(&self) -> Option<&tracing::Span> {
-        Some(&self.span)
+    pub fn parent_span(&self) -> &tracing::Span {
+        &self.span
     }
 }
 
@@ -894,6 +895,16 @@ impl<S: Service> Client<S> {
         Self(ClientInner::Remote(Box::new(remote)), PhantomData)
     }
 
+    /// Returns a client that maps from a nested service to this client's service.
+    pub fn map<SInner>(&self) -> MappedClient<S, SInner>
+    where
+        SInner: Service,
+        S::Message: From<SInner::Message>,
+        S: From<SInner>,
+    {
+        MappedClient(Cow::Borrowed(self), PhantomData)
+    }
+
     /// Creates a new client from a `tokio::sync::mpsc::Sender`.
     pub fn local(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
         tx.into()
@@ -959,18 +970,36 @@ impl<S: Service> Client<S> {
         Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = NoReceiver>,
         Res: RpcMessage,
     {
+        self.rpc_inner(
+            msg,
+            |msg, tx| S::Message::from(WithChannels::from((msg, tx))),
+            |msg| S::from(msg),
+        )
+    }
+
+    fn rpc_inner<Req, Res>(
+        &self,
+        msg: Req,
+        local: impl Fn(Req, oneshot::Sender<Res>) -> S::Message + Send + 'static,
+        remote: impl Fn(Req) -> S + Send + 'static,
+    ) -> impl Future<Output = Result<Res>> + Send + 'static
+    where
+        Req: Send + Sync + 'static,
+        Res: RpcMessage,
+    {
         let request = self.request();
         async move {
             let recv: oneshot::Receiver<Res> = match request.await? {
                 Request::Local(request) => {
                     let (tx, rx) = oneshot::channel();
-                    request.send((msg, tx)).await?;
+                    request.send_raw(local(msg, tx)).await?;
                     rx
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
+                    let msg = remote(msg);
                     let (_tx, rx) = request.write(msg).await?;
                     rx.into()
                 }
@@ -979,7 +1008,6 @@ impl<S: Service> Client<S> {
             Ok(res)
         }
     }
-
     /// Performs a request for which the server returns a mpsc receiver.
     pub fn server_streaming<Req, Res>(
         &self,
@@ -992,24 +1020,201 @@ impl<S: Service> Client<S> {
         Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = NoReceiver>,
         Res: RpcMessage,
     {
+        self.server_streaming_inner(
+            msg,
+            local_response_cap,
+            |msg, tx| S::Message::from(WithChannels::from((msg, tx))),
+            |msg| S::from(msg),
+        )
+    }
+
+    fn server_streaming_inner<Req, Res>(
+        &self,
+        msg: Req,
+        local_response_cap: usize,
+        local: impl Fn(Req, mpsc::Sender<Res>) -> S::Message + Send + 'static,
+        remote: impl Fn(Req) -> S + Send + 'static,
+    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
+    where
+        Req: Send + Sync + 'static,
+        Res: RpcMessage,
+    {
         let request = self.request();
         async move {
             let recv: mpsc::Receiver<Res> = match request.await? {
                 Request::Local(request) => {
                     let (tx, rx) = mpsc::channel(local_response_cap);
-                    request.send((msg, tx)).await?;
+                    request.send_raw(local(msg, tx)).await?;
                     rx
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
-                    let (_tx, rx) = request.write(msg).await?;
+                    let (_tx, rx) = request.write(remote(msg)).await?;
                     rx.into()
                 }
             };
             Ok(recv)
         }
+    }
+    /// Performs a request for which the client can send updates.
+    pub fn client_streaming<Req, Update, Res>(
+        &self,
+        msg: Req,
+        local_update_cap: usize,
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>> + Send
+    where
+        S: Service + From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = mpsc::Receiver<Update>>,
+        Update: RpcMessage,
+        Res: RpcMessage,
+    {
+        self.client_streaming_inner(
+            msg,
+            local_update_cap,
+            |msg, tx, rx| S::Message::from(WithChannels::from((msg, tx, rx))),
+            |msg| S::from(msg),
+        )
+    }
+
+    fn client_streaming_inner<Req, Update, Res>(
+        &self,
+        msg: Req,
+        local_update_cap: usize,
+        local: impl Fn(Req, oneshot::Sender<Res>, mpsc::Receiver<Update>) -> S::Message + Send + 'static,
+        remote: impl Fn(Req) -> S + Send + 'static,
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>> + Send
+    where
+        Req: Send + Sync + 'static,
+        Update: RpcMessage,
+        Res: RpcMessage,
+    {
+        let request = self.request();
+        async move {
+            match request.await? {
+                Request::Local(request) => {
+                    let (update_tx, update_rx) = mpsc::channel(local_update_cap);
+                    let (res_tx, res_rx) = oneshot::channel();
+                    request.send_raw(local(msg, res_tx, update_rx)).await?;
+                    Ok((update_tx, res_rx))
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let (tx, rx) = request.write(remote(msg)).await?;
+                    Ok((tx.into(), rx.into()))
+                }
+            }
+        }
+    }
+    /// Performs a request for which the client can send updates, and the server returns a mpsc receiver.
+    pub fn bidi_streaming<Req, Update, Res>(
+        &self,
+        msg: Req,
+        local_update_cap: usize,
+        local_response_cap: usize,
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, mpsc::Receiver<Res>)>> + Send + 'static
+    where
+        S: Service + From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = mpsc::Receiver<Update>>,
+        Update: RpcMessage,
+        Res: RpcMessage,
+    {
+        self.bidi_streaming_inner(
+            msg,
+            local_update_cap,
+            local_response_cap,
+            |msg, tx, rx| S::Message::from(WithChannels::from((msg, tx, rx))),
+            |msg| S::from(msg),
+        )
+    }
+
+    fn bidi_streaming_inner<Req, Update, Res>(
+        &self,
+        msg: Req,
+        local_update_cap: usize,
+        local_response_cap: usize,
+        local: impl Fn(Req, mpsc::Sender<Res>, mpsc::Receiver<Update>) -> S::Message + Send + 'static,
+        remote: impl Fn(Req) -> S + Send + 'static,
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, mpsc::Receiver<Res>)>> + Send + 'static
+    where
+        Req: Send + Sync + 'static,
+        Update: RpcMessage,
+        Res: RpcMessage,
+    {
+        let request = self.request();
+        async move {
+            match request.await? {
+                Request::Local(request) => {
+                    let (update_tx, update_rx) = mpsc::channel(local_update_cap);
+                    let (res_tx, res_rx) = mpsc::channel(local_response_cap);
+                    request.send_raw(local(msg, res_tx, update_rx)).await?;
+                    Ok((update_tx, res_rx))
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let (tx, rx) = request.write(remote(msg)).await?;
+                    Ok((tx.into(), rx.into()))
+                }
+            }
+        }
+    }
+}
+
+/// A client that maps to a nested service.
+///
+/// See [`Client::map`].
+pub struct MappedClient<'a, S: Service, SInner: Service>(Cow<'a, Client<S>>, PhantomData<SInner>);
+
+impl<'a, S, SInner> MappedClient<'a, S, SInner>
+where
+    S: Service + From<SInner>,
+    SInner: Service,
+    S::Message: From<SInner::Message>,
+{
+    pub fn to_owned(self) -> MappedClient<'static, S, SInner> {
+        MappedClient(Cow::Owned(self.0.into_owned()), PhantomData)
+    }
+
+    /// Performs a request for which the server returns a oneshot receiver.
+    pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
+    where
+        SInner: From<Req>,
+        SInner::Message: From<WithChannels<Req, SInner>>,
+        Req: Channels<SInner, Tx = oneshot::Sender<Res>, Rx = NoReceiver>,
+        Res: RpcMessage,
+    {
+        self.0.rpc_inner(
+            msg,
+            |msg, tx| S::Message::from(SInner::Message::from(WithChannels::from((msg, tx)))),
+            |msg| S::from(SInner::from(msg)),
+        )
+    }
+
+    /// Performs a request for which the server returns a mpsc receiver.
+    pub fn server_streaming<Req, Res>(
+        &self,
+        msg: Req,
+        local_response_cap: usize,
+    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
+    where
+        SInner: From<Req>,
+        SInner::Message: From<WithChannels<Req, SInner>>,
+        Req: Channels<SInner, Tx = mpsc::Sender<Res>, Rx = NoReceiver>,
+        Res: RpcMessage,
+    {
+        self.0.server_streaming_inner(
+            msg,
+            local_response_cap,
+            |msg, tx| S::Message::from(SInner::Message::from(WithChannels::from((msg, tx)))),
+            |msg| S::from(SInner::from(msg)),
+        )
     }
 
     /// Performs a request for which the client can send updates.
@@ -1017,34 +1222,22 @@ impl<S: Service> Client<S> {
         &self,
         msg: Req,
         local_update_cap: usize,
-    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>>
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>> + Send
     where
-        S: From<Req>,
-        S::Message: From<WithChannels<Req, S>>,
-        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = mpsc::Receiver<Update>>,
+        SInner: From<Req>,
+        SInner::Message: From<WithChannels<Req, SInner>>,
+        Req: Channels<SInner, Tx = oneshot::Sender<Res>, Rx = mpsc::Receiver<Update>>,
         Update: RpcMessage,
         Res: RpcMessage,
     {
-        let request = self.request();
-        async move {
-            let (update_tx, res_rx): (mpsc::Sender<Update>, oneshot::Receiver<Res>) =
-                match request.await? {
-                    Request::Local(request) => {
-                        let (req_tx, req_rx) = mpsc::channel(local_update_cap);
-                        let (res_tx, res_rx) = oneshot::channel();
-                        request.send((msg, res_tx, req_rx)).await?;
-                        (req_tx, res_rx)
-                    }
-                    #[cfg(not(feature = "rpc"))]
-                    Request::Remote(_request) => unreachable!(),
-                    #[cfg(feature = "rpc")]
-                    Request::Remote(request) => {
-                        let (tx, rx) = request.write(msg).await?;
-                        (tx.into(), rx.into())
-                    }
-                };
-            Ok((update_tx, res_rx))
-        }
+        self.0.client_streaming_inner(
+            msg,
+            local_update_cap,
+            |msg, tx, rx| {
+                S::Message::from(SInner::Message::from(WithChannels::from((msg, tx, rx))))
+            },
+            |msg| S::from(SInner::from(msg)),
+        )
     }
 
     /// Performs a request for which the client can send updates, and the server returns a mpsc receiver.
@@ -1055,32 +1248,21 @@ impl<S: Service> Client<S> {
         local_response_cap: usize,
     ) -> impl Future<Output = Result<(mpsc::Sender<Update>, mpsc::Receiver<Res>)>> + Send + 'static
     where
-        S: From<Req>,
-        S::Message: From<WithChannels<Req, S>>,
-        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = mpsc::Receiver<Update>>,
+        SInner: From<Req>,
+        SInner::Message: From<WithChannels<Req, SInner>>,
+        Req: Channels<SInner, Tx = mpsc::Sender<Res>, Rx = mpsc::Receiver<Update>>,
         Update: RpcMessage,
         Res: RpcMessage,
     {
-        let request = self.request();
-        async move {
-            let (update_tx, res_rx): (mpsc::Sender<Update>, mpsc::Receiver<Res>) =
-                match request.await? {
-                    Request::Local(request) => {
-                        let (update_tx, update_rx) = mpsc::channel(local_update_cap);
-                        let (res_tx, res_rx) = mpsc::channel(local_response_cap);
-                        request.send((msg, res_tx, update_rx)).await?;
-                        (update_tx, res_rx)
-                    }
-                    #[cfg(not(feature = "rpc"))]
-                    Request::Remote(_request) => unreachable!(),
-                    #[cfg(feature = "rpc")]
-                    Request::Remote(request) => {
-                        let (tx, rx) = request.write(msg).await?;
-                        (tx.into(), rx.into())
-                    }
-                };
-            Ok((update_tx, res_rx))
-        }
+        self.0.bidi_streaming_inner(
+            msg,
+            local_update_cap,
+            local_response_cap,
+            |msg, tx, rx| {
+                S::Message::from(SInner::Message::from(WithChannels::from((msg, tx, rx))))
+            },
+            |msg| S::from(SInner::from(msg)),
+        )
     }
 }
 
@@ -1400,6 +1582,25 @@ pub mod rpc {
             send.write_all(&buf).await?;
             Ok((send, recv))
         }
+
+        // pub async fn write_mapped<M, S2>(
+        //     self,
+        //     msg: M,
+        // ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError>
+        // where
+        //     M: Into<S2>,
+        //     S2: Into<S>,
+        // {
+        //     let RemoteSender(mut send, recv, _) = self;
+        //     let msg = msg.into().into();
+        //     if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
+        //         return Err(WriteError::MaxMessageSizeExceeded);
+        //     }
+        //     let mut buf = SmallVec::<[u8; 128]>::new();
+        //     buf.write_length_prefixed(msg)?;
+        //     send.write_all(&buf).await?;
+        //     Ok((send, recv))
+        // }
     }
 
     impl<T: DeserializeOwned> From<quinn::RecvStream> for oneshot::Receiver<T> {
@@ -1825,6 +2026,22 @@ impl<S: Service> LocalSender<S> {
         let value: S::Message = value.into().into();
         SendFut::new(self.0.clone(), value)
     }
+
+    // pub async fn send_mapped<T, S2>(
+    //     &self,
+    //     value: impl Into<WithChannels<T, S2>>,
+    // ) -> std::result::Result<(), SendError>
+    // where
+    //     S2: Service,
+    //     S2::Message: From<WithChannels<T, S2>>,
+    //     T: Channels<S2>,
+    //     S::Message: From<S2::Message>,
+    // {
+    //     let value: S2::Message = value.into().into();
+    //     let value: S::Message = value.into();
+    //     let fut = SendFut::<S::Message>::new(self.0.clone(), value);
+    //     fut.await
+    // }
 
     /// Send a message to the service without the type conversion magic
     pub fn send_raw(&self, value: S::Message) -> SendFut<S::Message> {

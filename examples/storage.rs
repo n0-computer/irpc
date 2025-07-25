@@ -1,3 +1,6 @@
+//! This example does not use the `rpc_requests` macro and instead implements
+//! everything manually.
+
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -8,11 +11,13 @@ use irpc::{
     channel::{mpsc, none::NoReceiver, oneshot},
     rpc::{listen, RemoteService},
     util::{make_client_endpoint, make_server_endpoint},
-    Channels, Client, Request, Service, WithChannels,
+    Channels, Client, MappedClient, Request, Service, WithChannels,
 };
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
+
+use self::shout_crate::*;
 
 impl Service for StorageProtocol {
     type Message = StorageMessage;
@@ -52,6 +57,7 @@ enum StorageProtocol {
     Get(Get),
     Set(Set),
     List(List),
+    Shout(ShoutProtocol),
 }
 
 #[derive(derive_more::From)]
@@ -59,6 +65,7 @@ enum StorageMessage {
     Get(WithChannels<Get, StorageProtocol>),
     Set(WithChannels<Set, StorageProtocol>),
     List(WithChannels<List, StorageProtocol>),
+    Shout(ShoutMessage),
 }
 
 impl RemoteService for StorageProtocol {
@@ -67,6 +74,64 @@ impl RemoteService for StorageProtocol {
             StorageProtocol::Get(msg) => WithChannels::from((msg, tx, rx)).into(),
             StorageProtocol::Set(msg) => WithChannels::from((msg, tx, rx)).into(),
             StorageProtocol::List(msg) => WithChannels::from((msg, tx, rx)).into(),
+            StorageProtocol::Shout(msg) => msg.with_remote_channels(rx, tx).into(),
+        }
+    }
+}
+
+/// This is a protocol that could live in a different crate.
+mod shout_crate {
+    use irpc::{
+        channel::{none::NoReceiver, oneshot},
+        rpc::RemoteService,
+        Channels, Service, WithChannels,
+    };
+    use serde::{Deserialize, Serialize};
+    use tracing::info;
+
+    #[derive(derive_more::From, Serialize, Deserialize, Debug)]
+    pub enum ShoutProtocol {
+        Shout(Shout),
+    }
+
+    impl Service for ShoutProtocol {
+        type Message = ShoutMessage;
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Shout {
+        pub key: String,
+    }
+
+    impl Channels<ShoutProtocol> for Shout {
+        type Rx = NoReceiver;
+        type Tx = oneshot::Sender<String>;
+    }
+
+    #[derive(derive_more::From)]
+    pub enum ShoutMessage {
+        Shout(WithChannels<Shout, ShoutProtocol>),
+    }
+
+    impl RemoteService for ShoutProtocol {
+        fn with_remote_channels(
+            self,
+            rx: quinn::RecvStream,
+            tx: quinn::SendStream,
+        ) -> Self::Message {
+            match self {
+                ShoutProtocol::Shout(msg) => WithChannels::from((msg, tx, rx)).into(),
+            }
+        }
+    }
+
+    pub async fn handle_message(msg: ShoutMessage) {
+        match msg {
+            ShoutMessage::Shout(msg) => {
+                info!("shout.shout: {msg:?}");
+                let WithChannels { tx, inner, .. } = msg;
+                tx.send(inner.key.to_uppercase()).await.ok();
+            }
         }
     }
 }
@@ -84,9 +149,9 @@ impl StorageActor {
             state: BTreeMap::new(),
         };
         n0_future::task::spawn(actor.run());
-        StorageApi {
-            inner: Client::local(tx),
-        }
+        let inner = Client::local(tx);
+        let shout = inner.map().to_owned();
+        StorageApi { inner, shout }
     }
 
     async fn run(mut self) {
@@ -117,18 +182,22 @@ impl StorageActor {
                     }
                 }
             }
+            // We delegate these messages to the handler in the other "crate".
+            StorageMessage::Shout(msg) => shout_crate::handle_message(msg).await,
         }
     }
 }
+
 struct StorageApi {
     inner: Client<StorageProtocol>,
+    shout: MappedClient<'static, StorageProtocol, ShoutProtocol>,
 }
 
 impl StorageApi {
     pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> anyhow::Result<StorageApi> {
-        Ok(StorageApi {
-            inner: Client::quinn(endpoint, addr),
-        })
+        let inner = Client::quinn(endpoint, addr);
+        let shout = inner.map().to_owned();
+        Ok(StorageApi { inner, shout })
     }
 
     pub fn listen(&self, endpoint: quinn::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
@@ -185,6 +254,12 @@ impl StorageApi {
             }
         }
     }
+
+    pub async fn shout(&self, key: String) -> anyhow::Result<String> {
+        let msg = Shout { key };
+        let res = self.shout.rpc(msg).await?;
+        Ok(res)
+    }
 }
 
 async fn local() -> anyhow::Result<()> {
@@ -198,6 +273,8 @@ async fn local() -> anyhow::Result<()> {
         println!("list value = {value:?}");
     }
     println!("value = {value:?}");
+    let res = api.shout("hello".to_string()).await?;
+    println!("shout.shout = {res:?}");
     Ok(())
 }
 
@@ -222,6 +299,8 @@ async fn remote() -> anyhow::Result<()> {
     while let Some(value) = list.recv().await? {
         println!("list value = {value:?}");
     }
+    let shout = api.shout("hello".to_string()).await?;
+    println!("shout.shout = {shout:?}");
     drop(handle);
     Ok(())
 }
