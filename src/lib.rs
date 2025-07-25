@@ -139,16 +139,16 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, resul
 ///
 /// ## Variant attributes
 ///
-/// Individual enum variants can be annotated with the `#[rpc(...)]` attribute to specify channel types.
-/// The types should be one of the `Sender` or `Receiver` types from the [`crate::channel`] module.
+/// Individual enum variants are annotated with the `#[rpc(...)]` attribute to specify channel types.
+/// The `rpc` attribute contains a key-value list with these arguments:
 ///
-/// * `#[rpc(tx=SomeType)]`: Specify the transmitter/sender channel type (required)
-/// * `#[rpc(tx=SomeType, rx=OtherType)]`: Also specify a receiver channel type (optional)
-///
-/// If `rx` is not specified, it defaults to `NoReceiver`.
+/// * `tx = SomeType` *(required)*: Set the kind of channel for sending responses from the server to the client.
+///    Must be a `Sender` type from the [`crate::channel`] module.
+/// * `rx = OtherType` *(optional)*: Set the kind of channel for receiving updates from the client at the server.
+///    Must be a `Receiver` type from the [`crate::channel`] module. If `rx` is not set,
+///    it defaults to [`crate::channel::none::NoReceiver`].
 ///
 /// ## Examples
-///
 ///
 /// With type aliases:
 /// ```no_compile
