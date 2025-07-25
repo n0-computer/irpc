@@ -78,20 +78,54 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
-/// Processes an RPC request enum and generates channel implementations.
+/// Processes an RPC request enum and generates trait implementations for use with `irpc`.
 ///
-/// This macro takes a protocol enum where each variant represents a different RPC request type
-/// and generates the necessary [`Channels`] implementations for each request. It also creates [`From`]
-/// implementations to convert the inner types of each variant into the enum.
+/// This attribute macro may be applied to an enum where each variant represents
+/// a different RPC request type. Each variant of the enum must contain a single unnamed field
+/// of a distinct type, otherwise compilation fails.
+///
+/// Basic usage example:
+/// ```
+/// use serde::{Serialize, Deserialize};
+/// use irpc::{rpc_requests, channel::{oneshot, mpsc}};
+///
+/// #[rpc_requests(message = ComputeMessage)]
+/// #[derive(Debug, Serialize, Deserialize)]
+/// enum ComputeProtocol {
+///     /// Multiply two numbers, return the result over a oneshot channel.
+///     #[rpc(tx=oneshot::Sender<i64>)]
+///     Multiply(Multiply),
+///     /// Sum all numbers received via the `rx` stream,
+///     /// reply with the updating sum over the `tx` stream.
+///     #[rpc(tx=mpsc::Sender<i64>, rx=mpsc::Receiver<i64>)]
+///     Sum(Sum),
+/// }
+///
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct Multiply(i64, i64);
+///
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct Sum;
+/// ```
+///
+/// ## Generated code
+///
+/// If no further arguments are set, the macro generates:
+///
+/// * A [`Channels<S>`] implementation for each request type (i.e. the type of the variant's
+///   single unnamed field).
+///   The `Tx` and `Rx` types are set to the types provided via the variant's `rpc` attribute.
+/// * A [`From`] implementation to convert from each request type to the protocol enum.
 ///
 /// When the `message` argument is set, the macro will also create a message enum and implement the
-/// [`Service`] and [`RemoteService`] traits for the protocol enum.
+/// [`Service`] and [`RemoteService`] traits for the protocol enum. This is recommended for the
+/// typical use of the macro.
 ///
-/// # Macro Arguments
+/// ## Macro arguments
 ///
 /// * `message = <name>` *(optional but recommended)*:
 ///     * Generates an extended enum wrapping each type in [`WithChannels<T, Service>`].
-///       The value is the name of the message enum.
+///       The attribute value is the name of the message enum type.
 ///     * Generates a [`Service`] implementation for the protocol enum, with the `Message`
 ///       type set to the message enum.
 ///     * Generates a [`RemoteService`] implementation for the protocol enum.
@@ -103,27 +137,18 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, resul
 ///   code works without the `rpc` feature of `irpc`.
 /// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
 ///
-/// # Variant Attributes
+/// ## Variant attributes
 ///
-/// Individual enum variants can be annotated with the `#[rpc(...)]` attribute to specify channel types:
+/// Individual enum variants can be annotated with the `#[rpc(...)]` attribute to specify channel types.
+/// The types should be one of the `Sender` or `Receiver` types from the [`crate::channel`] module.
 ///
 /// * `#[rpc(tx=SomeType)]`: Specify the transmitter/sender channel type (required)
 /// * `#[rpc(tx=SomeType, rx=OtherType)]`: Also specify a receiver channel type (optional)
 ///
 /// If `rx` is not specified, it defaults to `NoReceiver`.
 ///
-/// # Examples
+/// ## Examples
 ///
-/// Basic usage:
-/// ```no_compile
-/// #[rpc_requests(message = ComputeMessage)]
-/// enum ComputeProtocol {
-///     #[rpc(tx=oneshot::Sender<u128>)]
-///     Sqr(Sqr),
-///     #[rpc(tx=mpsc::Sender<i64>)]
-///     Sum(Sum),
-/// }
-/// ```
 ///
 /// With type aliases:
 /// ```no_compile
@@ -139,6 +164,7 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, resul
 /// [`irpc`]: crate
 /// [`RemoteService`]: rpc::RemoteService
 /// [`WithChannels<T, Service>`]: WithChannels
+/// [`Channels<S>`]: Channels
 #[cfg(feature = "derive")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
 pub use irpc_derive::rpc_requests;

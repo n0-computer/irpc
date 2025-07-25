@@ -64,8 +64,8 @@ fn generate_channels_impl(
     Ok(res)
 }
 
-/// Generates From implementations for cases with rpc attributes
-fn generate_case_from_impls(
+/// Generates From implementations for protocol enum variants.
+fn generate_protocol_enum_from_impls(
     enum_name: &Ident,
     variants_with_attr: &[(Ident, Type)],
 ) -> TokenStream2 {
@@ -90,7 +90,7 @@ fn generate_case_from_impls(
     impls
 }
 
-/// Generate From implementations for message enum variants
+/// Generates From implementations for message enum variants.
 fn generate_message_enum_from_impls(
     message_enum_name: &Ident,
     variants_with_attr: &[(Ident, Type)],
@@ -268,7 +268,8 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     // Generate From implementations for the original enum (only for variants with rpc attributes)
-    let original_from_impls = generate_case_from_impls(enum_name, &variants_with_attr);
+    let protocol_enum_from_impls =
+        generate_protocol_enum_from_impls(enum_name, &variants_with_attr);
 
     // Generate type aliases if requested
     let type_aliases = if let Some(suffix) = args.alias_suffix {
@@ -349,7 +350,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         #(#channel_impls)*
 
         // From implementations for the original enum
-        #original_from_impls
+        #protocol_enum_from_impls
 
         // Type aliases for WithChannels
         #type_aliases
