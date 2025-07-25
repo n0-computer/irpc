@@ -143,10 +143,10 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, resul
 /// The `rpc` attribute contains a key-value list with these arguments:
 ///
 /// * `tx = SomeType` *(required)*: Set the kind of channel for sending responses from the server to the client.
-///    Must be a `Sender` type from the [`crate::channel`] module.
+///   Must be a `Sender` type from the [`crate::channel`] module.
 /// * `rx = OtherType` *(optional)*: Set the kind of channel for receiving updates from the client at the server.
-///    Must be a `Receiver` type from the [`crate::channel`] module. If `rx` is not set,
-///    it defaults to [`crate::channel::none::NoReceiver`].
+///   Must be a `Receiver` type from the [`crate::channel`] module. If `rx` is not set,
+///   it defaults to [`crate::channel::none::NoReceiver`].
 ///
 /// ## Examples
 ///
