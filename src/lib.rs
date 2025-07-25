@@ -78,7 +78,7 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
-use channel::{mpsc, oneshot};
+use channel::{mpsc, none::NoSender, oneshot};
 /// Processes an RPC request enum and generates trait implementations for use with `irpc`.
 ///
 /// This attribute macro may be applied to an enum where each variant represents
@@ -829,6 +829,25 @@ where
     }
 }
 
+/// Tuple conversion from inner message to a WithChannels struct without channels
+impl<I, S> From<(I,)> for WithChannels<I, S>
+where
+    I: Channels<S, Rx = NoReceiver, Tx = NoSender>,
+    S: Service,
+{
+    fn from(inner: (I,)) -> Self {
+        let (inner,) = inner;
+        Self {
+            inner,
+            tx: NoSender,
+            rx: NoReceiver,
+            #[cfg(feature = "spans")]
+            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
+            span: tracing::Span::current(),
+        }
+    }
+}
+
 /// Deref so you can access the inner fields directly.
 ///
 /// If the inner message has fields named `tx`, `rx` or `span`, you need to use the
@@ -1080,6 +1099,32 @@ impl<S: Service> Client<S> {
                     }
                 };
             Ok((update_tx, res_rx))
+        }
+    }
+
+    /// Performs a request for which the server returns nothing.
+    ///
+    /// The returned future completes once the message is sent.
+    pub fn notify<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = NoSender, Rx = NoReceiver>,
+    {
+        let request = self.request();
+        async move {
+            match request.await? {
+                Request::Local(request) => {
+                    request.send((msg,)).await?;
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_request) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let (_tx, _rx) = request.write(msg).await?;
+                }
+            };
+            Ok(())
         }
     }
 }
