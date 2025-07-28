@@ -228,12 +228,10 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                 Fields::Unnamed(ref mut fields) if fields.unnamed.len() == 1 => {
                     fields.unnamed[0].ty.clone()
                 }
-                _ => {
-                    return error_tokens(
-                        variant.span(),
-                        "Each variant must have exactly one unnamed field",
-                    )
-                }
+                _ => return error_tokens(
+                    variant.span(),
+                    "Each variant must either have exactly one unnamed field, or use the `wrap` argument in the `rpc` attribute.",
+                ),
             },
             Some(name) => {
                 let struc = struct_from_variant_fields(name.clone(), variant.fields.clone());
