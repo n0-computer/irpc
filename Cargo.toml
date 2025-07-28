@@ -71,6 +71,7 @@ quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:anyhow", "dep:fut
 spans = ["dep:tracing"]
 stream = ["dep:futures-util"]
 derive = ["dep:irpc-derive"]
+varint-util = ["dep:postcard", "dep:smallvec", "tokio/io-util"]
 default = ["rpc", "quinn_endpoint_setup", "spans", "stream", "derive"]
 
 [[example]]
