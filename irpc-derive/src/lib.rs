@@ -8,12 +8,12 @@ use syn::{
     parse_macro_input,
     punctuated::Punctuated,
     spanned::Spanned,
-    Data, DeriveInput, Fields, Ident, LitStr, Token, Type,
+    Data, DeriveInput, Error, Fields, Ident, LitStr, Token, Type,
 };
 
 // Helper function for error reporting
 fn error_tokens(span: Span, message: &str) -> TokenStream {
-    syn::Error::new(span, message).to_compile_error().into()
+    Error::new(span, message).to_compile_error().into()
 }
 
 /// The only attribute we care about
@@ -41,7 +41,7 @@ fn generate_parent_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> Tok
 }
 
 fn generate_channels_impl(
-    mut args: NamedTypeArgs,
+    mut args: VariantArgs,
     service_name: &Ident,
     request_type: &Type,
     attr_span: Span,
@@ -212,7 +212,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut wrapper_types = Vec::new();
 
     for variant in &mut data_enum.variants {
-        let rpc_attr = match NamedTypeArgs::from_attrs(&mut variant.attrs) {
+        let rpc_attr = match VariantArgs::from_attrs(&mut variant.attrs) {
             Ok(args) => args,
             Err(err) => return err,
         };
@@ -220,7 +220,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         let wrap = rpc_attr
             .as_ref()
             .and_then(|(args, _)| args.wrap.as_ref())
-            .map(|name| name.clone().unwrap_or_else(|| variant.ident.clone()));
+            .map(|name| name.as_ref().unwrap_or(&variant.ident));
 
         let request_type = match wrap {
             None => match &mut variant.fields {
@@ -238,7 +238,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                     #[derive(::std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
                     #struc
                 });
-                let ty = type_from_ident(name);
+                let ty = type_from_ident(name.clone());
                 variant.fields = single_unnamed_field(ty.clone());
                 ty
             }
@@ -359,6 +359,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 // Parse arguments for the macro
+#[derive(Default)]
 struct MacroArgs {
     message_enum_name: Option<Ident>,
     alias_suffix: Option<String>,
@@ -369,56 +370,45 @@ struct MacroArgs {
 
 impl Parse for MacroArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        // Initialize optional parameters
-        let mut message_enum_name = None;
-        let mut alias_suffix = None;
-        let mut rpc_feature = None;
-        let mut no_rpc = false;
-        let mut no_spans = false;
-
-        // Parse names parameters.
+        let mut this = Self::default();
         loop {
-            let param_name: Ident = input.parse()?;
-
-            match param_name.to_string().as_str() {
+            let arg: Ident = input.parse()?;
+            match arg.to_string().as_str() {
                 "message" => {
                     input.parse::<Token![=]>()?;
-                    let ident: Ident = input.parse()?;
-                    message_enum_name = Some(ident);
+                    let value: Ident = input.parse()?;
+                    this.message_enum_name = Some(value);
                 }
                 "alias" => {
                     input.parse::<Token![=]>()?;
-                    let lit: LitStr = input.parse()?;
-                    alias_suffix = Some(lit.value());
+                    let value: LitStr = input.parse()?;
+                    this.alias_suffix = Some(value.value());
                 }
                 "rpc_feature" => {
                     input.parse::<Token![=]>()?;
-                    if no_rpc {
-                        return Err(syn::Error::new(
-                            param_name.span(),
+                    if this.no_rpc {
+                        return Err(Error::new(
+                            arg.span(),
                             "rpc_feature is incompatible with no_rpc",
                         ));
                     }
-                    let lit: LitStr = input.parse()?;
-                    rpc_feature = Some(lit.value());
+                    let value: LitStr = input.parse()?;
+                    this.rpc_feature = Some(value.value());
                 }
                 "no_rpc" => {
-                    if rpc_feature.is_some() {
-                        return Err(syn::Error::new(
-                            param_name.span(),
+                    if this.rpc_feature.is_some() {
+                        return Err(Error::new(
+                            arg.span(),
                             "rpc_feature is incompatible with no_rpc",
                         ));
                     }
-                    no_rpc = true;
+                    this.no_rpc = true;
                 }
                 "no_spans" => {
-                    no_spans = true;
+                    this.no_spans = true;
                 }
                 _ => {
-                    return Err(syn::Error::new(
-                        param_name.span(),
-                        format!("Unknown parameter: {param_name}"),
-                    ));
+                    return Err(Error::new(arg.span(), format!("Unknown parameter: {arg}")));
                 }
             }
 
@@ -429,22 +419,17 @@ impl Parse for MacroArgs {
             }
         }
 
-        Ok(MacroArgs {
-            message_enum_name,
-            alias_suffix,
-            no_rpc,
-            no_spans,
-            rpc_feature,
-        })
+        Ok(this)
     }
 }
 
-struct NamedTypeArgs {
+#[derive(Default)]
+struct VariantArgs {
     wrap: Option<Option<Ident>>,
     types: BTreeMap<String, Type>,
 }
 
-impl NamedTypeArgs {
+impl VariantArgs {
     fn from_attrs(
         attrs: &mut Vec<syn::Attribute>,
     ) -> Result<Option<(Self, syn::Attribute)>, TokenStream> {
@@ -475,7 +460,7 @@ impl NamedTypeArgs {
 
         // Process variants with rpc attributes
         if let Some(attr) = rpc_attr {
-            let args = match attr.parse_args::<NamedTypeArgs>() {
+            let args = match attr.parse_args::<VariantArgs>() {
                 Ok(info) => info,
                 Err(e) => return Err(e.to_compile_error().into()),
             };
@@ -488,7 +473,7 @@ impl NamedTypeArgs {
     fn get(&mut self, key: &str, span: Span) -> syn::Result<Type> {
         self.types
             .remove(key)
-            .ok_or_else(|| syn::Error::new(span, format!("rpc requires a {key} type")))
+            .ok_or_else(|| Error::new(span, format!("rpc requires a {key} type")))
     }
 
     /// Fail if there are any unknown arguments remaining
@@ -496,7 +481,7 @@ impl NamedTypeArgs {
         if self.types.is_empty() {
             Ok(())
         } else {
-            Err(syn::Error::new(
+            Err(Error::new(
                 span,
                 format!(
                     "Unknown arguments provided: {:?}",
@@ -508,39 +493,41 @@ impl NamedTypeArgs {
 }
 
 /// Parse the rpc args as a comma separated list of name=type pairs
-impl Parse for NamedTypeArgs {
+impl Parse for VariantArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut types = BTreeMap::new();
-        let mut wrap = None;
-
+        let mut this = Self::default();
         loop {
             if input.is_empty() {
                 break;
             }
 
-            let key: Ident = input.parse()?;
-            if key == "wrap" {
-                let value = if input.peek(Token![=]) {
+            let arg: Ident = input.parse()?;
+            match arg.to_string().as_str() {
+                "wrap" => {
+                    let value = if input.peek(Token![=]) {
+                        let _: Token![=] = input.parse()?;
+                        let value: Ident = input.parse()?;
+                        Some(value)
+                    } else {
+                        None
+                    };
+                    this.wrap = Some(value);
+                }
+                _ => {
                     let _: Token![=] = input.parse()?;
-                    let value: Ident = input.parse()?;
-                    Some(value)
-                } else {
-                    None
-                };
-                wrap = Some(value);
-            } else {
-                let _: Token![=] = input.parse()?;
-                let value: Type = input.parse()?;
-                types.insert(key.to_string(), value);
+                    let value: Type = input.parse()?;
+                    this.types.insert(arg.to_string(), value);
+                }
             }
 
             if !input.peek(Token![,]) {
                 break;
+            } else {
+                let _: Token![,] = input.parse()?;
             }
-            let _: Token![,] = input.parse()?;
         }
 
-        Ok(NamedTypeArgs { types, wrap })
+        Ok(this)
     }
 }
 
@@ -549,25 +536,19 @@ fn type_from_ident(ident: Ident) -> Type {
         qself: None,
         path: syn::Path {
             leading_colon: None,
-            segments: {
-                let mut segments = syn::punctuated::Punctuated::new();
-                segments.push(syn::PathSegment {
-                    ident,
-                    arguments: syn::PathArguments::None,
-                });
-                segments
-            },
+            segments: Punctuated::from_iter([syn::PathSegment::from(ident)]),
         },
     })
 }
-fn struct_from_variant_fields(name: Ident, mut fields: Fields) -> syn::ItemStruct {
+
+fn struct_from_variant_fields(ident: Ident, mut fields: Fields) -> syn::ItemStruct {
     make_fields_public(&mut fields);
-    let span = name.span();
+    let span = ident.span();
     syn::ItemStruct {
         attrs: vec![],
         vis: vis_pub(),
         struct_token: Token![struct](span),
-        ident: name.clone(),
+        ident,
         generics: Default::default(),
         semi_token: match &fields {
             Fields::Unit => Some(Token![;](span)),
