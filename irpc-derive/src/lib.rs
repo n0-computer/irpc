@@ -219,8 +219,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         let wrap = rpc_attr
             .as_ref()
-            .map(|(args, _)| args.wrap.as_ref())
-            .flatten()
+            .and_then(|(args, _)| args.wrap.as_ref())
             .map(|name| name.clone().unwrap_or_else(|| variant.ident.clone()));
 
         let request_type = match wrap {
