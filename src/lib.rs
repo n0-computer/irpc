@@ -198,11 +198,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use self::channel::none::NoReceiver;
 
-#[cfg(feature = "rpc")]
-#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod util;
-#[cfg(not(feature = "rpc"))]
-mod util;
 
 /// Requirements for a RPC message
 ///
@@ -1195,6 +1191,10 @@ pub enum RequestError {
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     #[error("error opening stream: {0}")]
     Other(#[from] anyhow::Error),
+
+    #[cfg(not(feature = "rpc"))]
+    #[error("(Without the rpc feature, requests cannot fail")]
+    Unreachable,
 }
 
 /// Error type that subsumes all possible errors in this crate, for convenience.
@@ -1235,6 +1235,8 @@ impl From<RequestError> for io::Error {
             RequestError::Connection(e) => e.into(),
             #[cfg(feature = "rpc")]
             RequestError::Other(e) => io::Error::other(e),
+            #[cfg(not(feature = "rpc"))]
+            RequestError::Unreachable => unreachable!(),
         }
     }
 }
