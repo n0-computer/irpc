@@ -59,6 +59,7 @@
 //!
 //! ## Features
 //!
+//! - `derive`: Enable the [`rpc_requests`] macro.
 //! - `rpc`: Enable the rpc features. Enabled by default.
 //!   By disabling this feature, all rpc related dependencies are removed.
 //!   The remaining dependencies are just serde, tokio and tokio-util.
@@ -68,6 +69,80 @@
 //!   a dependency on tracing.
 //! - `quinn_endpoint_setup`: Easy way to create quinn endpoints. This is useful
 //!   both for testing and for rpc on localhost. Enabled by default.
+//!
+//! # Example
+//!
+//! ```
+//! use irpc::{
+//!     channel::{mpsc, oneshot},
+//!     rpc_requests, Client, WithChannels,
+//! };
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let client = spawn_server();
+//!     let res = client.rpc(Multiply(3, 7)).await?;
+//!     assert_eq!(res, 21);
+//!
+//!     let (tx, mut rx) = client.bidi_streaming(Sum, 4, 4).await?;
+//!     tx.send(4).await?;
+//!     assert_eq!(rx.recv().await?, Some(4));
+//!     tx.send(6).await?;
+//!     assert_eq!(rx.recv().await?, Some(10));
+//!     tx.send(11).await?;
+//!     assert_eq!(rx.recv().await?, Some(21));
+//!     Ok(())
+//! }
+//!
+//! /// We define a simple protocol using the derive macro.
+//! #[rpc_requests(message = ComputeMessage)]
+//! #[derive(Debug, Serialize, Deserialize)]
+//! enum ComputeProtocol {
+//!     /// Multiply two numbers, return the result over a oneshot channel.
+//!     #[rpc(tx=oneshot::Sender<i64>)]
+//!     #[wrap(Multiply)]
+//!     Multiply(i64, i64),
+//!     /// Sum all numbers received via the `rx` stream,
+//!     /// reply with the updating sum over the `tx` stream.
+//!     #[rpc(tx=mpsc::Sender<i64>, rx=mpsc::Receiver<i64>)]
+//!     #[wrap(Sum)]
+//!     Sum,
+//! }
+//!
+//! fn spawn_server() -> Client<ComputeProtocol> {
+//!     let (tx, rx) = tokio::sync::mpsc::channel(16);
+//!     // Spawn an actor task to handle incoming requests.
+//!     tokio::task::spawn(server_actor(rx));
+//!     // Return a local client to talk to our actor.
+//!     irpc::Client::local(tx)
+//! }
+//!
+//! async fn server_actor(mut rx: tokio::sync::mpsc::Receiver<ComputeMessage>) {
+//!     while let Some(msg) = rx.recv().await {
+//!         match msg {
+//!             ComputeMessage::Multiply(msg) => {
+//!                 let WithChannels { inner, tx, .. } = msg;
+//!                 let Multiply(a, b) = inner;
+//!                 tx.send(a * b).await.ok();
+//!             }
+//!             ComputeMessage::Sum(msg) => {
+//!                 let WithChannels { tx, mut rx, .. } = msg;
+//!                 // Spawn a separate task for this potentially long-running request.
+//!                 tokio::task::spawn(async move {
+//!                     let mut sum = 0;
+//!                     while let Ok(Some(number)) = rx.recv().await {
+//!                         sum += number;
+//!                         if tx.send(sum).await.is_err() {
+//!                             break;
+//!                         }
+//!                     }
+//!                 });
+//!             }
+//!         }
+//!     }
+//! }
+//! ```
 //!
 //! # History
 //!

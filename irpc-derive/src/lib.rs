@@ -32,7 +32,7 @@ const DEFAULT_TX_TYPE: &str = "::irpc::channel::none::NoSender";
 /// of a distinct type (unless the `wrap` attribute is used on a variant, see below).
 ///
 /// Basic usage example:
-/// ```
+/// ```no_compile
 /// use serde::{Serialize, Deserialize};
 /// use irpc::{rpc_requests, channel::{oneshot, mpsc}};
 ///
@@ -114,7 +114,7 @@ const DEFAULT_TX_TYPE: &str = "::irpc::channel::none::NoSender";
 /// ## Examples
 ///
 /// With `wrap`:
-/// ```
+/// ```no_compile
 /// use serde::{Serialize, Deserialize};
 /// use irpc::{rpc_requests, channel::{oneshot, mpsc}, Client};
 ///
