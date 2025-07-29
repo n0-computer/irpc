@@ -14,12 +14,20 @@ use irpc::{
         MAX_MESSAGE_SIZE,
     },
     util::AsyncReadVarintExt,
-    RequestError,
+    LocalSender, RequestError,
 };
 use n0_future::{boxed::BoxFuture, TryFutureExt};
 use serde::de::DeserializeOwned;
 use tracing::{trace, trace_span, warn, Instrument};
 
+pub fn client<S: irpc::Service>(
+    endpoint: iroh::Endpoint,
+    addr: impl Into<iroh::NodeAddr>,
+    alpn: impl AsRef<[u8]>,
+) -> irpc::Client<S> {
+    let conn = IrohRemoteConnection::new(endpoint, addr.into(), alpn.as_ref().to_vec());
+    irpc::Client::boxed(conn)
+}
 /// A connection to a remote service.
 ///
 /// Initially this does just have the endpoint and the address. Once a
@@ -105,6 +113,14 @@ impl<T> fmt::Debug for IrohProtocol<T> {
 }
 
 impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
+    pub fn with_sender(local_sender: impl Into<LocalSender<R>>) -> Self
+    where
+        R: RemoteService,
+    {
+        let handler = R::remote_handler(local_sender.into());
+        Self::new(handler)
+    }
+
     /// Creates a new [`IrohProtocol`] for the `handler`.
     pub fn new(handler: Handler<R>) -> Self {
         Self {

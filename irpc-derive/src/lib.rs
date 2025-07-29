@@ -6,6 +6,7 @@ use quote::{quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input,
+    punctuated::Punctuated,
     spanned::Spanned,
     Data, DeriveInput, Fields, Ident, LitStr, Token, Type,
 };
@@ -208,59 +209,51 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Variants with rpc attributes (for From implementations)
     let mut variants_with_attr = Vec::new();
 
+    let mut wrapper_types = Vec::new();
+
     for variant in &mut data_enum.variants {
-        // Check field structure for every variant
-        let request_type = match &variant.fields {
-            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => &fields.unnamed[0].ty,
-            _ => {
-                return error_tokens(
+        let rpc_attr = match NamedTypeArgs::from_attrs(&mut variant.attrs) {
+            Ok(args) => args,
+            Err(err) => return err,
+        };
+
+        let wrap = rpc_attr
+            .as_ref()
+            .and_then(|(args, _)| args.wrap.as_ref())
+            .map(|name| name.clone().unwrap_or_else(|| variant.ident.clone()));
+
+        let request_type = match wrap {
+            None => match &mut variant.fields {
+                Fields::Unnamed(ref mut fields) if fields.unnamed.len() == 1 => {
+                    fields.unnamed[0].ty.clone()
+                }
+                _ => return error_tokens(
                     variant.span(),
-                    "Each variant must have exactly one unnamed field",
-                )
+                    "Each variant must either have exactly one unnamed field, or use the `wrap` argument in the `rpc` attribute.",
+                ),
+            },
+            Some(name) => {
+                let struc = struct_from_variant_fields(name.clone(), variant.fields.clone());
+                wrapper_types.push(quote! {
+                    #[derive(::std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
+                    #struc
+                });
+                let ty = type_from_ident(name);
+                variant.fields = single_unnamed_field(ty.clone());
+                ty
             }
         };
+
         all_variants.push((variant.ident.clone(), request_type.clone()));
 
         if !types.insert(request_type.to_token_stream().to_string()) {
             return error_tokens(input_span, "Each variant must have a unique request type");
         }
 
-        // Find and remove the rpc attribute
-        let mut rpc_attr = None;
-        let mut multiple_rpc_attrs = false;
-
-        variant.attrs.retain(|attr| {
-            if attr.path.is_ident(ATTR_NAME) {
-                if rpc_attr.is_some() {
-                    multiple_rpc_attrs = true;
-                    true // Keep this duplicate attribute
-                } else {
-                    rpc_attr = Some(attr.clone());
-                    false // Remove this attribute
-                }
-            } else {
-                true // Keep other attributes
-            }
-        });
-
-        // Check for multiple rpc attributes
-        if multiple_rpc_attrs {
-            return error_tokens(
-                variant.span(),
-                "Each variant can only have one rpc attribute",
-            );
-        }
-
-        // Process variants with rpc attributes
-        if let Some(attr) = rpc_attr {
+        if let Some((args, attr)) = rpc_attr {
             variants_with_attr.push((variant.ident.clone(), request_type.clone()));
 
-            let args = match attr.parse_args::<NamedTypeArgs>() {
-                Ok(info) => info,
-                Err(e) => return e.to_compile_error().into(),
-            };
-
-            match generate_channels_impl(args, enum_name, request_type, attr.span()) {
+            match generate_channels_impl(args, enum_name, &request_type, attr.span()) {
                 Ok(impls) => channel_impls.push(impls),
                 Err(e) => return e.to_compile_error().into(),
             }
@@ -297,7 +290,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         // Create the message enum definition
         let message_enum = quote! {
             #[allow(missing_docs)]
-            #[derive(Debug)]
+            #[derive(::std::fmt::Debug)]
             #vis enum #message_enum_name {
                 #(#message_variants),*
             }
@@ -345,6 +338,9 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Combine everything
     let output = quote! {
         #input
+
+        // Wrapper types
+        #(#wrapper_types)*
 
         // Channel implementations
         #(#channel_impls)*
@@ -444,10 +440,50 @@ impl Parse for MacroArgs {
 }
 
 struct NamedTypeArgs {
+    wrap: Option<Option<Ident>>,
     types: BTreeMap<String, Type>,
 }
 
 impl NamedTypeArgs {
+    fn from_attrs(
+        attrs: &mut Vec<syn::Attribute>,
+    ) -> Result<Option<(Self, syn::Attribute)>, TokenStream> {
+        let mut rpc_attr = None;
+        let mut multiple_rpc_attrs = None;
+
+        attrs.retain(|attr| {
+            if attr.path.is_ident(ATTR_NAME) {
+                if rpc_attr.is_some() {
+                    multiple_rpc_attrs = Some(attr.span());
+                    true // Keep this duplicate attribute
+                } else {
+                    rpc_attr = Some(attr.clone());
+                    false // Remove this attribute
+                }
+            } else {
+                true // Keep other attributes
+            }
+        });
+
+        // Check for multiple rpc attributes
+        if let Some(span) = multiple_rpc_attrs {
+            return Err(error_tokens(
+                span,
+                "Each variant can only have one rpc attribute",
+            ));
+        }
+
+        // Process variants with rpc attributes
+        if let Some(attr) = rpc_attr {
+            let args = match attr.parse_args::<NamedTypeArgs>() {
+                Ok(info) => info,
+                Err(e) => return Err(e.to_compile_error().into()),
+            };
+            Ok(Some((args, attr)))
+        } else {
+            Ok(None)
+        }
+    }
     /// Get and remove a type from the map, failing if it doesn't exist
     fn get(&mut self, key: &str, span: Span) -> syn::Result<Type> {
         self.types
@@ -475,6 +511,7 @@ impl NamedTypeArgs {
 impl Parse for NamedTypeArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut types = BTreeMap::new();
+        let mut wrap = None;
 
         loop {
             if input.is_empty() {
@@ -482,10 +519,20 @@ impl Parse for NamedTypeArgs {
             }
 
             let key: Ident = input.parse()?;
-            let _: Token![=] = input.parse()?;
-            let value: Type = input.parse()?;
-
-            types.insert(key.to_string(), value);
+            if key == "wrap" {
+                let value = if input.peek(Token![=]) {
+                    let _: Token![=] = input.parse()?;
+                    let value: Ident = input.parse()?;
+                    Some(value)
+                } else {
+                    None
+                };
+                wrap = Some(value);
+            } else {
+                let _: Token![=] = input.parse()?;
+                let value: Type = input.parse()?;
+                types.insert(key.to_string(), value);
+            }
 
             if !input.peek(Token![,]) {
                 break;
@@ -493,6 +540,73 @@ impl Parse for NamedTypeArgs {
             let _: Token![,] = input.parse()?;
         }
 
-        Ok(NamedTypeArgs { types })
+        Ok(NamedTypeArgs { types, wrap })
     }
+}
+
+fn type_from_ident(ident: Ident) -> Type {
+    Type::Path(syn::TypePath {
+        qself: None,
+        path: syn::Path {
+            leading_colon: None,
+            segments: {
+                let mut segments = syn::punctuated::Punctuated::new();
+                segments.push(syn::PathSegment {
+                    ident,
+                    arguments: syn::PathArguments::None,
+                });
+                segments
+            },
+        },
+    })
+}
+fn struct_from_variant_fields(name: Ident, mut fields: Fields) -> syn::ItemStruct {
+    make_fields_public(&mut fields);
+    let span = name.span();
+    syn::ItemStruct {
+        attrs: vec![],
+        vis: vis_pub(),
+        struct_token: Token![struct](span),
+        ident: name.clone(),
+        generics: Default::default(),
+        semi_token: match &fields {
+            Fields::Unit => Some(Token![;](span)),
+            Fields::Unnamed(_) => Some(Token![;](span)),
+            Fields::Named(_) => None,
+        },
+        fields,
+    }
+}
+
+fn single_unnamed_field(ty: Type) -> Fields {
+    let field = syn::Field {
+        attrs: vec![],
+        vis: syn::Visibility::Inherited,
+        ident: None,
+        colon_token: None,
+        ty,
+    };
+    Fields::Unnamed(syn::FieldsUnnamed {
+        paren_token: syn::token::Paren(Span::call_site()),
+        unnamed: Punctuated::from_iter([field]),
+    })
+}
+
+fn make_fields_public(fields: &mut Fields) {
+    let inner = match fields {
+        Fields::Named(ref mut named) => named.named.iter_mut(),
+        Fields::Unnamed(ref mut unnamed) => unnamed.unnamed.iter_mut(),
+        Fields::Unit => return,
+    };
+    for field in inner {
+        field.vis = vis_pub();
+    }
+}
+
+fn vis_pub() -> syn::Visibility {
+    syn::Visibility::Public(syn::VisPublic {
+        pub_token: syn::token::Pub {
+            span: proc_macro2::Span::call_site(),
+        },
+    })
 }
