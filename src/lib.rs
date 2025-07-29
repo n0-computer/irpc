@@ -78,131 +78,29 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
-use channel::{mpsc, none::NoSender, oneshot};
-/// Processes an RPC request enum and generates trait implementations for use with `irpc`.
-///
-/// This attribute macro may be applied to an enum where each variant represents
-/// a different RPC request type. Each variant of the enum must contain a single unnamed field
-/// of a distinct type (unless the `wrap` attribute is used on a variant, see below).
-///
-/// Basic usage example:
-/// ```
-/// use serde::{Serialize, Deserialize};
-/// use irpc::{rpc_requests, channel::{oneshot, mpsc}};
-///
-/// #[rpc_requests(message = ComputeMessage)]
-/// #[derive(Debug, Serialize, Deserialize)]
-/// enum ComputeProtocol {
-///     /// Multiply two numbers, return the result over a oneshot channel.
-///     #[rpc(tx=oneshot::Sender<i64>)]
-///     Multiply(Multiply),
-///     /// Sum all numbers received via the `rx` stream,
-///     /// reply with the updating sum over the `tx` stream.
-///     #[rpc(tx=mpsc::Sender<i64>, rx=mpsc::Receiver<i64>)]
-///     Sum(Sum),
-/// }
-///
-/// #[derive(Debug, Serialize, Deserialize)]
-/// struct Multiply(i64, i64);
-///
-/// #[derive(Debug, Serialize, Deserialize)]
-/// struct Sum;
-/// ```
-///
-/// ## Generated code
-///
-/// If no further arguments are set, the macro generates:
-///
-/// * A [`Channels<S>`] implementation for each request type (i.e. the type of the variant's
-///   single unnamed field).
-///   The `Tx` and `Rx` types are set to the types provided via the variant's `rpc` attribute.
-/// * A [`From`] implementation to convert from each request type to the protocol enum.
-///
-/// When the `message` argument is set, the macro will also create a message enum and implement the
-/// [`Service`] and [`RemoteService`] traits for the protocol enum. This is recommended for the
-/// typical use of the macro.
-///
-/// ## Macro arguments
-///
-/// * `message = <name>` *(optional but recommended)*:
-///     * Generates an extended enum wrapping each type in [`WithChannels<T, Service>`].
-///       The attribute value is the name of the message enum type.
-///     * Generates a [`Service`] implementation for the protocol enum, with the `Message`
-///       type set to the message enum.
-///     * Generates a [`RemoteService`] implementation for the protocol enum.
-/// * `alias = "<suffix>"` *(optional)*: Generate type aliases with the given suffix for each [`WithChannels<T, Service>`].
-/// * `rpc_feature = "<feature>"` *(optional)*: If set, the [`RemoteService`] implementation will be feature-flagged
-///   with this feature. Set this if your crate only optionally enables the `rpc` feature
-///   of [`irpc`].
-/// * `no_rpc` *(optional, no value)*: If set, no implementation of [`RemoteService`] will be generated and the generated
-///   code works without the `rpc` feature of `irpc`.
-/// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
-///
-/// ## Variant attributes
-///
-/// Individual enum variants are annotated with the `#[rpc(...)]` attribute to specify channel types.
-/// The `rpc` attribute contains a key-value list with these arguments:
-///
-/// * `tx = SomeType` *(required)*: Set the kind of channel for sending responses from the server to the client.
-///   Must be a `Sender` type from the [`crate::channel`] module.
-/// * `rx = OtherType` *(optional)*: Set the kind of channel for receiving updates from the client at the server.
-///   Must be a `Receiver` type from the [`crate::channel`] module. If `rx` is not set,
-///   it defaults to [`crate::channel::none::NoReceiver`].
-/// * `wrap = TypeName` *(optional)*: If set, a struct `TypeName` will be generated from the variant's fields, and the variant
-///   will be changed to have a single, unnamed field of `TypeName`.
-///
-/// ## Examples
-///
-/// With `wrap`:
-/// ```
-/// use serde::{Serialize, Deserialize};
-/// use irpc::{rpc_requests, channel::{oneshot, mpsc}, Client};
-///
-/// #[rpc_requests(message = StoreMessage)]
-/// #[derive(Debug, Serialize, Deserialize)]
-/// enum StoreProtocol {
-///     #[rpc(wrap=GetRequest, tx=oneshot::Sender<String>)]
-///     Get(String),
-///     #[rpc(wrap=SetRequest, tx=oneshot::Sender<()>)]
-///     Set { key: String, value: String }
-/// }
-///
-/// async fn client_usage(client: Client<StoreProtocol>) -> anyhow::Result<()> {
-///     client.rpc(SetRequest { key: "foo".to_string(), value: "bar".to_string() }).await?;
-///     let value = client.rpc(GetRequest("foo".to_string())).await?;
-///     Ok(())
-/// }
-/// ```
-///
-/// With type aliases:
-/// ```no_compile
-/// #[rpc_requests(message = ComputeMessage, alias = "Msg")]
-/// enum ComputeProtocol {
-///     #[rpc(tx=oneshot::Sender<u128>)]
-///     Sqr(Sqr), // Generates type SqrMsg = WithChannels<Sqr, ComputeProtocol>
-///     #[rpc(tx=mpsc::Sender<i64>)]
-///     Sum(Sum), // Generates type SumMsg = WithChannels<Sum, ComputeProtocol>
-/// }
-/// ```
-///
-/// [`irpc`]: crate
-/// [`RemoteService`]: rpc::RemoteService
-/// [`WithChannels<T, Service>`]: WithChannels
-/// [`Channels<S>`]: Channels
-#[cfg(feature = "derive")]
-#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
-pub use irpc_derive::rpc_requests;
-
-use sealed::Sealed;
 use serde::{de::DeserializeOwned, Serialize};
 
-use self::channel::none::NoReceiver;
+use self::channel::{
+    mpsc,
+    none::{NoReceiver, NoSender},
+    oneshot,
+};
+use self::sealed::Sealed;
+
+#[cfg(feature = "derive")]
+#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
+#[doc(inline)]
+pub use irpc_derive::rpc_requests;
 
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod util;
 #[cfg(not(feature = "rpc"))]
 mod util;
+
+mod sealed {
+    pub trait Sealed {}
+}
 
 /// Requirements for a RPC message
 ///
@@ -232,10 +130,6 @@ pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static 
     /// protocol enum, but its single unit field is the [`WithChannels`] struct
     /// that contains the inner request plus the `tx` and `rx` channels.
     type Message: Send + Unpin + 'static;
-}
-
-mod sealed {
-    pub trait Sealed {}
 }
 
 /// Sealed marker trait for a sender

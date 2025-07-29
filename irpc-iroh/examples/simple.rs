@@ -17,10 +17,20 @@ mod proto {
     #[rpc_requests(message = FooMessage)]
     #[derive(Debug, Serialize, Deserialize)]
     pub enum FooProtocol {
-        #[rpc(wrap=GetRequest, tx=oneshot::Sender<Option<String>>)]
+        /// This is the get request.
+        #[rpc(tx=oneshot::Sender<Option<String>>)]
+        #[wrap(GetRequest, derive(Clone))]
         Get(String),
-        #[rpc(wrap=SetRequest, tx=oneshot::Sender<Option<String>>)]
-        Set { key: String, value: String },
+
+        /// This is the set request.
+        #[rpc(tx=oneshot::Sender<Option<String>>)]
+        #[wrap(SetRequest)]
+        Set {
+            /// This is the key
+            key: String,
+            /// This is the value
+            value: String,
+        },
     }
 
     pub async fn listen() -> Result<()> {
@@ -45,6 +55,10 @@ mod proto {
                 FooMessage::Get(msg) => {
                     let WithChannels { inner, tx, .. } = msg;
                     println!("handle request: {inner:?}");
+
+                    // We can clone `inner` because we added the `Clone` derive to the `wrap` attribute:
+                    let _ = inner.clone();
+
                     let GetRequest(key) = inner;
                     let value = store.get(&key).cloned();
                     tx.send(value).await.ok();

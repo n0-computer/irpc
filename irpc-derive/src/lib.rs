@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -8,175 +8,147 @@ use syn::{
     parse_macro_input,
     punctuated::Punctuated,
     spanned::Spanned,
-    Data, DeriveInput, Error, Fields, Ident, LitStr, Token, Type,
+    token::Comma,
+    Attribute, Data, DeriveInput, Error, Fields, Ident, LitStr, Token, Type, Visibility,
 };
 
-// Helper function for error reporting
-fn error_tokens(span: Span, message: &str) -> TokenStream {
-    Error::new(span, message).to_compile_error().into()
-}
-
-/// The only attribute we care about
-const ATTR_NAME: &str = "rpc";
-/// the tx type name
+/// Attribute on protocol enums and variants
+const RPC_ATTR_NAME: &str = "rpc";
+/// Attribute on variants to wrap in generated struct
+const WRAP_ATTR_NAME: &str = "wrap";
+/// The tx type name
 const TX_ATTR: &str = "tx";
-/// the rx type name
+/// The rx type name
 const RX_ATTR: &str = "rx";
 /// Fully qualified path to the default rx type
 const DEFAULT_RX_TYPE: &str = "::irpc::channel::none::NoReceiver";
+/// Fully qualified path to the default tx type
+const DEFAULT_TX_TYPE: &str = "::irpc::channel::none::NoSender";
 
-/// Generate parent span method for an enum
-fn generate_parent_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> TokenStream2 {
-    quote! {
-        impl #enum_name {
-            /// Get the parent span of the message
-            pub fn parent_span(&self) -> ::tracing::Span {
-                let span = match self {
-                    #(#enum_name::#variant_names(inner) => inner.parent_span_opt()),*
-                };
-                span.cloned().unwrap_or_else(|| ::tracing::Span::current())
-            }
-        }
-    }
-}
-
-fn generate_channels_impl(
-    mut args: VariantArgs,
-    service_name: &Ident,
-    request_type: &Type,
-    attr_span: Span,
-) -> syn::Result<TokenStream2> {
-    // Try to get rx, default to NoReceiver if not present
-    // Use unwrap_or_else for a cleaner default
-    let rx = args.types.remove(RX_ATTR).unwrap_or_else(|| {
-        // We can safely unwrap here because this is a known valid type
-        syn::parse_str::<Type>(DEFAULT_RX_TYPE).expect("Failed to parse default rx type")
-    });
-    let tx = args.get(TX_ATTR, attr_span)?;
-
-    let res = quote! {
-        impl ::irpc::Channels<#service_name> for #request_type {
-            type Tx = #tx;
-            type Rx = #rx;
-        }
-    };
-
-    args.check_empty(attr_span)?;
-    Ok(res)
-}
-
-/// Generates From implementations for protocol enum variants.
-fn generate_protocol_enum_from_impls(
-    enum_name: &Ident,
-    variants_with_attr: &[(Ident, Type)],
-) -> TokenStream2 {
-    let mut impls = quote! {};
-
-    // Generate From implementations for each case that has an rpc attribute
-    for (variant_name, inner_type) in variants_with_attr {
-        let impl_tokens = quote! {
-            impl From<#inner_type> for #enum_name {
-                fn from(value: #inner_type) -> Self {
-                    #enum_name::#variant_name(value)
-                }
-            }
-        };
-
-        impls = quote! {
-            #impls
-            #impl_tokens
-        };
-    }
-
-    impls
-}
-
-/// Generates From implementations for message enum variants.
-fn generate_message_enum_from_impls(
-    message_enum_name: &Ident,
-    variants_with_attr: &[(Ident, Type)],
-    service_name: &Ident,
-) -> TokenStream2 {
-    let mut impls = quote! {};
-
-    // Generate From<WithChannels<T, Service>> implementations for each case with an rpc attribute
-    for (variant_name, inner_type) in variants_with_attr {
-        let impl_tokens = quote! {
-            impl From<::irpc::WithChannels<#inner_type, #service_name>> for #message_enum_name {
-                fn from(value: ::irpc::WithChannels<#inner_type, #service_name>) -> Self {
-                    #message_enum_name::#variant_name(value)
-                }
-            }
-        };
-
-        impls = quote! {
-            #impls
-            #impl_tokens
-        };
-    }
-
-    impls
-}
-
-/// Generate Message::from_quic_streams impl
-fn generate_remote_service_impl(
-    message_enum_name: &Ident,
-    proto_enum_name: &Ident,
-    variants_with_attr: &[(Ident, Type)],
-) -> TokenStream2 {
-    let variants = variants_with_attr
-        .iter()
-        .map(|(variant_name, _inner_type)| {
-            quote! {
-                #proto_enum_name::#variant_name(msg) => {
-                    #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
-                }
-            }
-        });
-
-    quote! {
-        impl ::irpc::rpc::RemoteService for #proto_enum_name {
-            fn with_remote_channels(
-                self,
-                rx: ::irpc::rpc::quinn::RecvStream,
-                tx: ::irpc::rpc::quinn::SendStream
-            ) -> Self::Message {
-                match self {
-                    #(#variants),*
-                }
-            }
-        }
-    }
-}
-
-/// Generate type aliases for WithChannels<T, Service>
-fn generate_type_aliases(
-    variants: &[(Ident, Type)],
-    service_name: &Ident,
-    suffix: &str,
-) -> TokenStream2 {
-    let mut aliases = quote! {};
-
-    for (variant_name, inner_type) in variants {
-        // Create a type name using the variant name + suffix
-        // For example: Sum + "Msg" = SumMsg
-        let type_name = format!("{variant_name}{suffix}");
-        let type_ident = Ident::new(&type_name, variant_name.span());
-
-        let alias = quote! {
-            /// Type alias for WithChannels<#inner_type, #service_name>
-            pub type #type_ident = ::irpc::WithChannels<#inner_type, #service_name>;
-        };
-
-        aliases = quote! {
-            #aliases
-            #alias
-        };
-    }
-
-    aliases
-}
-
+/// Processes an RPC request enum and generates trait implementations for use with `irpc`.
+///
+/// This attribute macro may be applied to an enum where each variant represents
+/// a different RPC request type. Each variant of the enum must contain a single unnamed field
+/// of a distinct type (unless the `wrap` attribute is used on a variant, see below).
+///
+/// Basic usage example:
+/// ```
+/// use serde::{Serialize, Deserialize};
+/// use irpc::{rpc_requests, channel::{oneshot, mpsc}};
+///
+/// #[rpc_requests(message = ComputeMessage)]
+/// #[derive(Debug, Serialize, Deserialize)]
+/// enum ComputeProtocol {
+///     /// Multiply two numbers, return the result over a oneshot channel.
+///     #[rpc(tx=oneshot::Sender<i64>)]
+///     Multiply(Multiply),
+///     /// Sum all numbers received via the `rx` stream,
+///     /// reply with the updating sum over the `tx` stream.
+///     #[rpc(tx=mpsc::Sender<i64>, rx=mpsc::Receiver<i64>)]
+///     Sum(Sum),
+/// }
+///
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct Multiply(i64, i64);
+///
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct Sum;
+/// ```
+///
+/// ## Generated code
+///
+/// If no further arguments are set, the macro generates:
+///
+/// * A `Channels<S>` implementation for each request type (i.e. the type of the variant's
+///   single unnamed field).
+///   The `Tx` and `Rx` types are set to the types provided via the variant's `rpc` attribute.
+/// * A `From` implementation to convert from each request type to the protocol enum.
+///
+/// When the `message` argument is set, the macro will also create a message enum and implement the
+/// `Service` and `RemoteService` traits for the protocol enum. This is recommended for the
+/// typical use of the macro.
+///
+/// ## Macro arguments
+///
+/// * `message = <name>` *(optional but recommended)*:
+///     * Generates an extended enum wrapping each type in `irpc::WithChannels<T, Service>`.
+///       The attribute value is the name of the message enum type.
+///     * Generates a `irpc::Service` implementation for the protocol enum, with the `Message`
+///       type set to the message enum.
+///     * Generates a `irpc::rpc::RemoteService` implementation for the protocol enum.
+/// * `alias = "<suffix>"` *(optional)*: Generate type aliases with the given suffix for each `WithChannels<T, Service>`.
+/// * `rpc_feature = "<feature>"` *(optional)*: If set, the `RemoteService` implementation will be feature-flagged
+///   with this feature. Set this if your crate only optionally enables the `rpc` feature
+///   of `irpc`.
+/// * `no_rpc` *(optional, no value)*: If set, no implementation of `RemoteService` will be generated and the generated
+///   code works without the `rpc` feature of `irpc`.
+/// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
+///
+/// ## Variant attributes
+///
+/// #### `#[rpc]` attribute
+///
+/// Individual enum variants are annotated with the `#[rpc(...)]` attribute to specify channel types.
+/// The `rpc` attribute contains two optional arguments:
+///
+/// * `tx = SomeType`: Set the kind of channel for sending responses from the server to the client.
+///   Must be a `Sender` type from the `irpc::channel` module.
+///   If `tx` is not set, it defaults to `irpc::channel::none::NoSender`.
+/// * `rx = OtherType`: Set the kind of channel for receiving updates from the client at the server.
+///   Must be a `Receiver` type from the `irpc::channel` module.
+///   If `rx` is not set, it defaults to `irpc::channel::none::NoReceiver`.
+///
+/// #### `#[wrap]` attribute
+///
+/// The attribute has the syntax `#[wrap(TypeName, derive(Foo, Bar))]`
+///
+/// If set, a struct `TypeName` will be generated from the variant's fields, and the variant
+/// will be changed to have a single, unnamed field of `TypeName`.
+///
+/// * `TypeName` is the name of the generated type.
+///   By default it will inherit the visibility of the protocol enum. You can set a different
+///   visibility by prefixing it with the visibility (e.g. `pub(crate) TypeName`).
+/// * `derive(Foo, Bar)` is optional and allows to set additional derives for the generated struct.
+///   By default, the struct will get `Serialize`, `Deserialize`, and `Debug` derives.
+///
+/// ## Examples
+///
+/// With `wrap`:
+/// ```
+/// use serde::{Serialize, Deserialize};
+/// use irpc::{rpc_requests, channel::{oneshot, mpsc}, Client};
+///
+/// #[rpc_requests(message = StoreMessage)]
+/// #[derive(Debug, Serialize, Deserialize)]
+/// enum StoreProtocol {
+///     /// Doc comment for `GetRequest`.
+///     #[rpc(tx=oneshot::Sender<String>)]
+///     #[wrap(GetRequest, derive(Clone))]
+///     Get(String),
+///
+///     /// Doc comment for `SetRequest`.
+///     #[rpc(tx=oneshot::Sender<()>)]
+///     #[wrap(SetRequest)]
+///     Set { key: String, value: String }
+/// }
+///
+/// async fn client_usage(client: Client<StoreProtocol>) -> anyhow::Result<()> {
+///     client.rpc(SetRequest { key: "foo".to_string(), value: "bar".to_string() }).await?;
+///     let value = client.rpc(GetRequest("foo".to_string())).await?;
+///     Ok(())
+/// }
+/// ```
+///
+/// With type aliases:
+/// ```no_compile
+/// #[rpc_requests(message = ComputeMessage, alias = "Msg")]
+/// enum ComputeProtocol {
+///     #[rpc(tx=oneshot::Sender<u128>)]
+///     Sqr(Sqr), // Generates type SqrMsg = WithChannels<Sqr, ComputeProtocol>
+///     #[rpc(tx=mpsc::Sender<i64>)]
+///     Sum(Sum), // Generates type SumMsg = WithChannels<Sum, ComputeProtocol>
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as DeriveInput);
@@ -184,11 +156,6 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let enum_name = &input.ident;
     let vis = &input.vis;
-    let input_span = input.span();
-    let cfg_feature_rpc = match args.rpc_feature.as_ref() {
-        None => quote!(),
-        Some(feature) => quote!(#[cfg(feature = #feature)]),
-    };
 
     let data_enum = match &mut input.data {
         Data::Enum(data_enum) => data_enum,
@@ -200,29 +167,29 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    let cfg_feature_rpc = match args.rpc_feature.as_ref() {
+        None => quote!(),
+        Some(feature) => quote!(#[cfg(feature = #feature)]),
+    };
+
     // Collect trait implementations
-    let mut channel_impls = Vec::new();
+    let mut channel_impls = TokenStream2::new();
     // Types to check for uniqueness
     let mut types = HashSet::new();
     // All variant names and types
     let mut all_variants = Vec::new();
     // Variants with rpc attributes (for From implementations)
     let mut variants_with_attr = Vec::new();
-
-    let mut wrapper_types = Vec::new();
+    // Wrapper types (via wrap attribute)
+    let mut wrapper_types = TokenStream2::new();
 
     for variant in &mut data_enum.variants {
-        let rpc_attr = match VariantArgs::from_attrs(&mut variant.attrs) {
+        let rpc_attr = match VariantRpcArgs::from_attrs(&mut variant.attrs) {
             Ok(args) => args,
-            Err(err) => return err,
+            Err(err) => return err.into_compile_error().into(),
         };
 
-        let wrap = rpc_attr
-            .as_ref()
-            .and_then(|(args, _)| args.wrap.as_ref())
-            .map(|name| name.as_ref().unwrap_or(&variant.ident));
-
-        let request_type = match wrap {
+        let request_type = match rpc_attr.wrap {
             None => match &mut variant.fields {
                 Fields::Unnamed(ref mut fields) if fields.unnamed.len() == 1 => {
                     fields.unnamed[0].ty.clone()
@@ -232,13 +199,14 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                     "Each variant must either have exactly one unnamed field, or use the `wrap` argument in the `rpc` attribute.",
                 ),
             },
-            Some(name) => {
-                let struc = struct_from_variant_fields(name.clone(), variant.fields.clone());
-                wrapper_types.push(quote! {
-                    #[derive(::std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
+            Some(WrapArgs { ident, derive, vis }) => {
+                let vis = vis.as_ref().unwrap_or(&input.vis).clone();
+                let ty = type_from_ident(&ident);
+                let struc = struct_from_variant_fields(ident, variant.fields.clone(), variant.attrs.clone(), vis);
+                wrapper_types.extend(quote! {
+                    #[derive(::std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize, #(#derive),* )]
                     #struc
                 });
-                let ty = type_from_ident(name.clone());
                 variant.fields = single_unnamed_field(ty.clone());
                 ty
             }
@@ -247,16 +215,15 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         all_variants.push((variant.ident.clone(), request_type.clone()));
 
         if !types.insert(request_type.to_token_stream().to_string()) {
-            return error_tokens(input_span, "Each variant must have a unique request type");
+            return error_tokens(
+                variant.span(),
+                "Each variant must have a unique request type",
+            );
         }
 
-        if let Some((args, attr)) = rpc_attr {
+        if let Some(args) = rpc_attr.rpc {
             variants_with_attr.push((variant.ident.clone(), request_type.clone()));
-
-            match generate_channels_impl(args, enum_name, &request_type, attr.span()) {
-                Ok(impls) => channel_impls.push(impls),
-                Err(e) => return e.to_compile_error().into(),
-            }
+            channel_impls.extend(generate_channels_impl(args, enum_name, &request_type))
         }
     }
 
@@ -278,7 +245,6 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             .iter()
             .map(|(variant_name, inner_type)| {
                 quote! {
-                    #[allow(missing_docs)]
                     #variant_name(::irpc::WithChannels<#inner_type, #enum_name>)
                 }
             })
@@ -288,7 +254,9 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         let variant_names: Vec<&Ident> = all_variants.iter().map(|(name, _)| name).collect();
 
         // Create the message enum definition
+        let doc = format!("Message enum for [`{enum_name}`]");
         let message_enum = quote! {
+            #[doc = #doc]
             #[allow(missing_docs)]
             #[derive(::std::fmt::Debug)]
             #vis enum #message_enum_name {
@@ -340,10 +308,10 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         #input
 
         // Wrapper types
-        #(#wrapper_types)*
+        #wrapper_types
 
         // Channel implementations
-        #(#channel_impls)*
+        #channel_impls
 
         // From implementations for the original enum
         #protocol_enum_from_impls
@@ -356,6 +324,134 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     output.into()
+}
+
+/// Generate parent span method for an enum
+fn generate_parent_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> TokenStream2 {
+    quote! {
+        impl #enum_name {
+            /// Get the parent span of the message
+            pub fn parent_span(&self) -> ::tracing::Span {
+                let span = match self {
+                    #(#enum_name::#variant_names(inner) => inner.parent_span_opt()),*
+                };
+                span.cloned().unwrap_or_else(|| ::tracing::Span::current())
+            }
+        }
+    }
+}
+
+fn generate_channels_impl(
+    args: RpcArgs,
+    service_name: &Ident,
+    request_type: &Type,
+) -> TokenStream2 {
+    let rx = args.rx.unwrap_or_else(|| {
+        // We can safely unwrap here because this is a known valid type
+        syn::parse_str::<Type>(DEFAULT_RX_TYPE).expect("Failed to parse default rx type")
+    });
+    let tx = args.tx.unwrap_or_else(|| {
+        // We can safely unwrap here because this is a known valid type
+        syn::parse_str::<Type>(DEFAULT_TX_TYPE).expect("Failed to parse default tx type")
+    });
+
+    quote! {
+        impl ::irpc::Channels<#service_name> for #request_type {
+            type Tx = #tx;
+            type Rx = #rx;
+        }
+    }
+}
+
+/// Generates `From` impls for protocol enum variants with an rpc attribute.
+fn generate_protocol_enum_from_impls(
+    enum_name: &Ident,
+    variants_with_attr: &[(Ident, Type)],
+) -> TokenStream2 {
+    variants_with_attr
+        .iter()
+        .map(|(variant_name, inner_type)| {
+            quote! {
+                impl From<#inner_type> for #enum_name {
+                    fn from(value: #inner_type) -> Self {
+                        #enum_name::#variant_name(value)
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Generate `From<WithChannels<T, Service>>` impls for message enum variants.
+fn generate_message_enum_from_impls(
+    message_enum_name: &Ident,
+    variants_with_attr: &[(Ident, Type)],
+    service_name: &Ident,
+) -> TokenStream2 {
+    variants_with_attr
+        .iter()
+        .map(|(variant_name, inner_type)| {
+            quote! {
+                impl From<::irpc::WithChannels<#inner_type, #service_name>> for #message_enum_name {
+                    fn from(value: ::irpc::WithChannels<#inner_type, #service_name>) -> Self {
+                        #message_enum_name::#variant_name(value)
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Generate `RemoteService` impl for message enums.
+fn generate_remote_service_impl(
+    message_enum_name: &Ident,
+    proto_enum_name: &Ident,
+    variants_with_attr: &[(Ident, Type)],
+) -> TokenStream2 {
+    let variants = variants_with_attr
+        .iter()
+        .map(|(variant_name, _inner_type)| {
+            quote! {
+                #proto_enum_name::#variant_name(msg) => {
+                    #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
+                }
+            }
+        });
+
+    quote! {
+        impl ::irpc::rpc::RemoteService for #proto_enum_name {
+            fn with_remote_channels(
+                self,
+                rx: ::irpc::rpc::quinn::RecvStream,
+                tx: ::irpc::rpc::quinn::SendStream
+            ) -> Self::Message {
+                match self {
+                    #(#variants),*
+                }
+            }
+        }
+    }
+}
+
+/// Generate type aliases for `WithChannels<T, Service>`
+fn generate_type_aliases(
+    variants: &[(Ident, Type)],
+    service_name: &Ident,
+    suffix: &str,
+) -> TokenStream2 {
+    variants
+        .iter()
+        .map(|(variant_name, inner_type)| {
+            // Create a type name using the variant name + suffix
+            // For example: Sum + "Msg" = SumMsg
+            let type_name = format!("{variant_name}{suffix}");
+            let type_ident = Ident::new(&type_name, variant_name.span());
+            quote! {
+                /// Type alias for WithChannels<#inner_type, #service_name>
+                pub type #type_ident = ::irpc::WithChannels<#inner_type, #service_name>;
+            }
+        })
+        .collect()
 }
 
 // Parse arguments for the macro
@@ -387,20 +483,14 @@ impl Parse for MacroArgs {
                 "rpc_feature" => {
                     input.parse::<Token![=]>()?;
                     if this.no_rpc {
-                        return Err(Error::new(
-                            arg.span(),
-                            "rpc_feature is incompatible with no_rpc",
-                        ));
+                        return syn_err(arg.span(), "rpc_feature is incompatible with no_rpc");
                     }
                     let value: LitStr = input.parse()?;
                     this.rpc_feature = Some(value.value());
                 }
                 "no_rpc" => {
                     if this.rpc_feature.is_some() {
-                        return Err(Error::new(
-                            arg.span(),
-                            "rpc_feature is incompatible with no_rpc",
-                        ));
+                        return syn_err(arg.span(), "rpc_feature is incompatible with no_rpc");
                     }
                     this.no_rpc = true;
                 }
@@ -408,7 +498,7 @@ impl Parse for MacroArgs {
                     this.no_spans = true;
                 }
                 _ => {
-                    return Err(Error::new(arg.span(), format!("Unknown parameter: {arg}")));
+                    return syn_err(arg.span(), format!("Unknown parameter: {arg}"));
                 }
             }
 
@@ -424,102 +514,59 @@ impl Parse for MacroArgs {
 }
 
 #[derive(Default)]
-struct VariantArgs {
-    wrap: Option<Option<Ident>>,
-    types: BTreeMap<String, Type>,
+struct VariantRpcArgs {
+    wrap: Option<WrapArgs>,
+    rpc: Option<RpcArgs>,
 }
 
-impl VariantArgs {
-    fn from_attrs(
-        attrs: &mut Vec<syn::Attribute>,
-    ) -> Result<Option<(Self, syn::Attribute)>, TokenStream> {
-        let mut rpc_attr = None;
-        let mut multiple_rpc_attrs = None;
-
-        attrs.retain(|attr| {
-            if attr.path.is_ident(ATTR_NAME) {
-                if rpc_attr.is_some() {
-                    multiple_rpc_attrs = Some(attr.span());
-                    true // Keep this duplicate attribute
-                } else {
-                    rpc_attr = Some(attr.clone());
-                    false // Remove this attribute
+impl VariantRpcArgs {
+    fn from_attrs(attrs: &mut Vec<syn::Attribute>) -> syn::Result<Self> {
+        let mut this = Self::default();
+        let mut remaining_attrs = Vec::new();
+        for attr in attrs.drain(..) {
+            let ident = attr.path.get_ident().map(|ident| ident.to_string());
+            match ident.as_deref() {
+                Some(RPC_ATTR_NAME) => {
+                    if this.rpc.is_some() {
+                        syn_err(attr.span(), "Each variant can have only one rpc attribute")?;
+                    }
+                    this.rpc = Some(attr.parse_args()?);
                 }
-            } else {
-                true // Keep other attributes
+                Some(WRAP_ATTR_NAME) => {
+                    if this.wrap.is_some() {
+                        syn_err(attr.span(), "Each variant can have only one wrap attribute")?;
+                    }
+                    this.wrap = Some(attr.parse_args()?);
+                }
+                _ => remaining_attrs.push(attr),
             }
-        });
-
-        // Check for multiple rpc attributes
-        if let Some(span) = multiple_rpc_attrs {
-            return Err(error_tokens(
-                span,
-                "Each variant can only have one rpc attribute",
-            ));
         }
+        *attrs = remaining_attrs;
+        Ok(this)
+    }
+}
 
-        // Process variants with rpc attributes
-        if let Some(attr) = rpc_attr {
-            let args = match attr.parse_args::<VariantArgs>() {
-                Ok(info) => info,
-                Err(e) => return Err(e.to_compile_error().into()),
-            };
-            Ok(Some((args, attr)))
-        } else {
-            Ok(None)
-        }
-    }
-    /// Get and remove a type from the map, failing if it doesn't exist
-    fn get(&mut self, key: &str, span: Span) -> syn::Result<Type> {
-        self.types
-            .remove(key)
-            .ok_or_else(|| Error::new(span, format!("rpc requires a {key} type")))
-    }
-
-    /// Fail if there are any unknown arguments remaining
-    fn check_empty(&self, span: Span) -> syn::Result<()> {
-        if self.types.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::new(
-                span,
-                format!(
-                    "Unknown arguments provided: {:?}",
-                    self.types.keys().collect::<Vec<_>>()
-                ),
-            ))
-        }
-    }
+#[derive(Default)]
+struct RpcArgs {
+    rx: Option<Type>,
+    tx: Option<Type>,
 }
 
 /// Parse the rpc args as a comma separated list of name=type pairs
-impl Parse for VariantArgs {
+impl Parse for RpcArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut this = Self::default();
-        loop {
-            if input.is_empty() {
-                break;
-            }
-
+        while !input.is_empty() {
             let arg: Ident = input.parse()?;
-            match arg.to_string().as_str() {
-                "wrap" => {
-                    let value = if input.peek(Token![=]) {
-                        let _: Token![=] = input.parse()?;
-                        let value: Ident = input.parse()?;
-                        Some(value)
-                    } else {
-                        None
-                    };
-                    this.wrap = Some(value);
-                }
-                _ => {
-                    let _: Token![=] = input.parse()?;
-                    let value: Type = input.parse()?;
-                    this.types.insert(arg.to_string(), value);
-                }
+            let _: Token![=] = input.parse()?;
+            let value: Type = input.parse()?;
+            if arg == RX_ATTR {
+                this.rx = Some(value);
+            } else if arg == TX_ATTR {
+                this.tx = Some(value);
+            } else {
+                syn_err(arg.span(), "Unexpected argument in rpc attribute")?;
             }
-
             if !input.peek(Token![,]) {
                 break;
             } else {
@@ -531,22 +578,65 @@ impl Parse for VariantArgs {
     }
 }
 
-fn type_from_ident(ident: Ident) -> Type {
+struct WrapArgs {
+    vis: Option<Visibility>,
+    ident: Ident,
+    derive: Vec<Type>,
+}
+
+impl Parse for WrapArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let vis = match input.parse::<Visibility>()? {
+            Visibility::Inherited => None,
+            vis => Some(vis),
+        };
+        let ident: Ident = input.parse()?;
+        let mut this = Self {
+            ident,
+            derive: Default::default(),
+            vis,
+        };
+        while input.peek(Token![,]) {
+            let _: Token![,] = input.parse()?;
+            let arg: Ident = input.parse()?;
+            match arg.to_string().as_str() {
+                "derive" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let types: Punctuated<Type, Comma> = content.parse_terminated(Type::parse)?;
+                    this.derive = types.into_iter().collect();
+                }
+                _ => syn_err(arg.span(), "Unexpected argument in wrap argument")?,
+            }
+        }
+        if !input.is_empty() {
+            syn_err(input.span(), "Unexpected tokens in wrap argument")?;
+        }
+        Ok(this)
+    }
+}
+
+fn type_from_ident(ident: &Ident) -> Type {
     Type::Path(syn::TypePath {
         qself: None,
         path: syn::Path {
             leading_colon: None,
-            segments: Punctuated::from_iter([syn::PathSegment::from(ident)]),
+            segments: Punctuated::from_iter([syn::PathSegment::from(ident.clone())]),
         },
     })
 }
 
-fn struct_from_variant_fields(ident: Ident, mut fields: Fields) -> syn::ItemStruct {
-    make_fields_public(&mut fields);
+fn struct_from_variant_fields(
+    ident: Ident,
+    mut fields: Fields,
+    attrs: Vec<Attribute>,
+    vis: Visibility,
+) -> syn::ItemStruct {
+    set_fields_vis(&mut fields, &vis);
     let span = ident.span();
     syn::ItemStruct {
-        attrs: vec![],
-        vis: vis_pub(),
+        attrs,
+        vis,
         struct_token: Token![struct](span),
         ident,
         generics: Default::default(),
@@ -562,7 +652,7 @@ fn struct_from_variant_fields(ident: Ident, mut fields: Fields) -> syn::ItemStru
 fn single_unnamed_field(ty: Type) -> Fields {
     let field = syn::Field {
         attrs: vec![],
-        vis: syn::Visibility::Inherited,
+        vis: Visibility::Inherited,
         ident: None,
         colon_token: None,
         ty,
@@ -573,21 +663,22 @@ fn single_unnamed_field(ty: Type) -> Fields {
     })
 }
 
-fn make_fields_public(fields: &mut Fields) {
+fn set_fields_vis(fields: &mut Fields, vis: &Visibility) {
     let inner = match fields {
         Fields::Named(ref mut named) => named.named.iter_mut(),
         Fields::Unnamed(ref mut unnamed) => unnamed.unnamed.iter_mut(),
         Fields::Unit => return,
     };
     for field in inner {
-        field.vis = vis_pub();
+        field.vis = vis.clone();
     }
 }
 
-fn vis_pub() -> syn::Visibility {
-    syn::Visibility::Public(syn::VisPublic {
-        pub_token: syn::token::Pub {
-            span: proc_macro2::Span::call_site(),
-        },
-    })
+// Helper function for error reporting
+fn error_tokens(span: Span, message: &str) -> TokenStream {
+    Error::new(span, message).to_compile_error().into()
+}
+
+fn syn_err<T>(span: Span, message: impl std::fmt::Display) -> syn::Result<T> {
+    Err(Error::new(span, message))
 }
