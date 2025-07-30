@@ -100,7 +100,7 @@ async fn connect_and_open_bi(
 
 /// A [`ProtocolHandler`] for an irpc protocol.
 ///
-/// Can be added to an [`iroh::router::Router`] to handle incoming connections for an ALPN string.
+/// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
 pub struct IrohProtocol<R> {
     handler: Handler<R>,
     request_id: AtomicU64,
