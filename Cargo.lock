@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "irpc"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "derive_more 2.0.1",
