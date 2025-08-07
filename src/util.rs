@@ -22,13 +22,12 @@ mod quinn_setup_utils {
             certs.add(cert)?;
         }
 
-        let crypto_client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("valid versions")
-        .with_root_certificates(certs)
-        .with_no_client_auth();
+        let provider = rustls::crypto::ring::default_provider();
+        let crypto_client_config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .expect("valid versions")
+            .with_root_certificates(certs)
+            .with_no_client_auth();
         let quic_client_config =
             quinn::crypto::rustls::QuicClientConfig::try_from(crypto_client_config)?;
 
@@ -54,7 +53,10 @@ mod quinn_setup_utils {
 
     /// Create a quinn client config and trust all certificates.
     pub fn configure_client_insecure() -> Result<ClientConfig> {
-        let crypto = rustls::ClientConfig::builder()
+        let provider = rustls::crypto::ring::default_provider();
+        let crypto = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(rustls::DEFAULT_VERSIONS)
+            .expect("valid versions")
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
             .with_no_client_auth();
