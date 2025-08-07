@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 #[test]
 fn derive_simple() {
+    #![allow(dead_code)]
+
     #[derive(Debug, Serialize, Deserialize)]
     struct RpcRequest;
 

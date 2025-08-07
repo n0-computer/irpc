@@ -34,7 +34,7 @@ enum ComputeProtocol {
     Multiply(Multiply),
 }
 
-// Define ComputeRequest sub-messages
+// Define ComputeProtocol sub-messages
 #[derive(Debug, Serialize, Deserialize)]
 struct Sqr {
     num: u64,
@@ -51,15 +51,6 @@ struct Fibonacci {
 #[derive(Debug, Serialize, Deserialize)]
 struct Multiply {
     initial: u64,
-}
-
-// Define ComputeRequest enum
-#[derive(Debug, Serialize, Deserialize)]
-enum ComputeRequest {
-    Sqr(Sqr),
-    Sum(Sum),
-    Fibonacci(Fibonacci),
-    Multiply(Multiply),
 }
 
 // The actor that processes requests

@@ -15,9 +15,6 @@ struct Get {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct List;
-
-#[derive(Debug, Serialize, Deserialize)]
 struct Set {
     key: String,
     value: String,
@@ -28,9 +25,6 @@ impl From<(String, String)> for Set {
         Self { key, value }
     }
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SetMany;
 
 #[rpc_requests(message = StorageMessage, no_rpc, no_spans)]
 #[derive(Serialize, Deserialize, Debug)]
