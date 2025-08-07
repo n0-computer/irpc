@@ -8,7 +8,7 @@ use syn::{
     parse_macro_input,
     punctuated::Punctuated,
     spanned::Spanned,
-    Data, DeriveInput, Fields, Ident, LitStr, Token, Type,
+    Data, DeriveInput, Fields, Ident, LitStr, Token, Type, Variant,
 };
 
 // Helper function for error reporting
@@ -609,4 +609,94 @@ fn vis_pub() -> syn::Visibility {
             span: proc_macro2::Span::call_site(),
         },
     })
+}
+
+#[proc_macro_derive(StreamItem)]
+pub fn derive_irpc_stream_item(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let span = input.span();
+    let name = input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let data = if let Data::Enum(data) = input.data {
+        data
+    } else {
+        return error_tokens(span, "IrpcStreamItem can only be derived for enums");
+    };
+
+    let mut item_variant: Option<Variant> = None;
+    let mut error_variant: Option<Variant> = None;
+    let mut done_variant: Option<Variant> = None;
+
+    for variant in data.variants {
+        let vname = variant.ident.to_string();
+        match vname.as_str() {
+            "Item" => item_variant = Some(variant),
+            "Error" => error_variant = Some(variant),
+            "Done" => done_variant = Some(variant),
+            _ => return error_tokens(span, &format!("Unknown variant: {}", vname)),
+        }
+    }
+
+    let Some(item_var) = item_variant else {
+        return error_tokens(span, "Missing Item variant");
+    };
+    let Some(error_var) = error_variant else {
+        return error_tokens(span, "Missing Error variant");
+    };
+    let Some(done_var) = done_variant else {
+        return error_tokens(span, "Missing Done variant");
+    };
+
+    let item_field_ty = if let Fields::Unnamed(fields) = item_var.fields {
+        if fields.unnamed.len() == 1 {
+            fields.unnamed.into_iter().next().unwrap().ty
+        } else {
+            return error_tokens(span, "Item variant must have exactly one unnamed field");
+        }
+    } else {
+        return error_tokens(span, "Item variant must have unnamed fields");
+    };
+
+    let error_field_ty = if let Fields::Unnamed(fields) = error_var.fields {
+        if fields.unnamed.len() == 1 {
+            fields.unnamed.into_iter().next().unwrap().ty
+        } else {
+            return error_tokens(span, "Error variant must have exactly one unnamed field");
+        }
+    } else {
+        return error_tokens(span, "Error variant must have unnamed fields");
+    };
+
+    if !done_var.fields.is_empty() {
+        return error_tokens(span, "Done variant must be a unit variant with no fields");
+    }
+
+    let expanded = quote! {
+        impl #impl_generics StreamItem for #name #ty_generics #where_clause {
+            type Error = #error_field_ty;
+            type Item = #item_field_ty;
+
+            fn into_result_opt(self) -> Option<std::result::Result<<Self as StreamItem>::Item, <Self as StreamItem>::Error>> {
+                match self {
+                    Self::Item(item) => Some(Ok(item)),
+                    Self::Error(err) => Some(Err(err)),
+                    Self::Done => None,
+                }
+            }
+
+            fn from_result(res: std::result::Result<<Self as StreamItem>::Item, <Self as StreamItem>::Error>) -> Self {
+                match res {
+                    Ok(item) => Self::Item(item),
+                    Err(err) => Self::Error(err),
+                }
+            }
+
+            fn done() -> Self {
+                Self::Done
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
 }
