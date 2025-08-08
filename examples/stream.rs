@@ -1,46 +1,28 @@
 use std::{
     collections::BTreeMap,
-    future::{Future, IntoFuture},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
 
 use anyhow::{Context, Result};
-use futures_util::future::BoxFuture;
 use irpc::{
-    channel::{mpsc, oneshot},
+    channel::oneshot,
     rpc::RemoteService,
     rpc_requests,
-    util::{
-        make_client_endpoint, make_server_endpoint, IrpcReceiverFutExt, MpscSenderExt, StreamItem,
-    },
+    util::{make_client_endpoint, make_server_endpoint, MpscSenderExt, Progress, StreamSender},
     Client, WithChannels,
 };
 // Import the macro
 use n0_future::{
     task::{self, AbortOnDropHandle},
-    Stream, StreamExt,
+    StreamExt,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, thiserror::Error)]
+#[error("{message}")]
 struct Error {
     message: String,
-}
-
-impl std::error::Error for Error {}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, StreamItem)]
-enum GetItem {
-    Item(String),
-    Error(Error),
-    Done,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,38 +43,13 @@ struct Get {
 enum StorageProtocol {
     #[rpc(tx=oneshot::Sender<()>)]
     Set(Set),
-    #[rpc(tx=mpsc::Sender<GetItem>)]
+    #[rpc(tx=StreamSender<String, Error>)]
     Get(Get),
 }
 
 struct StorageActor {
     recv: tokio::sync::mpsc::Receiver<StorageMessage>,
     state: BTreeMap<String, String>,
-}
-
-struct GetProgress {
-    fut: BoxFuture<'static, irpc::Result<mpsc::Receiver<GetItem>>>,
-}
-
-impl GetProgress {
-    pub fn new(
-        fut: impl Future<Output = irpc::Result<mpsc::Receiver<GetItem>>> + Send + 'static,
-    ) -> Self {
-        Self { fut: Box::pin(fut) }
-    }
-
-    pub fn stream(self) -> impl Stream<Item = anyhow::Result<String>> {
-        self.fut.into_stream()
-    }
-}
-
-impl IntoFuture for GetProgress {
-    type Output = anyhow::Result<String>;
-    type IntoFuture = BoxFuture<'static, Self::Output>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(self.fut.try_collect())
-    }
 }
 
 impl StorageActor {
@@ -164,8 +121,12 @@ impl StorageApi {
         Ok(AbortOnDropHandle::new(join_handle))
     }
 
-    pub fn get(&self, key: String) -> GetProgress {
-        GetProgress::new(self.inner.server_streaming(Get { key }, 16))
+    pub fn get(&self, key: String) -> Progress<String, Error> {
+        Progress::new(self.inner.server_streaming(Get { key }, 16))
+    }
+
+    pub fn get_vec(&self, key: String) -> Progress<String, Error, Vec<String>> {
+        Progress::new(self.inner.server_streaming(Get { key }, 16))
     }
 
     pub async fn set(&self, key: String, value: String) -> irpc::Result<()> {
@@ -174,9 +135,13 @@ impl StorageApi {
 }
 
 async fn client_demo(api: StorageApi) -> Result<()> {
-    api.set("hello".to_string(), "world".to_string()).await?;
+    api.set("hello".to_string(), "world and all".to_string())
+        .await?;
     let value = api.get("hello".to_string()).await?;
-    println!("get: hello = {value:?}");
+    println!("get (string): hello = {value:?}");
+
+    let value = api.get_vec("hello".to_string()).await?;
+    println!("get (vec): hello = {value:?}");
 
     api.set("loremipsum".to_string(), "dolor sit amet".to_string())
         .await?;

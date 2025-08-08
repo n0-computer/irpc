@@ -450,11 +450,112 @@ mod now_or_never {
 pub(crate) use now_or_never::now_or_never;
 
 mod stream_item {
-    use std::{future::Future, io};
+    use std::{
+        future::{Future, IntoFuture},
+        io,
+        marker::PhantomData,
+    };
 
+    use futures_util::future::BoxFuture;
     use n0_future::{stream, Stream, StreamExt};
+    use serde::{Deserialize, Serialize};
 
-    use crate::channel::{mpsc, RecvError, SendError};
+    use crate::{
+        channel::{mpsc, RecvError, SendError},
+        RpcMessage,
+    };
+
+    pub type StreamSender<T, E> = mpsc::Sender<Item<T, E>>;
+    pub type StreamReceiver<T, E> = mpsc::Receiver<Item<T, E>>;
+
+    #[derive(thiserror::Error, Debug)]
+    pub enum StreamError<E: std::error::Error> {
+        #[error(transparent)]
+        Transport(#[from] crate::Error),
+        #[error(transparent)]
+        Remote(E),
+    }
+
+    impl<E: std::error::Error> From<crate::channel::RecvError> for StreamError<E> {
+        fn from(value: crate::channel::RecvError) -> Self {
+            Self::Transport(value.into())
+        }
+    }
+
+    pub type StreamResult<T, E> = std::result::Result<T, StreamError<E>>;
+
+    pub struct Progress<
+        T: RpcMessage,
+        E: RpcMessage + std::error::Error,
+        C: Extend<T> + Default = T,
+    > {
+        fut: BoxFuture<'static, crate::Result<mpsc::Receiver<Item<T, E>>>>,
+        _collection_type: PhantomData<C>,
+    }
+
+    impl<T, E, C> Progress<T, E, C>
+    where
+        T: RpcMessage,
+        E: RpcMessage + std::error::Error,
+        C: Extend<T> + Default + Send,
+    {
+        pub fn new(
+            fut: impl Future<Output = crate::Result<mpsc::Receiver<Item<T, E>>>> + Send + 'static,
+        ) -> Self {
+            Self {
+                fut: Box::pin(fut),
+                _collection_type: PhantomData,
+            }
+        }
+
+        pub fn stream(self) -> impl Stream<Item = StreamResult<T, E>> {
+            self.fut.into_stream()
+        }
+    }
+
+    impl<T, E, C> IntoFuture for Progress<T, E, C>
+    where
+        T: RpcMessage,
+        E: RpcMessage + std::error::Error,
+        C: Default + Extend<T> + Send + 'static,
+    {
+        type Output = StreamResult<C, E>;
+        type IntoFuture = BoxFuture<'static, Self::Output>;
+
+        fn into_future(self) -> Self::IntoFuture {
+            Box::pin(self.fut.try_collect())
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub enum Item<T, E> {
+        Ok(T),
+        Err(E),
+        Done,
+    }
+
+    impl<T: RpcMessage, E: RpcMessage + std::error::Error> StreamItem for Item<T, E> {
+        type Item = T;
+        type Error = E;
+        fn into_result_opt(self) -> Option<Result<Self::Item, Self::Error>> {
+            match self {
+                Item::Ok(item) => Some(Ok(item)),
+                Item::Err(error) => Some(Err(error)),
+                Item::Done => None,
+            }
+        }
+
+        fn from_result(item: std::result::Result<Self::Item, Self::Error>) -> Self {
+            match item {
+                Ok(item) => Self::Ok(item),
+                Err(err) => Self::Err(err),
+            }
+        }
+
+        fn done() -> Self {
+            Self::Done
+        }
+    }
 
     /// Trait for an enum that has three variants, item, error, and done.
     ///
@@ -463,9 +564,9 @@ mod stream_item {
     /// for successful end of stream.
     pub trait StreamItem: crate::RpcMessage {
         /// The error case of the item enum.
-        type Error;
+        type Error: crate::RpcMessage + std::error::Error;
         /// The item case of the item enum.
-        type Item;
+        type Item: crate::RpcMessage;
         /// Converts the stream item into either None for end of stream, or a Result
         /// containing the item or an error. Error is assumed as a termination, so
         /// if you get error you won't get an additional end of stream marker.
@@ -481,7 +582,6 @@ mod stream_item {
         ///
         /// This will convert items and errors into the item enum type, and add
         /// a done marker if the stream ends without an error.
-        #[allow(dead_code)]
         fn forward_stream(
             self,
             stream: impl Stream<Item = std::result::Result<T::Item, T::Error>>,
@@ -538,9 +638,7 @@ mod stream_item {
         fn try_collect<C, E>(self) -> impl Future<Output = std::result::Result<C, E>>
         where
             C: Default + Extend<T::Item>,
-            E: From<T::Error>,
-            E: From<crate::Error>,
-            E: From<RecvError>;
+            E: From<StreamError<T::Error>>;
 
         /// Converts the receiver returned by this future into a stream of items,
         /// where each item is either a successful item or an error.
@@ -550,9 +648,7 @@ mod stream_item {
         /// first item and then terminate.
         fn into_stream<E>(self) -> impl Stream<Item = std::result::Result<T::Item, E>>
         where
-            E: From<T::Error>,
-            E: From<crate::Error>,
-            E: From<RecvError>;
+            E: From<StreamError<T::Error>>;
     }
 
     impl<T, F> IrpcReceiverFutExt<T> for F
@@ -563,9 +659,7 @@ mod stream_item {
         async fn try_collect<C, E>(self) -> std::result::Result<C, E>
         where
             C: Default + Extend<T::Item>,
-            E: From<T::Error>,
-            E: From<crate::Error>,
-            E: From<RecvError>,
+            E: From<StreamError<T::Error>>,
         {
             let mut items = C::default();
             let mut stream = self.into_stream::<E>();
@@ -580,9 +674,7 @@ mod stream_item {
 
         fn into_stream<E>(self) -> impl Stream<Item = std::result::Result<T::Item, E>>
         where
-            E: From<T::Error>,
-            E: From<crate::Error>,
-            E: From<RecvError>,
+            E: From<StreamError<T::Error>>,
         {
             enum State<S, T> {
                 Init(S),
@@ -597,24 +689,22 @@ mod stream_item {
             ) -> Option<(std::result::Result<T::Item, E>, State<S, T>)>
             where
                 T: StreamItem,
-                E: From<T::Error>,
-                E: From<crate::Error>,
-                E: From<RecvError>,
+                E: From<StreamError<T::Error>>,
             {
                 match rx.recv().await {
                     Ok(Some(item)) => match item.into_result_opt()? {
                         Ok(i) => Some((Ok(i), State::Receiving(rx))),
-                        Err(e) => Some((Err(E::from(e)), State::Done)),
+                        Err(e) => Some((Err(E::from(StreamError::Remote(e))), State::Done)),
                     },
-                    Ok(None) => Some((Err(E::from(eof())), State::Done)),
-                    Err(e) => Some((Err(E::from(e)), State::Done)),
+                    Ok(None) => Some((Err(E::from(StreamError::from(eof()))), State::Done)),
+                    Err(e) => Some((Err(E::from(StreamError::from(e))), State::Done)),
                 }
             }
             Box::pin(stream::unfold(State::Init(self), |state| async move {
                 match state {
                     State::Init(fut) => match fut.await {
                         Ok(rx) => process_recv(rx).await,
-                        Err(e) => Some((Err(E::from(e)), State::Done)),
+                        Err(e) => Some((Err(E::from(StreamError::from(e))), State::Done)),
                     },
                     State::Receiving(rx) => process_recv(rx).await,
                     State::Done => None,
@@ -629,4 +719,6 @@ mod stream_item {
 pub use irpc_derive::StreamItem;
 #[cfg(feature = "stream")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "stream")))]
-pub use stream_item::{IrpcReceiverFutExt, MpscSenderExt, StreamItem};
+pub use stream_item::{
+    IrpcReceiverFutExt, Item, MpscSenderExt, Progress, StreamItem, StreamReceiver, StreamSender,
+};

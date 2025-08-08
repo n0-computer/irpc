@@ -611,6 +611,7 @@ fn vis_pub() -> syn::Visibility {
     })
 }
 
+// TODO(Frando): Remove if the generics approach works out fine?
 #[proc_macro_derive(StreamItem)]
 pub fn derive_irpc_stream_item(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
