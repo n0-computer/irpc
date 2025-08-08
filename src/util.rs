@@ -450,3 +450,312 @@ mod now_or_never {
 }
 #[cfg(feature = "rpc")]
 pub(crate) use now_or_never::now_or_never;
+
+mod stream_item {
+    use std::{
+        future::{Future, IntoFuture},
+        io,
+        marker::PhantomData,
+    };
+
+    use futures_util::future::BoxFuture;
+    use n0_future::{stream, Stream, StreamExt};
+    use serde::{Deserialize, Serialize};
+
+    use crate::{
+        channel::{mpsc, RecvError, SendError},
+        RpcMessage,
+    };
+
+    /// Type alias for a [`mpsc::Sender`] of [`Item`]s.
+    pub type StreamSender<T, E> = mpsc::Sender<Item<T, E>>;
+
+    /// Type alias for a [`mpsc::Receiver`] of [`Item`]s.
+    pub type StreamReceiver<T, E> = mpsc::Receiver<Item<T, E>>;
+
+    /// The error type returned from fallible irpc stream extension methods.
+    ///
+    /// This is an enum with two variants: one for transport errors, and one
+    /// for errors returned from the remote service.
+    #[derive(thiserror::Error, Debug)]
+    pub enum StreamError<E: std::error::Error> {
+        /// Transport error.
+        #[error(transparent)]
+        Transport(#[from] crate::Error),
+        /// Error returned from the remote service.
+        #[error(transparent)]
+        Remote(E),
+    }
+
+    impl<E: std::error::Error> From<crate::channel::RecvError> for StreamError<E> {
+        fn from(value: crate::channel::RecvError) -> Self {
+            Self::Transport(value.into())
+        }
+    }
+
+    pub type StreamResult<T, E> = std::result::Result<T, StreamError<E>>;
+
+    /// Wrapper for server-streaming RPC calls that return a stream of items.
+    ///
+    /// This struct wraps the future returned from [`crate::Client::server_streaming`]
+    /// if the response channel is a stream of [`Item`].
+    ///
+    /// The [`Progress`] implements [`IntoFuture`], so it can be `await`ed directly
+    /// without further chaining. It will then `try_collect` all items into a collection,
+    /// as specified by the `C` generic on this struct.
+    ///
+    /// The [`Progress`] can also be turned into a stream of individual items by calling
+    /// [`Progress::into_stream`].
+    pub struct Progress<
+        T: RpcMessage,
+        E: RpcMessage + std::error::Error,
+        C: Extend<T> + Default = T,
+    > {
+        fut: BoxFuture<'static, crate::Result<mpsc::Receiver<Item<T, E>>>>,
+        _collection_type: PhantomData<C>,
+    }
+
+    impl<T, E, C> Progress<T, E, C>
+    where
+        T: RpcMessage,
+        E: RpcMessage + std::error::Error,
+        C: Extend<T> + Default + Send,
+    {
+        pub fn new(
+            fut: impl Future<Output = crate::Result<mpsc::Receiver<Item<T, E>>>> + Send + 'static,
+        ) -> Self {
+            Self {
+                fut: Box::pin(fut),
+                _collection_type: PhantomData,
+            }
+        }
+
+        pub fn stream(self) -> impl Stream<Item = StreamResult<T, E>> {
+            self.fut.into_stream()
+        }
+    }
+
+    impl<T, E, C> IntoFuture for Progress<T, E, C>
+    where
+        T: RpcMessage,
+        E: RpcMessage + std::error::Error,
+        C: Default + Extend<T> + Send + 'static,
+    {
+        type Output = StreamResult<C, E>;
+        type IntoFuture = BoxFuture<'static, Self::Output>;
+
+        fn into_future(self) -> Self::IntoFuture {
+            Box::pin(self.fut.try_collect())
+        }
+    }
+
+    /// A fallible stream item.
+    ///
+    /// This is an enum with three variants, `Ok`, `Err`, and `Done`.
+    ///
+    /// It can be used as the item type for `mpsc` channels to force an explicit end of stream marker.
+    /// It implements [`StreamItem`] and throught that the use of [`MpscSenderExt`], [`IrpcReceiverFutExt`],
+    /// and [`Progress`].
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub enum Item<T, E> {
+        /// The stream item.
+        Ok(T),
+        /// The error case.
+        ///
+        /// No futher messages may be sent afterwards.
+        Err(E),
+        /// The end-of-stream marker.
+        ///
+        /// Send this as the last message to gracefully terminate a stream.
+        /// No further messages may be sent afterwards.
+        Done,
+    }
+
+    impl<T: RpcMessage, E: RpcMessage + std::error::Error> StreamItem for Item<T, E> {
+        type Item = T;
+        type Error = E;
+        fn into_result_opt(self) -> Option<Result<Self::Item, Self::Error>> {
+            match self {
+                Item::Ok(item) => Some(Ok(item)),
+                Item::Err(error) => Some(Err(error)),
+                Item::Done => None,
+            }
+        }
+
+        fn from_result(item: std::result::Result<Self::Item, Self::Error>) -> Self {
+            match item {
+                Ok(item) => Self::Ok(item),
+                Err(err) => Self::Err(err),
+            }
+        }
+
+        fn done() -> Self {
+            Self::Done
+        }
+    }
+
+    /// Trait for an enum that has three variants, item, error, and done.
+    ///
+    /// This is very common for irpc stream items if you want to provide an explicit
+    /// end of stream marker to make sure unsuccessful termination is not mistaken
+    /// for successful end of stream.
+    pub trait StreamItem: crate::RpcMessage {
+        /// The error case of the item enum.
+        type Error: crate::RpcMessage + std::error::Error;
+        /// The item case of the item enum.
+        type Item: crate::RpcMessage;
+        /// Converts the stream item into either None for end of stream, or a Result
+        /// containing the item or an error. Error is assumed as a termination, so
+        /// if you get error you won't get an additional end of stream marker.
+        fn into_result_opt(self) -> Option<Result<Self::Item, Self::Error>>;
+        /// Converts a result into the item enum.
+        fn from_result(item: std::result::Result<Self::Item, Self::Error>) -> Self;
+        /// Produces a done marker for the item enum.
+        fn done() -> Self;
+    }
+
+    pub trait MpscSenderExt<T: StreamItem>: Sized {
+        /// Forward a stream of items to the sender.
+        ///
+        /// This will convert items and errors into the item enum type, and add
+        /// a done marker if the stream ends without an error.
+        fn forward_stream(
+            self,
+            stream: impl Stream<Item = std::result::Result<T::Item, T::Error>>,
+        ) -> impl Future<Output = std::result::Result<(), SendError>>;
+
+        /// Forward an iterator of items to the sender.
+        ///
+        /// This will convert items and errors into the item enum type, and add
+        /// a done marker if the iterator ends without an error.
+        fn forward_iter(
+            self,
+            iter: impl Iterator<Item = std::result::Result<T::Item, T::Error>>,
+        ) -> impl Future<Output = std::result::Result<(), SendError>>;
+    }
+
+    impl<T: StreamItem> MpscSenderExt<T> for mpsc::Sender<T> {
+        async fn forward_stream(
+            self,
+            stream: impl Stream<Item = std::result::Result<T::Item, T::Error>>,
+        ) -> std::result::Result<(), SendError> {
+            tokio::pin!(stream);
+            while let Some(item) = stream.next().await {
+                let done = item.is_err();
+                self.send(T::from_result(item)).await?;
+                if done {
+                    return Ok(());
+                };
+            }
+            self.send(T::done()).await
+        }
+
+        async fn forward_iter(
+            self,
+            iter: impl Iterator<Item = std::result::Result<T::Item, T::Error>>,
+        ) -> std::result::Result<(), SendError> {
+            for item in iter {
+                let done = item.is_err();
+                self.send(T::from_result(item)).await?;
+                if done {
+                    return Ok(());
+                };
+            }
+            self.send(T::done()).await
+        }
+    }
+
+    pub trait IrpcReceiverFutExt<T: StreamItem> {
+        /// Collects the receiver returned by this future into a collection,
+        /// provided that we get a receiver and draining the receiver does not
+        /// produce any error items.
+        ///
+        /// The collection must implement Default and Extend<T::Item>.
+        /// Note that using this with a very large stream might use a lot of memory.
+        fn try_collect<C, E>(self) -> impl Future<Output = std::result::Result<C, E>>
+        where
+            C: Default + Extend<T::Item>,
+            E: From<StreamError<T::Error>>;
+
+        /// Converts the receiver returned by this future into a stream of items,
+        /// where each item is either a successful item or an error.
+        ///
+        /// There will be at most one error item, which will terminate the stream.
+        /// If the future returns an error, the stream will yield that error as the
+        /// first item and then terminate.
+        fn into_stream<E>(self) -> impl Stream<Item = std::result::Result<T::Item, E>>
+        where
+            E: From<StreamError<T::Error>>;
+    }
+
+    impl<T, F> IrpcReceiverFutExt<T> for F
+    where
+        T: StreamItem,
+        F: Future<Output = std::result::Result<mpsc::Receiver<T>, crate::Error>>,
+    {
+        async fn try_collect<C, E>(self) -> std::result::Result<C, E>
+        where
+            C: Default + Extend<T::Item>,
+            E: From<StreamError<T::Error>>,
+        {
+            let mut items = C::default();
+            let mut stream = self.into_stream::<E>();
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(i) => items.extend(Some(i)),
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(items)
+        }
+
+        fn into_stream<E>(self) -> impl Stream<Item = std::result::Result<T::Item, E>>
+        where
+            E: From<StreamError<T::Error>>,
+        {
+            enum State<S, T> {
+                Init(S),
+                Receiving(mpsc::Receiver<T>),
+                Done,
+            }
+            fn eof() -> RecvError {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of stream").into()
+            }
+            async fn process_recv<S, T, E>(
+                mut rx: mpsc::Receiver<T>,
+            ) -> Option<(std::result::Result<T::Item, E>, State<S, T>)>
+            where
+                T: StreamItem,
+                E: From<StreamError<T::Error>>,
+            {
+                match rx.recv().await {
+                    Ok(Some(item)) => match item.into_result_opt()? {
+                        Ok(i) => Some((Ok(i), State::Receiving(rx))),
+                        Err(e) => Some((Err(E::from(StreamError::Remote(e))), State::Done)),
+                    },
+                    Ok(None) => Some((Err(E::from(StreamError::from(eof()))), State::Done)),
+                    Err(e) => Some((Err(E::from(StreamError::from(e))), State::Done)),
+                }
+            }
+            Box::pin(stream::unfold(State::Init(self), |state| async move {
+                match state {
+                    State::Init(fut) => match fut.await {
+                        Ok(rx) => process_recv(rx).await,
+                        Err(e) => Some((Err(E::from(StreamError::from(e))), State::Done)),
+                    },
+                    State::Receiving(rx) => process_recv(rx).await,
+                    State::Done => None,
+                }
+            }))
+        }
+    }
+}
+
+#[cfg(all(feature = "derive", feature = "stream"))]
+#[cfg_attr(quicrpc_docsrs, doc(cfg(all(feature = "derive", feature = "stream"))))]
+pub use irpc_derive::StreamItem;
+#[cfg(feature = "stream")]
+#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "stream")))]
+pub use stream_item::{
+    IrpcReceiverFutExt, Item, MpscSenderExt, Progress, StreamItem, StreamReceiver, StreamSender,
+};

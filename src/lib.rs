@@ -87,8 +87,11 @@ use channel::{mpsc, none::NoSender, oneshot};
 ///
 /// Basic usage example:
 /// ```
-/// use serde::{Serialize, Deserialize};
-/// use irpc::{rpc_requests, channel::{oneshot, mpsc}};
+/// use irpc::{
+///     channel::{mpsc, oneshot},
+///     rpc_requests,
+/// };
+/// use serde::{Deserialize, Serialize};
 ///
 /// #[rpc_requests(message = ComputeMessage)]
 /// #[derive(Debug, Serialize, Deserialize)]
@@ -155,8 +158,11 @@ use channel::{mpsc, none::NoSender, oneshot};
 ///
 /// With `wrap`:
 /// ```
-/// use serde::{Serialize, Deserialize};
-/// use irpc::{rpc_requests, channel::{oneshot, mpsc}, Client};
+/// use irpc::{
+///     channel::{mpsc, oneshot},
+///     rpc_requests, Client,
+/// };
+/// use serde::{Deserialize, Serialize};
 ///
 /// #[rpc_requests(message = StoreMessage)]
 /// #[derive(Debug, Serialize, Deserialize)]
@@ -164,11 +170,16 @@ use channel::{mpsc, none::NoSender, oneshot};
 ///     #[rpc(wrap=GetRequest, tx=oneshot::Sender<String>)]
 ///     Get(String),
 ///     #[rpc(wrap=SetRequest, tx=oneshot::Sender<()>)]
-///     Set { key: String, value: String }
+///     Set { key: String, value: String },
 /// }
 ///
 /// async fn client_usage(client: Client<StoreProtocol>) -> anyhow::Result<()> {
-///     client.rpc(SetRequest { key: "foo".to_string(), value: "bar".to_string() }).await?;
+///     client
+///         .rpc(SetRequest {
+///             key: "foo".to_string(),
+///             value: "bar".to_string(),
+///         })
+///         .await?;
 ///     let value = client.rpc(GetRequest("foo".to_string())).await?;
 ///     Ok(())
 /// }
@@ -192,7 +203,6 @@ use channel::{mpsc, none::NoSender, oneshot};
 #[cfg(feature = "derive")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
 pub use irpc_derive::rpc_requests;
-
 use sealed::Sealed;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -1274,6 +1284,11 @@ pub mod rpc {
     };
 
     use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
+    /// This is used by irpc-derive to refer to quinn types (SendStream and RecvStream)
+    /// to make generated code work for users without having to depend on quinn directly
+    /// (i.e. when using iroh).
+    #[doc(hidden)]
+    pub use quinn;
     use quinn::ConnectionError;
     use serde::de::DeserializeOwned;
     use smallvec::SmallVec;
@@ -1288,12 +1303,6 @@ pub mod rpc {
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
         LocalSender, RequestError, RpcMessage, Service,
     };
-
-    /// This is used by irpc-derive to refer to quinn types (SendStream and RecvStream)
-    /// to make generated code work for users without having to depend on quinn directly
-    /// (i.e. when using iroh).
-    #[doc(hidden)]
-    pub use quinn;
 
     /// Default max message size (16 MiB).
     pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
