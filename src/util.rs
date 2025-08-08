@@ -465,13 +465,22 @@ mod stream_item {
         RpcMessage,
     };
 
+    /// Type alias for a [`mpsc::Sender`] of [`Item`]s.
     pub type StreamSender<T, E> = mpsc::Sender<Item<T, E>>;
+
+    /// Type alias for a [`mpsc::Receiver`] of [`Item`]s.
     pub type StreamReceiver<T, E> = mpsc::Receiver<Item<T, E>>;
 
+    /// The error type returned from fallible irpc stream extension methods.
+    ///
+    /// This is an enum with two variants: one for transport errors, and one
+    /// for errors returned from the remote service.
     #[derive(thiserror::Error, Debug)]
     pub enum StreamError<E: std::error::Error> {
+        /// Transport error.
         #[error(transparent)]
         Transport(#[from] crate::Error),
+        /// Error returned from the remote service.
         #[error(transparent)]
         Remote(E),
     }
@@ -484,6 +493,17 @@ mod stream_item {
 
     pub type StreamResult<T, E> = std::result::Result<T, StreamError<E>>;
 
+    /// Wrapper for server-streaming RPC calls that return a stream of items.
+    ///
+    /// This struct wraps the future returned from [`crate::Client::server_streaming`]
+    /// if the response channel is a stream of [`Item`].
+    ///
+    /// The [`Progress`] implements [`IntoFuture`], so it can be `await`ed directly
+    /// without further chaining. It will then `try_collect` all items into a collection,
+    /// as specified by the `C` generic on this struct.
+    ///
+    /// The [`Progress`] can also be turned into a stream of individual items by calling
+    /// [`Progress::into_stream`].
     pub struct Progress<
         T: RpcMessage,
         E: RpcMessage + std::error::Error,
@@ -527,10 +547,25 @@ mod stream_item {
         }
     }
 
+    /// A fallible stream item.
+    ///
+    /// This is an enum with three variants, `Ok`, `Err`, and `Done`.
+    ///
+    /// It can be used as the item type for `mpsc` channels to force an explicit end of stream marker.
+    /// It implements [`StreamItem`] and throught that the use of [`MpscSenderExt`], [`IrpcReceiverFutExt`],
+    /// and [`Progress`].
     #[derive(Debug, Serialize, Deserialize, Clone)]
     pub enum Item<T, E> {
+        /// The stream item.
         Ok(T),
+        /// The error case.
+        ///
+        /// No futher messages may be sent afterwards.
         Err(E),
+        /// The end-of-stream marker.
+        ///
+        /// Send this as the last message to gracefully terminate a stream.
+        /// No further messages may be sent afterwards.
         Done,
     }
 
