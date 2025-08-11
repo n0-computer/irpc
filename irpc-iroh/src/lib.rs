@@ -20,6 +20,7 @@ use n0_future::{boxed::BoxFuture, TryFutureExt};
 use serde::de::DeserializeOwned;
 use tracing::{trace, trace_span, warn, Instrument};
 
+/// Returns a client that connects to a irpc service using an [`iroh::Endpoint`].
 pub fn client<S: irpc::Service>(
     endpoint: iroh::Endpoint,
     addr: impl Into<iroh::NodeAddr>,

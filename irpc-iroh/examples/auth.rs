@@ -73,10 +73,9 @@ mod storage {
     };
     use irpc::{
         channel::{mpsc, oneshot},
-        Client, WithChannels,
+        rpc_requests, Client, WithChannels,
     };
     // Import the macro
-    use irpc_derive::rpc_requests;
     use irpc_iroh::{read_request, IrohRemoteConnection};
     use serde::{Deserialize, Serialize};
     use tracing::info;
