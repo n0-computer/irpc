@@ -1096,7 +1096,7 @@ impl<S: Service> Client<S> {
         Res: RpcMessage,
     {
         let request = self.request();
-        async move { Ok(request.await?.rpc(msg).await?) }
+        async move { request.await?.rpc(msg).await }
     }
 
     /// Performs a request for which the server returns a mpsc receiver.
@@ -1113,10 +1113,10 @@ impl<S: Service> Client<S> {
     {
         let request = self.request();
         async move {
-            Ok(request
+            request
                 .await?
                 .server_streaming(msg, local_response_cap)
-                .await?)
+                .await
         }
     }
 
@@ -1134,12 +1134,7 @@ impl<S: Service> Client<S> {
         Res: RpcMessage,
     {
         let request = self.request();
-        async move {
-            Ok(request
-                .await?
-                .client_streaming(msg, local_update_cap)
-                .await?)
-        }
+        async move { request.await?.client_streaming(msg, local_update_cap).await }
     }
 
     /// Performs a request for which the client can send updates, and the server returns a mpsc receiver.
@@ -1158,10 +1153,10 @@ impl<S: Service> Client<S> {
     {
         let request = self.request();
         async move {
-            Ok(request
+            request
                 .await?
                 .bidi_streaming(msg, local_update_cap, local_response_cap)
-                .await?)
+                .await
         }
     }
 
@@ -1175,7 +1170,7 @@ impl<S: Service> Client<S> {
         Req: Channels<S, Tx = NoSender, Rx = NoReceiver>,
     {
         let request = self.request();
-        async move { Ok(request.await?.notify(msg).await?) }
+        async move { request.await?.notify(msg).await }
     }
 }
 
@@ -1938,7 +1933,7 @@ pub enum Request<S: Service> {
     #[cfg(feature = "rpc")]
     Remote(crate::rpc::RemoteSender<S>),
     #[cfg(not(feature = "rpc"))]
-    Remote,
+    Remote(()),
 }
 
 impl<S: Service> Request<S> {
@@ -1948,7 +1943,7 @@ impl<S: Service> Request<S> {
             #[cfg(feature = "rpc")]
             Self::Remote(s) => s.is_new_connection(),
             #[cfg(not(feature = "rpc"))]
-            Self::Remote => false,
+            Self::Remote(()) => false,
         }
     }
 
