@@ -1060,21 +1060,19 @@ impl<S: Service> Client<S> {
     #[allow(clippy::type_complexity)]
     pub fn request(
         &self,
-    ) -> impl Future<
-        Output = result::Result<Request<LocalSender<S>, rpc::RemoteSender<S>>, RequestError>,
-    > + 'static {
+    ) -> impl Future<Output = result::Result<Request<S>, RequestError>> + 'static {
         #[cfg(feature = "rpc")]
         {
             let cloned = match &self.0 {
-                ClientInner::Local(tx) => Request::Local(tx.clone()),
-                ClientInner::Remote(connection) => Request::Remote(connection.clone_boxed()),
+                ClientInner::Local(tx) => Either::Local(tx.clone()),
+                ClientInner::Remote(connection) => Either::Remote(connection.clone_boxed()),
             };
             async move {
                 match cloned {
-                    Request::Local(tx) => Ok(Request::Local(tx.into())),
-                    Request::Remote(conn) => {
-                        let (send, recv) = conn.open_bi().await?;
-                        Ok(Request::Remote(rpc::RemoteSender::new(send, recv)))
+                    Either::Local(tx) => Ok(Request::Local(tx.into())),
+                    Either::Remote(conn) => {
+                        let remote_streams = conn.open_bi().await?;
+                        Ok(Request::Remote(rpc::RemoteSender::new(remote_streams)))
                     }
                 }
             }
@@ -1098,24 +1096,7 @@ impl<S: Service> Client<S> {
         Res: RpcMessage,
     {
         let request = self.request();
-        async move {
-            let recv: oneshot::Receiver<Res> = match request.await? {
-                Request::Local(request) => {
-                    let (tx, rx) = oneshot::channel();
-                    request.send((msg, tx)).await?;
-                    rx
-                }
-                #[cfg(not(feature = "rpc"))]
-                Request::Remote(_request) => unreachable!(),
-                #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
-                    let (_tx, rx) = request.write(msg).await?;
-                    rx.into()
-                }
-            };
-            let res = recv.await?;
-            Ok(res)
-        }
+        async move { request.await?.rpc(msg).await }
     }
 
     /// Performs a request for which the server returns a mpsc receiver.
@@ -1132,21 +1113,10 @@ impl<S: Service> Client<S> {
     {
         let request = self.request();
         async move {
-            let recv: mpsc::Receiver<Res> = match request.await? {
-                Request::Local(request) => {
-                    let (tx, rx) = mpsc::channel(local_response_cap);
-                    request.send((msg, tx)).await?;
-                    rx
-                }
-                #[cfg(not(feature = "rpc"))]
-                Request::Remote(_request) => unreachable!(),
-                #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
-                    let (_tx, rx) = request.write(msg).await?;
-                    rx.into()
-                }
-            };
-            Ok(recv)
+            request
+                .await?
+                .server_streaming(msg, local_response_cap)
+                .await
         }
     }
 
@@ -1164,25 +1134,7 @@ impl<S: Service> Client<S> {
         Res: RpcMessage,
     {
         let request = self.request();
-        async move {
-            let (update_tx, res_rx): (mpsc::Sender<Update>, oneshot::Receiver<Res>) =
-                match request.await? {
-                    Request::Local(request) => {
-                        let (req_tx, req_rx) = mpsc::channel(local_update_cap);
-                        let (res_tx, res_rx) = oneshot::channel();
-                        request.send((msg, res_tx, req_rx)).await?;
-                        (req_tx, res_rx)
-                    }
-                    #[cfg(not(feature = "rpc"))]
-                    Request::Remote(_request) => unreachable!(),
-                    #[cfg(feature = "rpc")]
-                    Request::Remote(request) => {
-                        let (tx, rx) = request.write(msg).await?;
-                        (tx.into(), rx.into())
-                    }
-                };
-            Ok((update_tx, res_rx))
-        }
+        async move { request.await?.client_streaming(msg, local_update_cap).await }
     }
 
     /// Performs a request for which the client can send updates, and the server returns a mpsc receiver.
@@ -1201,23 +1153,10 @@ impl<S: Service> Client<S> {
     {
         let request = self.request();
         async move {
-            let (update_tx, res_rx): (mpsc::Sender<Update>, mpsc::Receiver<Res>) =
-                match request.await? {
-                    Request::Local(request) => {
-                        let (update_tx, update_rx) = mpsc::channel(local_update_cap);
-                        let (res_tx, res_rx) = mpsc::channel(local_response_cap);
-                        request.send((msg, res_tx, update_rx)).await?;
-                        (update_tx, res_rx)
-                    }
-                    #[cfg(not(feature = "rpc"))]
-                    Request::Remote(_request) => unreachable!(),
-                    #[cfg(feature = "rpc")]
-                    Request::Remote(request) => {
-                        let (tx, rx) = request.write(msg).await?;
-                        (tx.into(), rx.into())
-                    }
-                };
-            Ok((update_tx, res_rx))
+            request
+                .await?
+                .bidi_streaming(msg, local_update_cap, local_response_cap)
+                .await
         }
     }
 
@@ -1231,20 +1170,7 @@ impl<S: Service> Client<S> {
         Req: Channels<S, Tx = NoSender, Rx = NoReceiver>,
     {
         let request = self.request();
-        async move {
-            match request.await? {
-                Request::Local(request) => {
-                    request.send((msg,)).await?;
-                }
-                #[cfg(not(feature = "rpc"))]
-                Request::Remote(_request) => unreachable!(),
-                #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
-                    let (_tx, _rx) = request.write(msg).await?;
-                }
-            };
-            Ok(())
-        }
+        async move { request.await?.notify(msg).await }
     }
 }
 
@@ -1466,9 +1392,31 @@ pub mod rpc {
         fn clone_boxed(&self) -> Box<dyn RemoteConnection>;
 
         /// Open a bidirectional stream to the remote service.
-        fn open_bi(
-            &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
+        fn open_bi(&self) -> BoxFuture<std::result::Result<RemoteStreams, RequestError>>;
+    }
+
+    #[derive(Debug)]
+    pub struct RemoteStreams {
+        pub send: quinn::SendStream,
+        pub recv: quinn::RecvStream,
+        pub is_new_connection: bool,
+    }
+
+    impl RemoteStreams {
+        pub fn with_reused(pair: (quinn::SendStream, quinn::RecvStream)) -> Self {
+            Self {
+                send: pair.0,
+                recv: pair.1,
+                is_new_connection: false,
+            }
+        }
+        pub fn with_new(pair: (quinn::SendStream, quinn::RecvStream)) -> Self {
+            Self {
+                send: pair.0,
+                recv: pair.1,
+                is_new_connection: true,
+            }
+        }
     }
 
     /// A connection to a remote service.
@@ -1500,28 +1448,30 @@ pub mod rpc {
             Box::new(self.clone())
         }
 
-        fn open_bi(
-            &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
-        {
+        fn open_bi(&self) -> BoxFuture<std::result::Result<RemoteStreams, RequestError>> {
             let this = self.0.clone();
             Box::pin(async move {
                 let mut guard = this.connection.lock().await;
-                let pair = match guard.as_mut() {
+                let streams = match guard.as_mut() {
                     Some(conn) => {
                         // try to reuse the connection
                         match conn.open_bi().await {
-                            Ok(pair) => pair,
+                            Ok(pair) => RemoteStreams::with_reused(pair),
                             Err(_) => {
                                 // try with a new connection, just once
                                 *guard = None;
-                                connect_and_open_bi(&this.endpoint, &this.addr, guard).await?
+                                let pair =
+                                    connect_and_open_bi(&this.endpoint, &this.addr, guard).await?;
+                                RemoteStreams::with_new(pair)
                             }
                         }
                     }
-                    None => connect_and_open_bi(&this.endpoint, &this.addr, guard).await?,
+                    None => {
+                        let pair = connect_and_open_bi(&this.endpoint, &this.addr, guard).await?;
+                        RemoteStreams::with_new(pair)
+                    }
                 };
-                Ok(pair)
+                Ok(streams)
             })
         }
     }
@@ -1539,22 +1489,22 @@ pub mod rpc {
 
     /// A connection to a remote service that can be used to send the initial message.
     #[derive(Debug)]
-    pub struct RemoteSender<S>(
-        quinn::SendStream,
-        quinn::RecvStream,
-        std::marker::PhantomData<S>,
-    );
+    pub struct RemoteSender<S>(RemoteStreams, std::marker::PhantomData<S>);
 
     impl<S: Service> RemoteSender<S> {
-        pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
-            Self(send, recv, PhantomData)
+        pub fn new(remote_streams: RemoteStreams) -> Self {
+            Self(remote_streams, PhantomData)
+        }
+
+        pub fn is_new_connection(&self) -> bool {
+            self.0.is_new_connection
         }
 
         pub async fn write(
             self,
             msg: impl Into<S>,
         ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
-            let RemoteSender(mut send, recv, _) = self;
+            let RemoteStreams { mut send, recv, .. } = self.0;
             let msg = msg.into();
             if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
                 return Err(WriteError::MaxMessageSizeExceeded);
@@ -1970,13 +1920,173 @@ pub mod rpc {
     }
 }
 
-/// A request to a service. This can be either local or remote.
-#[derive(Debug)]
-pub enum Request<L, R> {
-    /// Local in memory request
+pub enum Either<L, R> {
     Local(L),
-    /// Remote cross process request
     Remote(R),
+}
+
+/// A request to a service. This can be either local or remote.
+pub enum Request<S: Service> {
+    /// Local in memory request
+    Local(LocalSender<S>),
+    /// Remote cross process request
+    #[cfg(feature = "rpc")]
+    Remote(crate::rpc::RemoteSender<S>),
+    #[cfg(not(feature = "rpc"))]
+    Remote(()),
+}
+
+impl<S: Service> Request<S> {
+    pub fn is_new_connection(&self) -> bool {
+        match self {
+            Self::Local(_) => false,
+            #[cfg(feature = "rpc")]
+            Self::Remote(s) => s.is_new_connection(),
+            #[cfg(not(feature = "rpc"))]
+            Self::Remote(()) => false,
+        }
+    }
+
+    /// Performs a request for which the server returns a oneshot receiver.
+    pub async fn rpc<Req, Res>(self, msg: Req) -> Result<Res>
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = NoReceiver>,
+        Res: RpcMessage,
+    {
+        let recv: oneshot::Receiver<Res> = match self {
+            Request::Local(request) => {
+                let (tx, rx) = oneshot::channel();
+                request.send((msg, tx)).await?;
+                rx
+            }
+            #[cfg(not(feature = "rpc"))]
+            Request::Remote(_request) => unreachable!(),
+            #[cfg(feature = "rpc")]
+            Request::Remote(request) => {
+                let (_tx, rx) = request.write(msg).await?;
+                rx.into()
+            }
+        };
+        let res = recv.await?;
+        Ok(res)
+    }
+
+    /// Performs a request for which the server returns a mpsc receiver.
+    pub async fn server_streaming<Req, Res>(
+        self,
+        msg: Req,
+        local_response_cap: usize,
+    ) -> Result<mpsc::Receiver<Res>>
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = NoReceiver>,
+        Res: RpcMessage,
+    {
+        let recv: mpsc::Receiver<Res> = match self {
+            Request::Local(request) => {
+                let (tx, rx) = mpsc::channel(local_response_cap);
+                request.send((msg, tx)).await?;
+                rx
+            }
+            #[cfg(not(feature = "rpc"))]
+            Request::Remote(_request) => unreachable!(),
+            #[cfg(feature = "rpc")]
+            Request::Remote(request) => {
+                let (_tx, rx) = request.write(msg).await?;
+                rx.into()
+            }
+        };
+        Ok(recv)
+    }
+
+    /// Performs a request for which the client can send updates.
+    pub async fn client_streaming<Req, Update, Res>(
+        self,
+        msg: Req,
+        local_update_cap: usize,
+    ) -> Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = mpsc::Receiver<Update>>,
+        Update: RpcMessage,
+        Res: RpcMessage,
+    {
+        let (update_tx, res_rx): (mpsc::Sender<Update>, oneshot::Receiver<Res>) = match self {
+            Request::Local(request) => {
+                let (req_tx, req_rx) = mpsc::channel(local_update_cap);
+                let (res_tx, res_rx) = oneshot::channel();
+                request.send((msg, res_tx, req_rx)).await?;
+                (req_tx, res_rx)
+            }
+            #[cfg(not(feature = "rpc"))]
+            Request::Remote(_request) => unreachable!(),
+            #[cfg(feature = "rpc")]
+            Request::Remote(request) => {
+                let (tx, rx) = request.write(msg).await?;
+                (tx.into(), rx.into())
+            }
+        };
+        Ok((update_tx, res_rx))
+    }
+
+    /// Performs a request for which the client can send updates, and the server returns a mpsc receiver.
+    pub async fn bidi_streaming<Req, Update, Res>(
+        self,
+        msg: Req,
+        local_update_cap: usize,
+        local_response_cap: usize,
+    ) -> Result<(mpsc::Sender<Update>, mpsc::Receiver<Res>)>
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = mpsc::Receiver<Update>>,
+        Update: RpcMessage,
+        Res: RpcMessage,
+    {
+        let (update_tx, res_rx): (mpsc::Sender<Update>, mpsc::Receiver<Res>) = match self {
+            Request::Local(request) => {
+                let (update_tx, update_rx) = mpsc::channel(local_update_cap);
+                let (res_tx, res_rx) = mpsc::channel(local_response_cap);
+                request.send((msg, res_tx, update_rx)).await?;
+                (update_tx, res_rx)
+            }
+            #[cfg(not(feature = "rpc"))]
+            Request::Remote(_request) => unreachable!(),
+            #[cfg(feature = "rpc")]
+            Request::Remote(request) => {
+                let (tx, rx) = request.write(msg).await?;
+                (tx.into(), rx.into())
+            }
+        };
+        Ok((update_tx, res_rx))
+    }
+
+    /// Performs a request for which the server returns nothing.
+    ///
+    /// The returned future completes once the message is sent.
+    pub async fn notify<Req>(self, msg: Req) -> Result<()>
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = NoSender, Rx = NoReceiver>,
+    {
+        match self {
+            Request::Local(request) => {
+                request.send((msg,)).await?;
+            }
+            #[cfg(not(feature = "rpc"))]
+            Request::Remote(_request) => unreachable!(),
+            #[cfg(feature = "rpc")]
+            Request::Remote(request) => {
+                let (_tx, _rx) = request.write(msg).await?;
+            }
+        };
+        Ok(())
+    }
 }
 
 impl<S: Service> LocalSender<S> {
