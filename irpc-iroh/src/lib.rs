@@ -10,8 +10,8 @@ use iroh::{
 use irpc::{
     channel::RecvError,
     rpc::{
-        Handler, RemoteConnection, RemoteService, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
-        MAX_MESSAGE_SIZE,
+        Handler, RemoteConnection, RemoteService, RemoteStreams,
+        ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, MAX_MESSAGE_SIZE,
     },
     util::AsyncReadVarintExt,
     LocalSender, RequestError,
@@ -60,7 +60,7 @@ impl RemoteConnection for IrohRemoteConnection {
         Box::new(self.clone())
     }
 
-    fn open_bi(&self) -> BoxFuture<std::result::Result<(SendStream, RecvStream), RequestError>> {
+    fn open_bi(&self) -> BoxFuture<std::result::Result<RemoteStreams, RequestError>> {
         let this = self.0.clone();
         Box::pin(async move {
             let mut guard = this.connection.lock().await;
@@ -68,19 +68,24 @@ impl RemoteConnection for IrohRemoteConnection {
                 Some(conn) => {
                     // try to reuse the connection
                     match conn.open_bi().await {
-                        Ok(pair) => pair,
+                        Ok(pair) => RemoteStreams::with_reused(pair),
                         Err(_) => {
                             // try with a new connection, just once
                             *guard = None;
-                            connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
-                                .await
-                                .map_err(RequestError::Other)?
+                            let pair =
+                                connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
+                                    .await
+                                    .map_err(RequestError::Other)?;
+                            RemoteStreams::with_new(pair)
                         }
                     }
                 }
-                None => connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
-                    .await
-                    .map_err(RequestError::Other)?,
+                None => {
+                    let pair = connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
+                        .await
+                        .map_err(RequestError::Other)?;
+                    RemoteStreams::with_new(pair)
+                }
             };
             Ok(pair)
         })
