@@ -1287,6 +1287,7 @@ impl<S: Service> Client<S> {
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
+                    // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, _rx) = request.write_raw(&buf).await?;
                     if !zero_rtt_accepted.await {
@@ -1331,6 +1332,7 @@ impl<S: Service> Client<S> {
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
+                    // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, rx) = request.write_raw(&buf).await?;
                     if zero_rtt_accepted.await {
@@ -1381,6 +1383,7 @@ impl<S: Service> Client<S> {
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
+                    // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, rx) = request.write_raw(&buf).await?;
                     if zero_rtt_accepted.await {
