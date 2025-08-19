@@ -1763,6 +1763,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-util",
  "getrandom 0.3.3",
  "iroh",
  "irpc",
