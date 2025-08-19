@@ -153,15 +153,6 @@
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
-use serde::{de::DeserializeOwned, Serialize};
-
-use self::channel::{
-    mpsc,
-    none::{NoReceiver, NoSender},
-    oneshot,
-};
-use self::sealed::Sealed;
-
 /// Processes an RPC request enum and generates trait implementations for use with `irpc`.
 ///
 /// This attribute macro may be applied to an enum where each variant represents
@@ -170,8 +161,11 @@ use self::sealed::Sealed;
 ///
 /// Basic usage example:
 /// ```
-/// use serde::{Serialize, Deserialize};
-/// use irpc::{rpc_requests, channel::{oneshot, mpsc}};
+/// use irpc::{
+///     channel::{mpsc, oneshot},
+///     rpc_requests,
+/// };
+/// use serde::{Deserialize, Serialize};
 ///
 /// #[rpc_requests(message = ComputeMessage)]
 /// #[derive(Debug, Serialize, Deserialize)]
@@ -252,8 +246,11 @@ use self::sealed::Sealed;
 ///
 /// With `wrap`:
 /// ```
-/// use serde::{Serialize, Deserialize};
-/// use irpc::{rpc_requests, channel::{oneshot, mpsc}, Client};
+/// use irpc::{
+///     channel::{mpsc, oneshot},
+///     rpc_requests, Client,
+/// };
+/// use serde::{Deserialize, Serialize};
 ///
 /// #[rpc_requests(message = StoreMessage)]
 /// #[derive(Debug, Serialize, Deserialize)]
@@ -266,11 +263,16 @@ use self::sealed::Sealed;
 ///     /// Doc comment for `SetRequest`.
 ///     #[rpc(tx=oneshot::Sender<()>)]
 ///     #[wrap(SetRequest)]
-///     Set { key: String, value: String }
+///     Set { key: String, value: String },
 /// }
 ///
 /// async fn client_usage(client: Client<StoreProtocol>) -> anyhow::Result<()> {
-///     client.rpc(SetRequest { key: "foo".to_string(), value: "bar".to_string() }).await?;
+///     client
+///         .rpc(SetRequest {
+///             key: "foo".to_string(),
+///             value: "bar".to_string(),
+///         })
+///         .await?;
 ///     let value = client.rpc(GetRequest("foo".to_string())).await?;
 ///     Ok(())
 /// }
@@ -293,6 +295,16 @@ use self::sealed::Sealed;
 #[cfg(feature = "derive")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
 pub use irpc_derive::rpc_requests;
+use serde::{de::DeserializeOwned, Serialize};
+
+use self::{
+    channel::{
+        mpsc,
+        none::{NoReceiver, NoSender},
+        oneshot,
+    },
+    sealed::Sealed,
+};
 
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
@@ -1246,6 +1258,147 @@ impl<S: Service> Client<S> {
             Ok(())
         }
     }
+
+    /// Performs a request for which the server returns nothing.
+    ///
+    /// The returned future completes once the message is sent.
+    ///
+    /// Compared to [Self::notify], this variant takes a future that returns true
+    /// if 0rtt has been accepted. If not, the data is sent again via the same
+    /// remote channel. For local requests, the future is ignored.
+    pub fn notify_0rtt<Req>(
+        &self,
+        msg: Req,
+        zero_rtt_accepted: impl Future<Output = bool> + Send + 'static,
+    ) -> impl Future<Output = Result<()>> + Send + 'static
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = NoSender, Rx = NoReceiver>,
+    {
+        let this = self.clone();
+        async move {
+            match this.request().await? {
+                Request::Local(request) => {
+                    request.send((msg,)).await?;
+                    zero_rtt_accepted.await;
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_request) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let buf = rpc::prepare_write::<S>(msg)?;
+                    let (_tx, _rx) = request.write_raw(&buf).await?;
+                    if !zero_rtt_accepted.await {
+                        // 0rtt was not accepted, the data is lost, send it again!
+                        let Request::Remote(request) = this.request().await? else {
+                            unreachable!()
+                        };
+                        let (_tx, _rx) = request.write_raw(&buf).await?;
+                    }
+                }
+            };
+            Ok(())
+        }
+    }
+
+    /// Performs a request for which the server returns a oneshot receiver.
+    ///
+    /// Compared to [Self::rpc], this variant takes a future that returns true
+    /// if 0rtt has been accepted. If not, the data is sent again via the same
+    /// remote channel. For local requests, the future is ignored.
+    pub fn rpc_0rtt<Req, Res>(
+        &self,
+        msg: Req,
+        zero_rtt_accepted: impl Future<Output = bool> + Send + 'static,
+    ) -> impl Future<Output = Result<Res>> + Send + 'static
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = NoReceiver>,
+        Res: RpcMessage,
+    {
+        let this = self.clone();
+        async move {
+            let recv: oneshot::Receiver<Res> = match this.request().await? {
+                Request::Local(request) => {
+                    let (tx, rx) = oneshot::channel();
+                    request.send((msg, tx)).await?;
+                    zero_rtt_accepted.await;
+                    rx
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_request) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let buf = rpc::prepare_write::<S>(msg)?;
+                    let (_tx, rx) = request.write_raw(&buf).await?;
+                    if zero_rtt_accepted.await {
+                        rx
+                    } else {
+                        // 0rtt was not accepted, the data is lost, send it again!
+                        let Request::Remote(request) = this.request().await? else {
+                            unreachable!()
+                        };
+                        let (_tx, rx) = request.write_raw(&buf).await?;
+                        rx
+                    }
+                    .into()
+                }
+            };
+            let res = recv.await?;
+            Ok(res)
+        }
+    }
+
+    /// Performs a request for which the server returns a mpsc receiver.
+    ///
+    /// Compared to [Self::server_streaming], this variant takes a future that returns true
+    /// if 0rtt has been accepted. If not, the data is sent again via the same
+    /// remote channel. For local requests, the future is ignored.
+    pub fn server_streaming_0rtt<Req, Res>(
+        &self,
+        msg: Req,
+        local_response_cap: usize,
+        zero_rtt_accepted: impl Future<Output = bool> + Send + 'static,
+    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = NoReceiver>,
+        Res: RpcMessage,
+    {
+        let this = self.clone();
+        async move {
+            let recv: mpsc::Receiver<Res> = match this.request().await? {
+                Request::Local(request) => {
+                    let (tx, rx) = mpsc::channel(local_response_cap);
+                    request.send((msg, tx)).await?;
+                    zero_rtt_accepted.await;
+                    rx
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_request) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(request) => {
+                    let buf = rpc::prepare_write::<S>(msg)?;
+                    let (_tx, rx) = request.write_raw(&buf).await?;
+                    if zero_rtt_accepted.await {
+                        rx
+                    } else {
+                        // 0rtt was not accepted, the data is lost, send it again!
+                        let Request::Remote(request) = this.request().await? else {
+                            unreachable!()
+                        };
+                        let (_tx, rx) = request.write_raw(&buf).await?;
+                        rx
+                    }
+                    .into()
+                }
+            };
+            Ok(recv)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1370,6 +1523,11 @@ pub mod rpc {
     };
 
     use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
+    /// This is used by irpc-derive to refer to quinn types (SendStream and RecvStream)
+    /// to make generated code work for users without having to depend on quinn directly
+    /// (i.e. when using iroh).
+    #[doc(hidden)]
+    pub use quinn;
     use quinn::ConnectionError;
     use serde::de::DeserializeOwned;
     use smallvec::SmallVec;
@@ -1384,12 +1542,6 @@ pub mod rpc {
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
         LocalSender, RequestError, RpcMessage, Service,
     };
-
-    /// This is used by irpc-derive to refer to quinn types (SendStream and RecvStream)
-    /// to make generated code work for users without having to depend on quinn directly
-    /// (i.e. when using iroh).
-    #[doc(hidden)]
-    pub use quinn;
 
     /// Default max message size (16 MiB).
     pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
@@ -1545,6 +1697,18 @@ pub mod rpc {
         std::marker::PhantomData<S>,
     );
 
+    pub(crate) fn prepare_write<S: Service>(
+        msg: impl Into<S>,
+    ) -> std::result::Result<SmallVec<[u8; 128]>, WriteError> {
+        let msg = msg.into();
+        if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
+            return Err(WriteError::MaxMessageSizeExceeded);
+        }
+        let mut buf = SmallVec::<[u8; 128]>::new();
+        buf.write_length_prefixed(&msg)?;
+        Ok(buf)
+    }
+
     impl<S: Service> RemoteSender<S> {
         pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
             Self(send, recv, PhantomData)
@@ -1554,14 +1718,16 @@ pub mod rpc {
             self,
             msg: impl Into<S>,
         ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
+            let buf = prepare_write(msg)?;
+            self.write_raw(&buf).await
+        }
+
+        pub(crate) async fn write_raw(
+            self,
+            buf: &[u8],
+        ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
             let RemoteSender(mut send, recv, _) = self;
-            let msg = msg.into();
-            if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
-                return Err(WriteError::MaxMessageSizeExceeded);
-            }
-            let mut buf = SmallVec::<[u8; 128]>::new();
-            buf.write_length_prefixed(msg)?;
-            send.write_all(&buf).await?;
+            send.write_all(buf).await?;
             Ok((send, recv))
         }
     }
