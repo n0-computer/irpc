@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
     let args = cli::Args::parse();
     match args {
-        cli::Args::Listen { use_0rtt } => {
+        cli::Args::Listen { no_0rtt } => {
             let (server_router, server_addr) = {
                 let secret_key = get_or_generate_secret_key()?;
                 let endpoint = Endpoint::builder().secret_key(secret_key).bind().await?;
@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
                 let addr = endpoint.node_addr().initialized().await;
                 let api = EchoApi::spawn();
                 let router = Router::builder(endpoint.clone());
-                let router = if use_0rtt {
+                let router = if !no_0rtt {
                     router.accept(EchoApi::ALPN, api.expose_0rtt()?)
                 } else {
                     router.accept(EchoApi::ALPN, api.expose()?)
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
                 (router, addr)
             };
             println!("NodeId: {}", server_addr.node_id);
-            println!("Accepting 0rtt connections: {}", use_0rtt);
+            println!("Accepting 0rtt connections: {}", !no_0rtt);
             let ticket = NodeTicket::from(server_addr);
             println!("Connect using:\n\ncargo run --example 0rtt connect {ticket}\n");
             println!("Control-C to stop");
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
             ticket,
             n,
             delay_ms,
-            use_0rtt,
+            no_0rtt,
             wait_for_ticket,
         } => {
             let n = n
@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
             let endpoint = Endpoint::builder().bind().await?;
             let addr: NodeAddr = ticket.into();
             for i in 0..n {
-                if use_0rtt {
+                if !no_0rtt {
                     let api = EchoApi::connect_0rtt(endpoint.clone(), addr.clone()).await?;
                     let msg = i.to_be_bytes();
                     let t0 = Instant::now();
@@ -123,15 +123,15 @@ mod cli {
     #[derive(Debug, Parser)]
     pub enum Args {
         Listen {
-            #[clap(long, default_value = "true")]
-            use_0rtt: bool,
+            #[clap(long)]
+            no_0rtt: bool,
         },
         Connect {
             ticket: NodeTicket,
             #[clap(short)]
             n: Option<usize>,
-            #[clap(long, default_value = "true")]
-            use_0rtt: bool,
+            #[clap(long)]
+            no_0rtt: bool,
             #[clap(long, default_value = "1000")]
             delay_ms: u64,
             #[clap(long, default_value = "false")]
