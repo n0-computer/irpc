@@ -49,6 +49,9 @@ async fn main() -> Result<()> {
             no_0rtt,
             wait_for_ticket,
         } => {
+            if !no_0rtt && !wait_for_ticket {
+                eprintln!("0-RTT is enabled but wait_for_ticket is not set. After 2 requests with 0rtt the 0rtt resumption tickets will be consumed and a connection will be done without 0rtt.");
+            }
             let n = n
                 .iter()
                 .filter_map(|x| u64::try_from(*x).ok())
