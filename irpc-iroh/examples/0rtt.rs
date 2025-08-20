@@ -133,7 +133,6 @@ async fn ping_one(
     let node_id = addr.node_id;
     let t0 = Instant::now();
     if !no_0rtt {
-        println!("Connecting to {} with 0-RTT", addr.node_id);
         let api = EchoApi::connect_0rtt(endpoint.clone(), addr.clone()).await?;
         ping_one_0rtt(api, &endpoint, node_id, wait_for_ticket, i, t0).await?;
     } else {
@@ -265,7 +264,7 @@ mod ping {
                 .context("failed to connect to remote service")?;
             match connecting.into_0rtt() {
                 Ok((conn, zero_rtt_accepted)) => {
-                    println!("0-RTT possible from our side");
+                    info!("0-RTT possible from our side");
                     let fut: future::Boxed<bool> = Box::pin(zero_rtt_accepted);
                     Ok(EchoApi {
                         inner: Client::boxed(IrohConnection(conn)),
@@ -273,7 +272,7 @@ mod ping {
                     })
                 }
                 Err(connecting) => {
-                    println!("0-RTT not possible from our side");
+                    info!("0-RTT not possible from our side");
                     let fut: future::Boxed<bool> = Box::pin(async { true });
                     let conn = connecting.await?;
                     Ok(EchoApi {

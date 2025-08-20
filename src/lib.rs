@@ -1336,11 +1336,9 @@ impl<S: Service> Client<S> {
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, rx) = request.write_raw(&buf).await?;
                     if zero_rtt_accepted.await {
-                        println!("0-RTT accepted");
                         rx
                     } else {
                         // 0rtt was not accepted, the data is lost, send it again!
-                        println!("0-RTT not accepted");
                         let Request::Remote(request) = this.request().await? else {
                             unreachable!()
                         };
