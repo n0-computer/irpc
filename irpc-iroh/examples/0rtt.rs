@@ -137,10 +137,10 @@ async fn ping_one(
     let t0 = Instant::now();
     if !no_0rtt {
         let api = EchoApi::connect_0rtt(endpoint.clone(), addr.clone()).await?;
-        ping_one_0rtt(api, &endpoint, node_id, wait_for_ticket, i, t0).await?;
+        ping_one_0rtt(api, endpoint, node_id, wait_for_ticket, i, t0).await?;
     } else {
         let api = EchoApi::connect(endpoint.clone(), addr.clone()).await?;
-        ping_one_no_0rtt(api, &endpoint, node_id, i, t0).await?;
+        ping_one_no_0rtt(api, endpoint, node_id, i, t0).await?;
     }
     Ok(())
 }
