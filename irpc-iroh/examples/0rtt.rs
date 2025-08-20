@@ -1,54 +1,114 @@
+use std::{env::Args, time::Instant, usize};
+
 use anyhow::Result;
-use iroh::{protocol::Router, Endpoint, Watcher};
+use clap::Parser;
+use iroh::{protocol::Router, Endpoint, NodeAddr, Watcher};
+use iroh_base::ticket::NodeTicket;
 use ping::EchoApi;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // tracing_subscriber::fmt().init();
-    println!("Local use");
-    local().await?;
-    println!("Remote use");
-    remote().await?;
-    Ok(())
-}
-
-async fn local() -> Result<()> {
-    let api = EchoApi::spawn();
-    let res = api.echo(b"hello".to_vec()).await?;
-    println!("value = {}", String::from_utf8_lossy(&res));
-    Ok(())
-}
-
-async fn remote() -> Result<()> {
-    let (server_router, server_addr) = {
-        let endpoint = Endpoint::builder().discovery_n0().bind().await?;
-        let api = EchoApi::spawn();
-        let router = Router::builder(endpoint.clone())
-            .accept(EchoApi::ALPN, api.expose_0rtt()?)
-            .spawn();
-        let addr = endpoint.node_addr().initialized().await;
-        (router, addr)
-    };
-
-    let client_endpoint = Endpoint::builder().bind().await?;
-    for i in 0..10 {
-        let api = EchoApi::connect(client_endpoint.clone(), server_addr.clone()).await?;
-        let res = api.echo_0rtt(b"hello".to_vec()).await?;
-        println!("value = {}", String::from_utf8_lossy(&res));
+    tracing_subscriber::fmt().init();
+    let args = cli::Args::parse();
+    match args {
+        cli::Args::Listen { use_0rtt } => {
+            let (server_router, server_addr) = {
+                let endpoint = Endpoint::builder().bind().await?;
+                endpoint.home_relay().initialized().await;
+                let addr = endpoint.node_addr().initialized().await;
+                let api = EchoApi::spawn();
+                let router = Router::builder(endpoint.clone());
+                let router = if use_0rtt {
+                    router.accept(EchoApi::ALPN, api.expose_0rtt()?)
+                } else {
+                    router.accept(EchoApi::ALPN, api.expose()?)
+                };
+                let router = router.spawn();
+                (router, addr)
+            };
+            println!("NodeId: {}", server_addr.node_id);
+            println!("Accepting 0rtt connections: {}", use_0rtt);
+            let ticket = NodeTicket::from(server_addr);
+            println!("Connect using:\n\ncargo run --example 0rtt connect {ticket}\n");
+            println!("Control-C to stop");
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to listen for ctrl_c");
+            server_router.shutdown().await?;
+        }
+        cli::Args::Connect {
+            ticket,
+            n,
+            delay_ms,
+            use_0rtt,
+        } => {
+            let n = n
+                .iter()
+                .filter_map(|x| u64::try_from(*x).ok())
+                .next()
+                .unwrap_or(u64::MAX);
+            let delay = std::time::Duration::from_millis(delay_ms);
+            let endpoint = Endpoint::builder().bind().await?;
+            let addr: NodeAddr = ticket.into();
+            for i in 0..n {
+                if use_0rtt {
+                    let api = EchoApi::connect_0rtt(endpoint.clone(), addr.clone()).await?;
+                    let msg = i.to_be_bytes();
+                    let t0 = Instant::now();
+                    let res = api.echo_0rtt(msg.to_vec()).await;
+                    drop(api);
+                    match res {
+                        Ok(data) => {
+                            let elapsed = t0.elapsed();
+                            assert!(data == msg);
+                            println!("{}ms", elapsed.as_micros() as f64 / 1000.0);
+                        }
+                        Err(err) => {
+                            eprintln!("RPC error: {err}");
+                        }
+                    }
+                    tokio::time::sleep(delay).await;
+                } else {
+                }
+            }
+        }
     }
-    drop(server_router);
     Ok(())
+}
+
+mod cli {
+    use anyhow::Result;
+    use clap::Parser;
+    use iroh::NodeId;
+    use iroh_base::ticket::NodeTicket;
+
+    #[derive(Debug, Parser)]
+    pub enum Args {
+        Listen {
+            #[clap(long, default_value = "true")]
+            use_0rtt: bool,
+        },
+        Connect {
+            ticket: NodeTicket,
+            #[clap(short)]
+            n: Option<usize>,
+            #[clap(long, default_value = "true")]
+            use_0rtt: bool,
+            #[clap(long, default_value = "1000")]
+            delay_ms: u64,
+        },
+    }
 }
 
 mod ping {
     use anyhow::{Context, Result};
     use futures_util::FutureExt;
     use iroh::{
-        endpoint::{Connection, RecvStream, SendStream, ZeroRttAccepted},
+        endpoint::{Connection, RecvStream, SendStream},
         Endpoint,
     };
     use irpc::{channel::oneshot, rpc::RemoteService, rpc_requests, Client, WithChannels};
-    use irpc_iroh::{Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection};
+    use irpc_iroh::{Iroh0RttProtocol, IrohProtocol};
     use n0_future::future;
     use serde::{Deserialize, Serialize};
     use tracing::info;
@@ -95,7 +155,22 @@ mod ping {
             Ok(IrohProtocol::new(EchoProtocol::remote_handler(local)))
         }
 
-        pub async fn connect(
+        // pub async fn connect(
+        //     endpoint: Endpoint,
+        //     addr: impl Into<iroh::NodeAddr>,
+        // ) -> Result<EchoApi> {
+        //     let conn = endpoint
+        //         .connect(addr, Self::ALPN)
+        //         .await
+        //         .context("failed to connect to remote service")?;
+        //     let fut: future::Boxed<bool> = Box::pin(async { true });
+        //     Ok(EchoApi {
+        //         inner: Client::boxed(IrohConnection(conn)),
+        //         zero_rtt_accepted: fut.shared(),
+        //     })
+        // }
+
+        pub async fn connect_0rtt(
             endpoint: Endpoint,
             addr: impl Into<iroh::NodeAddr>,
         ) -> Result<EchoApi> {

@@ -18,6 +18,7 @@ serde = { workspace = true }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 n0-future = { workspace = true }
 irpc = { version = "0.7.0", path = ".." }
+iroh-base.workspace = true
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
