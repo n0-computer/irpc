@@ -94,7 +94,7 @@ async fn ping_one_0rtt(
     let elapsed = t0.elapsed();
     assert!(data == msg);
     println!(
-        "latency:{}",
+        "latency: {}",
         latency
             .map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
             .unwrap_or("unknown".into())
@@ -117,7 +117,7 @@ async fn ping_one_no_0rtt(
     let elapsed = t0.elapsed();
     assert!(data == msg);
     println!(
-        "latency:{}",
+        "latency: {}",
         latency
             .map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
             .unwrap_or("unknown".into())
