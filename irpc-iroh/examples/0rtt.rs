@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use iroh::{protocol::Router, Endpoint, NodeAddr, SecretKey, Watcher};
+use iroh::{protocol::Router, Endpoint, NodeAddr, NodeId, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use ping::EchoApi;
 use rand::SeedableRng;
@@ -58,42 +58,86 @@ async fn main() -> Result<()> {
             let endpoint = Endpoint::builder().bind().await?;
             let addr: NodeAddr = ticket.into();
             for i in 0..n {
-                if !no_0rtt {
-                    let api = EchoApi::connect_0rtt(endpoint.clone(), addr.clone()).await?;
-                    let msg = i.to_be_bytes();
-                    let t0 = Instant::now();
-                    let res = api.echo_0rtt(msg.to_vec()).await;
-                    let latency = endpoint.remote_info(addr.node_id).and_then(|x| x.latency);
-                    if wait_for_ticket {
-                        tokio::spawn(async move {
-                            let latency = latency.unwrap_or(Duration::from_millis(500));
-                            tokio::time::sleep(latency * 2).await;
-                            drop(api);
-                        });
-                    } else {
-                        drop(api);
-                    }
-                    match res {
-                        Ok(data) => {
-                            let elapsed = t0.elapsed();
-                            assert!(data == msg);
-                            println!(
-                                "latency: {}",
-                                latency
-                                    .map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
-                                    .unwrap_or("unknown".into())
-                            );
-                            println!("{}ms", elapsed.as_micros() as f64 / 1000.0);
-                        }
-                        Err(err) => {
-                            eprintln!("RPC error: {err}");
-                        }
-                    }
-                    tokio::time::sleep(delay).await;
-                } else {
+                if let Err(e) = ping_one(no_0rtt, &endpoint, &addr, i, wait_for_ticket).await {
+                    eprintln!("Error pinging {}: {e}", addr.node_id);
                 }
+                tokio::time::sleep(delay).await;
             }
         }
+    }
+    Ok(())
+}
+
+async fn ping_one_0rtt(
+    api: EchoApi,
+    endpoint: &Endpoint,
+    node_id: NodeId,
+    wait_for_ticket: bool,
+    i: u64,
+) -> Result<()> {
+    let msg = i.to_be_bytes();
+    let t0 = Instant::now();
+    let data = api.echo_0rtt(msg.to_vec()).await?;
+    let latency = endpoint.remote_info(node_id).and_then(|x| x.latency);
+    if wait_for_ticket {
+        tokio::spawn(async move {
+            let latency = latency.unwrap_or(Duration::from_millis(500));
+            tokio::time::sleep(latency * 2).await;
+            drop(api);
+        });
+    } else {
+        drop(api);
+    }
+    let elapsed = t0.elapsed();
+    assert!(data == msg);
+    println!(
+        "latency:{}",
+        latency
+            .map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
+            .unwrap_or("unknown".into())
+    );
+    println!("ping:    {}ms\n", elapsed.as_micros() as f64 / 1000.0);
+    Ok(())
+}
+
+async fn ping_one_no_0rtt(
+    api: EchoApi,
+    endpoint: &Endpoint,
+    node_id: NodeId,
+    i: u64,
+) -> Result<()> {
+    let msg = i.to_be_bytes();
+    let t0 = Instant::now();
+    let data = api.echo(msg.to_vec()).await?;
+    let latency = endpoint.remote_info(node_id).and_then(|x| x.latency);
+    drop(api);
+    let elapsed = t0.elapsed();
+    assert!(data == msg);
+    println!(
+        "latency:{}",
+        latency
+            .map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
+            .unwrap_or("unknown".into())
+    );
+    println!("ping:    {}ms\n", elapsed.as_micros() as f64 / 1000.0);
+    Ok(())
+}
+
+async fn ping_one(
+    no_0rtt: bool,
+    endpoint: &Endpoint,
+    addr: &NodeAddr,
+    i: u64,
+    wait_for_ticket: bool,
+) -> Result<()> {
+    let node_id = addr.node_id;
+    if !no_0rtt {
+        println!("Connecting to {} with 0-RTT", addr.node_id);
+        let api = EchoApi::connect_0rtt(endpoint.clone(), addr.clone()).await?;
+        ping_one_0rtt(api, &endpoint, node_id, wait_for_ticket, i).await?;
+    } else {
+        let api = EchoApi::connect(endpoint.clone(), addr.clone()).await?;
+        ping_one_no_0rtt(api, &endpoint, node_id, i).await?;
     }
     Ok(())
 }
@@ -195,20 +239,20 @@ mod ping {
             Ok(IrohProtocol::new(EchoProtocol::remote_handler(local)))
         }
 
-        // pub async fn connect(
-        //     endpoint: Endpoint,
-        //     addr: impl Into<iroh::NodeAddr>,
-        // ) -> Result<EchoApi> {
-        //     let conn = endpoint
-        //         .connect(addr, Self::ALPN)
-        //         .await
-        //         .context("failed to connect to remote service")?;
-        //     let fut: future::Boxed<bool> = Box::pin(async { true });
-        //     Ok(EchoApi {
-        //         inner: Client::boxed(IrohConnection(conn)),
-        //         zero_rtt_accepted: fut.shared(),
-        //     })
-        // }
+        pub async fn connect(
+            endpoint: Endpoint,
+            addr: impl Into<iroh::NodeAddr>,
+        ) -> Result<EchoApi> {
+            let conn = endpoint
+                .connect(addr, Self::ALPN)
+                .await
+                .context("failed to connect to remote service")?;
+            let fut: future::Boxed<bool> = Box::pin(async { true });
+            Ok(EchoApi {
+                inner: Client::boxed(IrohConnection(conn)),
+                zero_rtt_accepted: fut.shared(),
+            })
+        }
 
         pub async fn connect_0rtt(
             endpoint: Endpoint,
