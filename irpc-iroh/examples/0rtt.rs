@@ -1,10 +1,15 @@
-use std::{env::Args, time::Instant, usize};
+use std::{
+    env,
+    str::FromStr,
+    time::{Duration, Instant},
+};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use iroh::{protocol::Router, Endpoint, NodeAddr, Watcher};
+use iroh::{protocol::Router, Endpoint, NodeAddr, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use ping::EchoApi;
+use rand::SeedableRng;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -13,7 +18,8 @@ async fn main() -> Result<()> {
     match args {
         cli::Args::Listen { use_0rtt } => {
             let (server_router, server_addr) = {
-                let endpoint = Endpoint::builder().bind().await?;
+                let secret_key = get_or_generate_secret_key()?;
+                let endpoint = Endpoint::builder().secret_key(secret_key).bind().await?;
                 endpoint.home_relay().initialized().await;
                 let addr = endpoint.node_addr().initialized().await;
                 let api = EchoApi::spawn();
@@ -41,6 +47,7 @@ async fn main() -> Result<()> {
             n,
             delay_ms,
             use_0rtt,
+            wait_for_ticket,
         } => {
             let n = n
                 .iter()
@@ -56,11 +63,26 @@ async fn main() -> Result<()> {
                     let msg = i.to_be_bytes();
                     let t0 = Instant::now();
                     let res = api.echo_0rtt(msg.to_vec()).await;
-                    drop(api);
+                    let latency = endpoint.remote_info(addr.node_id).and_then(|x| x.latency);
+                    if wait_for_ticket {
+                        tokio::spawn(async move {
+                            let latency = latency.unwrap_or(Duration::from_millis(500));
+                            tokio::time::sleep(latency * 2).await;
+                            drop(api);
+                        });
+                    } else {
+                        drop(api);
+                    }
                     match res {
                         Ok(data) => {
                             let elapsed = t0.elapsed();
                             assert!(data == msg);
+                            println!(
+                                "latency: {}",
+                                latency
+                                    .map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
+                                    .unwrap_or("unknown".into())
+                            );
                             println!("{}ms", elapsed.as_micros() as f64 / 1000.0);
                         }
                         Err(err) => {
@@ -76,10 +98,26 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Gets a secret key from the IROH_SECRET environment variable or generates a new random one.
+/// If the environment variable is set, it must be a valid string representation of a secret key.
+pub fn get_or_generate_secret_key() -> Result<SecretKey> {
+    if let Ok(secret) = env::var("IROH_SECRET") {
+        // Parse the secret key from string
+        SecretKey::from_str(&secret).context("Invalid secret key format")
+    } else {
+        // Generate a new random key
+        let secret_key = SecretKey::generate(&mut rand::rngs::StdRng::from_entropy());
+        println!(
+            "Generated new secret key: {}",
+            hex::encode(secret_key.to_bytes())
+        );
+        println!("To reuse this key, set the IROH_SECRET environment variable to this value");
+        Ok(secret_key)
+    }
+}
+
 mod cli {
-    use anyhow::Result;
     use clap::Parser;
-    use iroh::NodeId;
     use iroh_base::ticket::NodeTicket;
 
     #[derive(Debug, Parser)]
@@ -96,6 +134,8 @@ mod cli {
             use_0rtt: bool,
             #[clap(long, default_value = "1000")]
             delay_ms: u64,
+            #[clap(long, default_value = "false")]
+            wait_for_ticket: bool,
         },
     }
 }

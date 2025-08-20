@@ -29,3 +29,5 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 irpc-derive = { version = "0.5.0", path = "../irpc-derive" }
 clap = { version = "4.5.41", features = ["derive"] }
 futures-util.workspace = true
+hex = "0.4.3"
+rand = "0.8.5"
