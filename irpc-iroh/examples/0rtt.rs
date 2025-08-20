@@ -74,9 +74,9 @@ async fn ping_one_0rtt(
     node_id: NodeId,
     wait_for_ticket: bool,
     i: u64,
+    t0: Instant,
 ) -> Result<()> {
     let msg = i.to_be_bytes();
-    let t0 = Instant::now();
     let data = api.echo_0rtt(msg.to_vec()).await?;
     let latency = endpoint.remote_info(node_id).and_then(|x| x.latency);
     if wait_for_ticket {
@@ -105,9 +105,9 @@ async fn ping_one_no_0rtt(
     endpoint: &Endpoint,
     node_id: NodeId,
     i: u64,
+    t0: Instant,
 ) -> Result<()> {
     let msg = i.to_be_bytes();
-    let t0 = Instant::now();
     let data = api.echo(msg.to_vec()).await?;
     let latency = endpoint.remote_info(node_id).and_then(|x| x.latency);
     drop(api);
@@ -131,13 +131,14 @@ async fn ping_one(
     wait_for_ticket: bool,
 ) -> Result<()> {
     let node_id = addr.node_id;
+    let t0 = Instant::now();
     if !no_0rtt {
         println!("Connecting to {} with 0-RTT", addr.node_id);
         let api = EchoApi::connect_0rtt(endpoint.clone(), addr.clone()).await?;
-        ping_one_0rtt(api, &endpoint, node_id, wait_for_ticket, i).await?;
+        ping_one_0rtt(api, &endpoint, node_id, wait_for_ticket, i, t0).await?;
     } else {
         let api = EchoApi::connect(endpoint.clone(), addr.clone()).await?;
-        ping_one_no_0rtt(api, &endpoint, node_id, i).await?;
+        ping_one_no_0rtt(api, &endpoint, node_id, i, t0).await?;
     }
     Ok(())
 }
