@@ -4,7 +4,7 @@ use std::{
 };
 
 use iroh::{
-    endpoint::{Connection, ConnectionError, RecvStream, SendStream},
+    endpoint::{Connecting, Connection, ConnectionError, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler},
 };
 use irpc::{
@@ -132,6 +132,62 @@ impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
 }
 
 impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
+    fn accept(
+        &self,
+        connection: Connection,
+    ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
+        let handler = self.handler.clone();
+        let request_id = self
+            .request_id
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let fut = handle_connection(connection, handler).map_err(AcceptError::from_err);
+        let span = trace_span!("rpc", id = request_id);
+        Box::pin(fut.instrument(span))
+    }
+}
+
+/// A [`ProtocolHandler`] for an irpc protocol that supports 0rtt connections.
+///
+/// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
+///
+/// For details about when it is safe to use 0rtt, see https://www.iroh.computer/blog/0rtt-api
+pub struct Iroh0RttProtocol<R> {
+    handler: Handler<R>,
+    request_id: AtomicU64,
+}
+
+impl<T> fmt::Debug for Iroh0RttProtocol<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RpcProtocol")
+    }
+}
+
+impl<R: DeserializeOwned + Send + 'static> Iroh0RttProtocol<R> {
+    pub fn with_sender(local_sender: impl Into<LocalSender<R>>) -> Self
+    where
+        R: RemoteService,
+    {
+        let handler = R::remote_handler(local_sender.into());
+        Self::new(handler)
+    }
+
+    /// Creates a new [`Iroh0RttProtocol`] for the `handler`.
+    pub fn new(handler: Handler<R>) -> Self {
+        Self {
+            handler,
+            request_id: Default::default(),
+        }
+    }
+}
+
+impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for Iroh0RttProtocol<R> {
+    async fn on_connecting(&self, connecting: Connecting) -> Result<Connection, AcceptError> {
+        let (conn, _zero_rtt_accepted) = connecting
+            .into_0rtt()
+            .expect("accept into 0.5 RTT always succeeds");
+        Ok(conn)
+    }
+
     fn accept(
         &self,
         connection: Connection,

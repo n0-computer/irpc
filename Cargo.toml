@@ -105,5 +105,6 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.1.2", default-features = false }
 tracing-subscriber = { version = "0.3.19" }
 iroh = { version = "0.91" }
+iroh-base = { version = "0.91" }
 quinn = { package = "iroh-quinn", version = "0.14.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
