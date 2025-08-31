@@ -1508,7 +1508,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "0.91.2"
-source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#4231b41295adf62c3b47bc2346ade6d3e96841fb"
+source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#c93a98787daf609ab16020759777080c9fe88bd1"
 dependencies = [
  "aead",
  "backon",
@@ -1568,7 +1568,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.91.2"
-source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#4231b41295adf62c3b47bc2346ade6d3e96841fb"
+source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#c93a98787daf609ab16020759777080c9fe88bd1"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1666,7 +1666,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.91.2"
-source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#4231b41295adf62c3b47bc2346ade6d3e96841fb"
+source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#c93a98787daf609ab16020759777080c9fe88bd1"
 dependencies = [
  "blake3",
  "bytes",
