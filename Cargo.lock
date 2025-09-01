@@ -307,10 +307,11 @@ checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
 name = "cc"
-version = "1.2.34"
+version = "1.2.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42bc4aea80032b7bf409b0bc7ccad88853858911b7713a8062fdc0623867bedc"
+checksum = "590f9024a68a8c40351881787f1934dc11afd69090f5edb6831464694d836ea3"
 dependencies = [
+ "find-msvc-tools",
  "shlex",
 ]
 
@@ -622,9 +623,9 @@ dependencies = [
 
 [[package]]
 name = "deranged"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75d7cc94194b4dd0fa12845ef8c911101b7f37633cda14997a6e82099aa0b693"
+checksum = "d630bccd429a5bb5a64b5e94f693bfc48c9f8566418fda4c494cc94f911f87cc"
 dependencies = [
  "powerfmt",
 ]
@@ -818,6 +819,12 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "find-msvc-tools"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e178e4fba8a2726903f6ba98a6d221e76f9c12c650d5dc0e6afdc50677b49650"
 
 [[package]]
 name = "fnv"
@@ -1508,7 +1515,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "0.91.2"
-source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#c93a98787daf609ab16020759777080c9fe88bd1"
+source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#be38c51a05ba04f34134a46ce5c841c91b10eb13"
 dependencies = [
  "aead",
  "backon",
@@ -1568,7 +1575,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.91.2"
-source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#c93a98787daf609ab16020759777080c9fe88bd1"
+source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#be38c51a05ba04f34134a46ce5c841c91b10eb13"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1666,7 +1673,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.91.2"
-source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#c93a98787daf609ab16020759777080c9fe88bd1"
+source = "git+https://github.com/n0-computer/iroh?branch=arqu/nat_probes#be38c51a05ba04f34134a46ce5c841c91b10eb13"
 dependencies = [
  "blake3",
  "bytes",
