@@ -712,7 +712,7 @@ pub mod channel {
             /// then the sender will be closed and further sends will return an [`SendError::Io`]
             /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
             /// future until completion if you want to reuse the sender or any clone afterwards.
-            pub async fn try_send(&mut self, value: T) -> std::result::Result<bool, SendError> {
+            pub async fn try_send(&self, value: T) -> std::result::Result<bool, SendError> {
                 match self {
                     Sender::Tokio(tx) => match tx.try_send(value) {
                         Ok(()) => Ok(true),
