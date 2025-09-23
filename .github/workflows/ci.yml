@@ -116,12 +116,13 @@ jobs:
       - name: Install wasm-tools
         uses: bytecodealliance/actions/wasm-tools/setup@v1
       - name: wasm32 build
-        run: cargo build --target wasm32-unknown-unknown
+        run: cargo build --target wasm32-unknown-unknown --all
       # If the Wasm file contains any 'import "env"' declarations, then
       # some non-Wasm-compatible code made it into the final code.
-      - name: Ensure no 'import "env"' in iroh-relay Wasm
+      - name: Ensure no 'import "env"' in wasm
         run: |
           ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/irpc.wasm | grep 'import "env"'
+          ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/irpc_iroh.wasm | grep 'import "env"'
 
   # Checks correct runtime deps and features are requested by not including dev-dependencies.
   check-deps:
