@@ -9,6 +9,9 @@ license = "Apache-2.0/MIT"
 repository = "https://github.com/n0-computer/irpc"
 description = "Iroh transport for irpc"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 anyhow = { workspace = true }
 iroh = { workspace = true }

@@ -16,7 +16,7 @@ use irpc::{
     util::AsyncReadVarintExt,
     LocalSender, RequestError,
 };
-use n0_future::{boxed::BoxFuture, TryFutureExt};
+use n0_future::{future::Boxed as BoxFuture, TryFutureExt};
 use serde::de::DeserializeOwned;
 use tracing::{trace, trace_span, warn, Instrument};
 
