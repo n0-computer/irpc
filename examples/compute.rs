@@ -448,7 +448,7 @@ pub async fn reference_bench(n: u64) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt::init();
     println!("Local use");
     local().await?;
     println!("Remote use");
