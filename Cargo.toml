@@ -18,8 +18,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # we require serde even in non-rpc mode
 serde = { workspace = true }
-# just for the oneshot and mpsc queues
-tokio = { workspace = true, features = ["sync"] }
+# just for the oneshot and mpsc queues, and tokio::select!
+tokio = { workspace = true, features = ["sync", "macros"] }
 # for PollSender (which for some reason is not available in the main tokio api)
 tokio-util = { version = "0.7.14", default-features = false }
 # errors

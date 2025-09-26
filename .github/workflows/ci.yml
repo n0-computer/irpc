@@ -24,6 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: swatinem/rust-cache@v2
       - name: cargo fmt
         run: cargo fmt --all -- --check
