@@ -5,7 +5,7 @@
 #[cfg(feature = "quinn_endpoint_setup")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "quinn_endpoint_setup")))]
 mod quinn_setup_utils {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use anyhow::Result;
     use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, ServerConfig};
@@ -31,7 +31,11 @@ mod quinn_setup_utils {
         let quic_client_config =
             quinn::crypto::rustls::QuicClientConfig::try_from(crypto_client_config)?;
 
-        Ok(ClientConfig::new(Arc::new(quic_client_config)))
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config.keep_alive_interval(Some(Duration::from_secs(1)));
+        let mut client_config = ClientConfig::new(Arc::new(quic_client_config));
+        client_config.transport_config(Arc::new(transport_config));
+        Ok(client_config)
     }
 
     /// Create a quinn server config with a self-signed certificate
