@@ -5,7 +5,7 @@ use self::storage::StorageApi;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt::init();
     println!("Local use");
     local().await?;
     println!("Remote use");

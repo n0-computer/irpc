@@ -18,7 +18,7 @@ use irpc::{
 };
 use n0_future::{future::Boxed as BoxFuture, TryFutureExt};
 use serde::de::DeserializeOwned;
-use tracing::{trace, trace_span, warn, Instrument};
+use tracing::{debug, error_span, trace, trace_span, warn, Instrument};
 
 /// Returns a client that connects to a irpc service using an [`iroh::Endpoint`].
 pub fn client<S: irpc::Service>(
@@ -207,6 +207,10 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     connection: Connection,
     handler: Handler<R>,
 ) -> io::Result<()> {
+    if let Ok(remote) = connection.remote_node_id() {
+        tracing::Span::current().record("remote", tracing::field::display(remote.fmt_short()));
+    }
+    debug!("connection accepted");
     loop {
         let Some((msg, rx, tx)) = read_request_raw(&connection).await? else {
             return Ok(());
@@ -270,19 +274,32 @@ pub async fn read_request_raw<R: DeserializeOwned + 'static>(
 pub async fn listen<R: DeserializeOwned + 'static>(endpoint: iroh::Endpoint, handler: Handler<R>) {
     let mut request_id = 0u64;
     let mut tasks = n0_future::task::JoinSet::new();
-    while let Some(incoming) = endpoint.accept().await {
+    loop {
+        let incoming = tokio::select! {
+            Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                res.expect("irpc connection task panicked");
+                continue;
+            }
+            incoming = endpoint.accept() => {
+                match incoming {
+                    None => break,
+                    Some(incoming) => incoming
+                }
+            }
+        };
         let handler = handler.clone();
         let fut = async move {
-            let connection = match incoming.await {
-                Ok(connection) => connection,
+            match incoming.await {
+                Ok(connection) => match handle_connection(connection, handler).await {
+                    Err(err) => warn!("connection closed with error: {err:?}"),
+                    Ok(()) => debug!("connection closed"),
+                },
                 Err(cause) => {
-                    warn!("failed to accept connection {cause:?}");
-                    return io::Result::Ok(());
+                    warn!("failed to accept connection: {cause:?}");
                 }
             };
-            handle_connection(connection, handler).await
         };
-        let span = trace_span!("rpc", id = request_id);
+        let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
         tasks.spawn(fut.instrument(span));
         request_id += 1;
     }

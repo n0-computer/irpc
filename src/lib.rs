@@ -1534,7 +1534,7 @@ pub mod rpc {
     use quinn::ConnectionError;
     use serde::de::DeserializeOwned;
     use smallvec::SmallVec;
-    use tracing::{trace, trace_span, warn, Instrument};
+    use tracing::{debug, error_span, trace, warn, Instrument};
 
     use crate::{
         channel::{
@@ -2054,19 +2054,32 @@ pub mod rpc {
     ) {
         let mut request_id = 0u64;
         let mut tasks = JoinSet::new();
-        while let Some(incoming) = endpoint.accept().await {
+        loop {
+            let incoming = tokio::select! {
+                Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                    res.expect("irpc connection task panicked");
+                    continue;
+                }
+                incoming = endpoint.accept() => {
+                    match incoming {
+                        None => break,
+                        Some(incoming) => incoming
+                    }
+                }
+            };
             let handler = handler.clone();
             let fut = async move {
-                let connection = match incoming.await {
-                    Ok(connection) => connection,
+                match incoming.await {
+                    Ok(connection) => match handle_connection(connection, handler).await {
+                        Err(err) => warn!("connection closed with error: {err:?}"),
+                        Ok(()) => debug!("connection closed"),
+                    },
                     Err(cause) => {
-                        warn!("failed to accept connection {cause:?}");
-                        return io::Result::Ok(());
+                        warn!("failed to accept connection: {cause:?}");
                     }
                 };
-                handle_connection(connection, handler).await
             };
-            let span = trace_span!("rpc", id = request_id);
+            let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
             tasks.spawn(fut.instrument(span));
             request_id += 1;
         }
@@ -2077,6 +2090,11 @@ pub mod rpc {
         connection: quinn::Connection,
         handler: Handler<R>,
     ) -> io::Result<()> {
+        tracing::Span::current().record(
+            "remote",
+            tracing::field::display(connection.remote_address()),
+        );
+        debug!("connection accepted");
         loop {
             let Some((msg, rx, tx)) = read_request_raw(&connection).await? else {
                 return Ok(());
