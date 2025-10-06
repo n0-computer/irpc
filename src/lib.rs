@@ -626,7 +626,7 @@ pub mod channel {
             pub fn with_filter<F>(self, f: F) -> Sender<T>
             where
                 F: Fn(&T) -> bool + Send + Sync + 'static,
-                T: RpcMessage,
+                T: Send + Sync + 'static,
             {
                 self.with_filter_map(move |u| if f(&u) { Some(u) } else { None })
             }
@@ -634,8 +634,8 @@ pub mod channel {
             pub fn with_map<U, F>(self, f: F) -> Sender<U>
             where
                 F: Fn(U) -> T + Send + Sync + 'static,
-                U: RpcMessage,
-                T: RpcMessage,
+                U: Send + Sync + 'static,
+                T: Send + Sync + 'static,
             {
                 self.with_filter_map(move |u| Some(f(u)))
             }
@@ -643,8 +643,8 @@ pub mod channel {
             pub fn with_filter_map<U, F>(self, f: F) -> Sender<U>
             where
                 F: Fn(U) -> Option<T> + Send + Sync + 'static,
-                U: RpcMessage,
-                T: RpcMessage,
+                U: Send + Sync + 'static,
+                T: Send + Sync + 'static,
             {
                 let inner: Arc<dyn DynSender<U>> = Arc::new(FilterMapSender {
                     f,
@@ -899,12 +899,7 @@ pub mod channel {
             _p: PhantomData<U>,
         }
 
-        impl<F, T, U> Debug for FilterMapSender<F, T, U>
-        where
-            F: Fn(U) -> Option<T> + Send + Sync + 'static,
-            T: RpcMessage,
-            U: RpcMessage,
-        {
+        impl<F, T, U> Debug for FilterMapSender<F, T, U> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.debug_struct("FilterMapSender").finish_non_exhaustive()
             }
@@ -913,8 +908,8 @@ pub mod channel {
         impl<F, T, U> DynSender<U> for FilterMapSender<F, T, U>
         where
             F: Fn(U) -> Option<T> + Send + Sync + 'static,
-            T: RpcMessage,
-            U: RpcMessage,
+            T: Send + Sync + 'static,
+            U: Send + Sync + 'static,
         {
             fn send(
                 &self,
