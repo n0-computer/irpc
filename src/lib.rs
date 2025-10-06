@@ -597,10 +597,18 @@ pub mod channel {
         /// Single producer, single consumer sender.
         ///
         /// For the local case, this wraps a tokio::sync::mpsc::Sender.
-        #[derive(Clone)]
         pub enum Sender<T> {
             Tokio(tokio::sync::mpsc::Sender<T>),
             Boxed(Arc<dyn DynSender<T>>),
+        }
+
+        impl<T> Clone for Sender<T> {
+            fn clone(&self) -> Self {
+                match self {
+                    Self::Tokio(tx) => Self::Tokio(tx.clone()),
+                    Self::Boxed(inner) => Self::Boxed(inner.clone()),
+                }
+            }
         }
 
         impl<T> Sender<T> {
