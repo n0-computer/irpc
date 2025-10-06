@@ -305,6 +305,7 @@ use self::{
     },
     sealed::Sealed,
 };
+use crate::channel::SendError;
 
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
@@ -1615,7 +1616,7 @@ impl<S: Service> Client<S> {
 
 #[derive(Debug)]
 pub(crate) enum ClientInner<M> {
-    Tokio(tokio::sync::mpsc::Sender<M>),
+    Tokio(crate::channel::mpsc::Sender<M>),
     #[cfg(feature = "rpc")]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     Boxed(Box<dyn rpc::BoxedConnection>),
@@ -1707,7 +1708,7 @@ impl From<RequestError> for io::Error {
 /// [`WithChannels`].
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct LocalSender<S: Service>(tokio::sync::mpsc::Sender<S::Message>);
+pub struct LocalSender<S: Service>(crate::channel::mpsc::Sender<S::Message>);
 
 impl<S: Service> Clone for LocalSender<S> {
     fn clone(&self) -> Self {
@@ -1717,6 +1718,12 @@ impl<S: Service> Clone for LocalSender<S> {
 
 impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for LocalSender<S> {
     fn from(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
+        Self(tx.into())
+    }
+}
+
+impl<S: Service> From<crate::channel::mpsc::Sender<S::Message>> for LocalSender<S> {
+    fn from(tx: crate::channel::mpsc::Sender<S::Message>) -> Self {
         Self(tx)
     }
 }
@@ -2377,77 +2384,24 @@ pub enum Request<L, R> {
 
 impl<S: Service> LocalSender<S> {
     /// Send a message to the service
-    pub fn send<T>(&self, value: impl Into<WithChannels<T, S>>) -> SendFut<S::Message>
+    pub fn send<T>(
+        &self,
+        value: impl Into<WithChannels<T, S>>,
+    ) -> impl Future<Output = std::result::Result<(), SendError>> + Send + 'static
     where
         T: Channels<S>,
         S::Message: From<WithChannels<T, S>>,
     {
         let value: S::Message = value.into().into();
-        SendFut::new(self.0.clone(), value)
+        self.send_raw(value)
     }
 
     /// Send a message to the service without the type conversion magic
-    pub fn send_raw(&self, value: S::Message) -> SendFut<S::Message> {
-        SendFut::new(self.0.clone(), value)
+    pub fn send_raw(
+        &self,
+        value: S::Message,
+    ) -> impl Future<Output = std::result::Result<(), SendError>> + Send + 'static {
+        let x = self.0.clone();
+        async move { x.send(value).await }
     }
 }
-
-mod send_fut {
-    use std::{
-        future::Future,
-        pin::Pin,
-        task::{Context, Poll},
-    };
-
-    use tokio::sync::mpsc::Sender;
-    use tokio_util::sync::PollSender;
-
-    use crate::channel::SendError;
-
-    pub struct SendFut<T: Send> {
-        poll_sender: PollSender<T>,
-        value: Option<T>,
-    }
-
-    impl<T: Send> SendFut<T> {
-        pub fn new(sender: Sender<T>, value: T) -> Self {
-            Self {
-                poll_sender: PollSender::new(sender),
-                value: Some(value),
-            }
-        }
-    }
-
-    impl<T: Send + Unpin> Future for SendFut<T> {
-        type Output = std::result::Result<(), SendError>;
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let this = self.get_mut();
-
-            // Safely extract the value
-            let value = match this.value.take() {
-                Some(v) => v,
-                None => return Poll::Ready(Ok(())), // Already completed
-            };
-
-            // Try to reserve capacity
-            match this.poll_sender.poll_reserve(cx) {
-                Poll::Ready(Ok(())) => {
-                    // Send the item
-                    this.poll_sender.send_item(value).ok();
-                    Poll::Ready(Ok(()))
-                }
-                Poll::Ready(Err(_)) => {
-                    // Channel is closed
-                    Poll::Ready(Err(SendError::ReceiverClosed))
-                }
-                Poll::Pending => {
-                    // Restore the value and wait
-                    this.value = Some(value);
-                    Poll::Pending
-                }
-            }
-        }
-    }
-}
-use send_fut::SendFut;
