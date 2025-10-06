@@ -1250,8 +1250,9 @@ impl<S: Service> Client<S> {
     }
 
     /// Creates a new client from a `tokio::sync::mpsc::Sender`.
-    pub fn local(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
-        tx.into()
+    pub fn local(tx: impl Into<crate::channel::mpsc::Sender<S::Message>>) -> Self {
+        let tx: crate::channel::mpsc::Sender<S::Message> = tx.into();
+        Self(ClientInner::Local(tx), PhantomData)
     }
 
     /// Get the local sender. This is useful if you don't care about remote
