@@ -10,7 +10,7 @@ use iroh::{
 use irpc::{
     channel::RecvError,
     rpc::{
-        Handler, RemoteConnection, RemoteService, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
+        BoxedConnection, Handler, RemoteService, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
         MAX_MESSAGE_SIZE,
     },
     util::AsyncReadVarintExt,
@@ -55,8 +55,8 @@ impl IrohRemoteConnection {
     }
 }
 
-impl RemoteConnection for IrohRemoteConnection {
-    fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
+impl BoxedConnection for IrohRemoteConnection {
+    fn clone_boxed(&self) -> Box<dyn BoxedConnection> {
         Box::new(self.clone())
     }
 

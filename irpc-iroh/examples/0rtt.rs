@@ -327,8 +327,8 @@ mod ping {
     #[derive(Debug, Clone)]
     struct IrohConnection(Connection);
 
-    impl irpc::rpc::RemoteConnection for IrohConnection {
-        fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
+    impl irpc::rpc::BoxedConnection for IrohConnection {
+        fn clone_boxed(&self) -> Box<dyn irpc::rpc::BoxedConnection> {
             Box::new(self.clone())
         }
 
