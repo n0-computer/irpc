@@ -464,6 +464,9 @@ pub mod channel {
                 }
             }
 
+            /// Applies a filter before sending.
+            ///
+            /// Messages that don't pass the filter are dropped.
             pub fn with_filter(self, f: impl Fn(&T) -> bool + Send + Sync + 'static) -> Sender<T>
             where
                 T: Send + Sync + 'static,
@@ -471,6 +474,7 @@ pub mod channel {
                 self.with_filter_map(move |u| if f(&u) { Some(u) } else { None })
             }
 
+            /// Applies a transform before sending.
             pub fn with_map<U, F>(self, f: F) -> Sender<U>
             where
                 F: Fn(U) -> T + Send + Sync + 'static,
@@ -480,6 +484,9 @@ pub mod channel {
                 self.with_filter_map(move |u| Some(f(u)))
             }
 
+            /// Applies a filter and transform before sending.
+            ///
+            /// Messages that don't pass the filter are dropped.
             pub fn with_filter_map<U, F>(self, f: F) -> Sender<U>
             where
                 F: Fn(U) -> Option<T> + Send + Sync + 'static,
@@ -809,7 +816,7 @@ pub mod channel {
             Boxed(Box<dyn DynReceiver<T>>),
         }
 
-        impl<T: Send + Sync + 'static> Receiver<T> {
+        impl<T: Send + 'static> Receiver<T> {
             /// Receive a message
             ///
             /// Returns Ok(None) if the sender has been dropped or the remote end has
@@ -823,21 +830,28 @@ pub mod channel {
                 }
             }
 
+            /// Map messages, transforming them from type T to type U.
             pub fn map<U, F>(self, f: impl Fn(T) -> U + Send + Sync + 'static) -> Receiver<U>
             where
-                T: RpcMessage,
-                U: RpcMessage,
+                T: Send + Sync + 'static,
+                U: Send + Sync + 'static,
             {
                 self.filter_map(move |u| Some(f(u)))
             }
 
+            /// Filter messages, only passing through those for which the predicate returns true.
+            ///
+            /// Messages that don't pass the filter are dropped.
             pub fn filter<F>(self, f: impl Fn(&T) -> bool + Send + Sync + 'static) -> Receiver<T>
             where
-                T: RpcMessage,
+                T: Send + Sync + 'static,
             {
                 self.filter_map(move |u| if f(&u) { Some(u) } else { None })
             }
 
+            /// Filter and map messages, only passing through those for which the function returns Some.
+            ///
+            /// Messages that don't pass the filter are dropped.
             pub fn filter_map<F, U>(self, f: F) -> Receiver<U>
             where
                 T: Send + Sync + 'static,
