@@ -373,7 +373,7 @@ pub mod channel {
         use n0_future::future::Boxed as BoxFuture;
 
         use super::{RecvError, SendError};
-        use crate::{util::FusedOneshotReceiver, RpcMessage};
+        use crate::util::FusedOneshotReceiver;
 
         /// Create a local oneshot sender and receiver pair.
         ///
@@ -465,7 +465,7 @@ pub mod channel {
 
             pub fn with_filter(self, f: impl Fn(&T) -> bool + Send + Sync + 'static) -> Sender<T>
             where
-                T: RpcMessage,
+                T: Send + Sync + 'static,
             {
                 self.with_filter_map(move |u| if f(&u) { Some(u) } else { None })
             }
@@ -473,8 +473,8 @@ pub mod channel {
             pub fn with_map<U, F>(self, f: F) -> Sender<U>
             where
                 F: Fn(U) -> T + Send + Sync + 'static,
-                U: RpcMessage,
-                T: RpcMessage,
+                U: Send + Sync + 'static,
+                T: Send + Sync + 'static,
             {
                 self.with_filter_map(move |u| Some(f(u)))
             }
@@ -482,8 +482,8 @@ pub mod channel {
             pub fn with_filter_map<U, F>(self, f: F) -> Sender<U>
             where
                 F: Fn(U) -> Option<T> + Send + Sync + 'static,
-                U: RpcMessage,
-                T: RpcMessage,
+                U: Send + Sync + 'static,
+                T: Send + Sync + 'static,
             {
                 let inner: BoxedSender<U> = Box::new(move |value| {
                     let opt = f(value);
@@ -800,7 +800,7 @@ pub mod channel {
             Boxed(Box<dyn DynReceiver<T>>),
         }
 
-        impl<T: RpcMessage> Receiver<T> {
+        impl<T: Send + Sync + 'static> Receiver<T> {
             /// Receive a message
             ///
             /// Returns Ok(None) if the sender has been dropped or the remote end has
@@ -831,8 +831,8 @@ pub mod channel {
 
             pub fn filter_map<F, U>(self, f: F) -> Receiver<U>
             where
-                T: RpcMessage,
-                U: RpcMessage,
+                T: Send + Sync + 'static,
+                U: Send + Sync + 'static,
                 F: Fn(T) -> Option<U> + Send + Sync + 'static,
             {
                 let inner: Box<dyn DynReceiver<U>> = Box::new(FilterMapReceiver {
@@ -966,8 +966,8 @@ pub mod channel {
         impl<F, T, U> DynReceiver<U> for FilterMapReceiver<F, T, U>
         where
             F: Fn(T) -> Option<U> + Send + Sync + 'static,
-            T: RpcMessage,
-            U: RpcMessage,
+            T: Send + Sync + 'static,
+            U: Send + Sync + 'static,
         {
             fn recv(
                 &mut self,
