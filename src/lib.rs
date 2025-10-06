@@ -1228,7 +1228,7 @@ impl<S: Service> Clone for Client<S> {
 
 impl<S: Service> From<LocalSender<S>> for Client<S> {
     fn from(tx: LocalSender<S>) -> Self {
-        Self(ClientInner::Tokio(tx.0), PhantomData)
+        Self(ClientInner::Local(tx.0), PhantomData)
     }
 }
 
@@ -1250,8 +1250,8 @@ impl<S: Service> Client<S> {
     /// This is used from crates that want to provide other transports than quinn,
     /// such as the iroh transport.
     #[cfg(feature = "rpc")]
-    pub fn boxed(remote: impl rpc::BoxedConnection) -> Self {
-        Self(ClientInner::Boxed(Box::new(remote)), PhantomData)
+    pub fn boxed(remote: impl rpc::RemoteConnection) -> Self {
+        Self(ClientInner::Remote(Box::new(remote)), PhantomData)
     }
 
     /// Creates a new client from a `tokio::sync::mpsc::Sender`.
@@ -1263,8 +1263,8 @@ impl<S: Service> Client<S> {
     /// requests.
     pub fn as_local(&self) -> Option<LocalSender<S>> {
         match &self.0 {
-            ClientInner::Tokio(tx) => Some(tx.clone().into()),
-            ClientInner::Boxed(..) => None,
+            ClientInner::Local(tx) => Some(tx.clone().into()),
+            ClientInner::Remote(..) => None,
         }
     }
 
@@ -1288,8 +1288,8 @@ impl<S: Service> Client<S> {
         #[cfg(feature = "rpc")]
         {
             let cloned = match &self.0 {
-                ClientInner::Tokio(tx) => Request::Local(tx.clone()),
-                ClientInner::Boxed(connection) => Request::Remote(connection.clone_boxed()),
+                ClientInner::Local(tx) => Request::Local(tx.clone()),
+                ClientInner::Remote(connection) => Request::Remote(connection.clone_boxed()),
             };
             async move {
                 match cloned {
@@ -1303,7 +1303,7 @@ impl<S: Service> Client<S> {
         }
         #[cfg(not(feature = "rpc"))]
         {
-            let ClientInner::Tokio(tx) = &self.0 else {
+            let ClientInner::Local(tx) = &self.0 else {
                 unreachable!()
             };
             let tx = tx.clone().into();
@@ -1616,24 +1616,24 @@ impl<S: Service> Client<S> {
 
 #[derive(Debug)]
 pub(crate) enum ClientInner<M> {
-    Tokio(crate::channel::mpsc::Sender<M>),
+    Local(crate::channel::mpsc::Sender<M>),
     #[cfg(feature = "rpc")]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
-    Boxed(Box<dyn rpc::BoxedConnection>),
+    Remote(Box<dyn rpc::RemoteConnection>),
     #[cfg(not(feature = "rpc"))]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     #[allow(dead_code)]
-    Boxed(PhantomData<M>),
+    Remote(PhantomData<M>),
 }
 
 impl<M> Clone for ClientInner<M> {
     fn clone(&self) -> Self {
         match self {
-            Self::Tokio(tx) => Self::Tokio(tx.clone()),
+            Self::Local(tx) => Self::Local(tx.clone()),
             #[cfg(feature = "rpc")]
-            Self::Boxed(conn) => Self::Boxed(conn.clone_boxed()),
+            Self::Remote(conn) => Self::Remote(conn.clone_boxed()),
             #[cfg(not(feature = "rpc"))]
-            Self::Boxed(_) => unreachable!(),
+            Self::Remote(_) => unreachable!(),
         }
     }
 }
@@ -1832,9 +1832,9 @@ pub mod rpc {
     ///
     /// This is done as a trait instead of an enum, so we don't need an iroh
     /// dependency in the main crate.
-    pub trait BoxedConnection: Send + Sync + Debug + 'static {
+    pub trait RemoteConnection: Send + Sync + Debug + 'static {
         /// Boxed clone so the trait is dynable.
-        fn clone_boxed(&self) -> Box<dyn BoxedConnection>;
+        fn clone_boxed(&self) -> Box<dyn RemoteConnection>;
 
         /// Open a bidirectional stream to the remote service.
         fn open_bi(
@@ -1866,8 +1866,8 @@ pub mod rpc {
         }
     }
 
-    impl BoxedConnection for QuinnRemoteConnection {
-        fn clone_boxed(&self) -> Box<dyn BoxedConnection> {
+    impl RemoteConnection for QuinnRemoteConnection {
+        fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
             Box::new(self.clone())
         }
 
