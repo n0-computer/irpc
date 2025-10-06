@@ -747,7 +747,7 @@ pub mod channel {
             }
         }
 
-        impl<T: RpcMessage> Sender<T> {
+        impl<T: Send + 'static> Sender<T> {
             /// Send a message and yield until either it is sent or an error occurs.
             ///
             /// ## Cancellation safety
