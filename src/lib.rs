@@ -307,6 +307,8 @@ use self::{
 };
 use crate::channel::SendError;
 
+#[cfg(test)]
+mod tests;
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod util;
@@ -831,8 +833,9 @@ pub mod channel {
             }
 
             /// Map messages, transforming them from type T to type U.
-            pub fn map<U, F>(self, f: impl Fn(T) -> U + Send + Sync + 'static) -> Receiver<U>
+            pub fn map<U, F>(self, f: F) -> Receiver<U>
             where
+                F: Fn(T) -> U + Send + Sync + 'static,
                 T: Send + Sync + 'static,
                 U: Send + Sync + 'static,
             {
@@ -842,8 +845,9 @@ pub mod channel {
             /// Filter messages, only passing through those for which the predicate returns true.
             ///
             /// Messages that don't pass the filter are dropped.
-            pub fn filter<F>(self, f: impl Fn(&T) -> bool + Send + Sync + 'static) -> Receiver<T>
+            pub fn filter<F>(self, f: F) -> Receiver<T>
             where
+                F: Fn(&T) -> bool + Send + Sync + 'static,
                 T: Send + Sync + 'static,
             {
                 self.filter_map(move |u| if f(&u) { Some(u) } else { None })
