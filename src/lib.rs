@@ -2015,23 +2015,23 @@ pub mod rpc {
 
     impl<T: DeserializeOwned> From<quinn::RecvStream> for oneshot::Receiver<T> {
         fn from(mut read: quinn::RecvStream) -> Self {
-            let fut =
-                async move {
-                    let size = read.read_varint_u64().await?.ok_or(oneshot::RecvError::Io(
-                        io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"),
-                    ))?;
-                    if size > MAX_MESSAGE_SIZE {
-                        read.stop(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
-                        return Err(oneshot::RecvError::MaxMessageSizeExceeded);
-                    }
-                    let rest = read
-                        .read_to_end(size as usize)
-                        .await
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                    let msg: T = postcard::from_bytes(&rest)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                    Ok(msg)
-                };
+            let fut = async move {
+                let size = read.read_varint_u64().await?.ok_or(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to read size",
+                ))?;
+                if size > MAX_MESSAGE_SIZE {
+                    read.stop(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
+                    return Err(oneshot::RecvError::MaxMessageSizeExceeded);
+                }
+                let rest = read
+                    .read_to_end(size as usize)
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let msg: T = postcard::from_bytes(&rest)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                Ok(msg)
+            };
             oneshot::Receiver::from(|| fut)
         }
     }
