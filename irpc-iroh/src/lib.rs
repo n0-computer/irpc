@@ -8,7 +8,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
 };
 use irpc::{
-    channel::RecvError,
+    channel::oneshot,
     rpc::{
         Handler, RemoteConnection, RemoteService, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
         MAX_MESSAGE_SIZE,
@@ -257,7 +257,7 @@ pub async fn read_request_raw<R: DeserializeOwned + 'static>(
             ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
             b"request exceeded max message size",
         );
-        return Err(RecvError::MaxMessageSizeExceeded.into());
+        return Err(oneshot::RecvError::MaxMessageSizeExceeded.into());
     }
     let mut buf = vec![0; size as usize];
     recv.read_exact(&mut buf)

@@ -3,7 +3,10 @@
 use std::io::{self, ErrorKind};
 
 use irpc::{
-    channel::{oneshot, RecvError, SendError},
+    channel::{
+        oneshot::{self, RecvError},
+        SendError,
+    },
     util::AsyncWriteVarintExt,
 };
 use quinn::Endpoint;

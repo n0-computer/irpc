@@ -371,12 +371,46 @@ pub mod channel {
 
     /// Oneshot channel, similar to tokio's oneshot channel
     pub mod oneshot {
-        use std::{fmt::Debug, future::Future, pin::Pin, task};
+        use std::{fmt::Debug, future::Future, io, pin::Pin, task};
 
         use n0_future::future::Boxed as BoxFuture;
 
-        use super::{RecvError, SendError};
+        use super::SendError;
         use crate::util::FusedOneshotReceiver;
+
+        /// Error when receiving a oneshot or mpsc message. For local communication,
+        /// the only thing that can go wrong is that the sender has been closed.
+        ///
+        /// For rpc communication, there can be any number of errors, so this is a
+        /// generic io error.
+        #[derive(Debug, thiserror::Error)]
+        pub enum RecvError {
+            /// The sender has been closed. This is the only error that can occur
+            /// for local communication.
+            #[error("sender closed")]
+            SenderClosed,
+            /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+            ///
+            /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
+            #[error("maximum message size exceeded")]
+            MaxMessageSizeExceeded,
+            /// An io error occurred. This can occur for remote communication,
+            /// due to a network error or deserialization error.
+            #[error("io error: {0}")]
+            Io(#[from] io::Error),
+        }
+
+        impl From<RecvError> for io::Error {
+            fn from(e: RecvError) -> Self {
+                match e {
+                    RecvError::Io(e) => e,
+                    RecvError::SenderClosed => io::Error::new(io::ErrorKind::BrokenPipe, e),
+                    RecvError::MaxMessageSizeExceeded => {
+                        io::Error::new(io::ErrorKind::InvalidData, e)
+                    }
+                }
+            }
+        }
 
         /// Create a local oneshot sender and receiver pair.
         ///
@@ -586,9 +620,38 @@ pub mod channel {
     ///
     /// For the rpc case, the send side can not be cloned, hence mpsc instead of mpsc.
     pub mod mpsc {
-        use std::{fmt::Debug, future::Future, marker::PhantomData, pin::Pin, sync::Arc};
+        use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::Arc};
 
-        use super::{RecvError, SendError};
+        use super::SendError;
+
+        /// Error when receiving a oneshot or mpsc message. For local communication,
+        /// the only thing that can go wrong is that the sender has been closed.
+        ///
+        /// For rpc communication, there can be any number of errors, so this is a
+        /// generic io error.
+        #[derive(Debug, thiserror::Error)]
+        pub enum RecvError {
+            /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+            ///
+            /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
+            #[error("maximum message size exceeded")]
+            MaxMessageSizeExceeded,
+            /// An io error occurred. This can occur for remote communication,
+            /// due to a network error or deserialization error.
+            #[error("io error: {0}")]
+            Io(#[from] io::Error),
+        }
+
+        impl From<RecvError> for io::Error {
+            fn from(e: RecvError) -> Self {
+                match e {
+                    RecvError::Io(e) => e,
+                    RecvError::MaxMessageSizeExceeded => {
+                        io::Error::new(io::ErrorKind::InvalidData, e)
+                    }
+                }
+            }
+        }
 
         /// Create a local mpsc sender and receiver pair, with the given buffer size.
         ///
@@ -1064,38 +1127,6 @@ pub mod channel {
                 SendError::ReceiverClosed => io::Error::new(io::ErrorKind::BrokenPipe, e),
                 SendError::MaxMessageSizeExceeded => io::Error::new(io::ErrorKind::InvalidData, e),
                 SendError::Io(e) => e,
-            }
-        }
-    }
-
-    /// Error when receiving a oneshot or mpsc message. For local communication,
-    /// the only thing that can go wrong is that the sender has been closed.
-    ///
-    /// For rpc communication, there can be any number of errors, so this is a
-    /// generic io error.
-    #[derive(Debug, thiserror::Error)]
-    pub enum RecvError {
-        /// The sender has been closed. This is the only error that can occur
-        /// for local communication.
-        #[error("sender closed")]
-        SenderClosed,
-        /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
-        ///
-        /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
-        #[error("maximum message size exceeded")]
-        MaxMessageSizeExceeded,
-        /// An io error occurred. This can occur for remote communication,
-        /// due to a network error or deserialization error.
-        #[error("io error: {0}")]
-        Io(#[from] io::Error),
-    }
-
-    impl From<RecvError> for io::Error {
-        fn from(e: RecvError) -> Self {
-            match e {
-                RecvError::Io(e) => e,
-                RecvError::SenderClosed => io::Error::new(io::ErrorKind::BrokenPipe, e),
-                RecvError::MaxMessageSizeExceeded => io::Error::new(io::ErrorKind::InvalidData, e),
             }
         }
     }
@@ -1682,8 +1713,10 @@ pub enum Error {
     Request(#[from] RequestError),
     #[error("send error: {0}")]
     Send(#[from] channel::SendError),
-    #[error("recv error: {0}")]
-    Recv(#[from] channel::RecvError),
+    #[error("mpsc recv error: {0}")]
+    MpscRecv(#[from] channel::mpsc::RecvError),
+    #[error("oneshot recv error: {0}")]
+    OneshotRecv(#[from] channel::oneshot::RecvError),
     #[cfg(feature = "rpc")]
     #[error("recv error: {0}")]
     Write(#[from] rpc::WriteError),
@@ -1697,7 +1730,8 @@ impl From<Error> for io::Error {
         match e {
             Error::Request(e) => e.into(),
             Error::Send(e) => e.into(),
-            Error::Recv(e) => e.into(),
+            Error::MpscRecv(e) => e.into(),
+            Error::OneshotRecv(e) => e.into(),
             #[cfg(feature = "rpc")]
             Error::Write(e) => e.into(),
         }
@@ -1772,7 +1806,7 @@ pub mod rpc {
         channel::{
             mpsc::{self, DynReceiver, DynSender},
             none::NoSender,
-            oneshot, RecvError, SendError,
+            oneshot, SendError,
         },
         util::{now_or_never, AsyncReadVarintExt, WriteVarintExt},
         LocalSender, RequestError, RpcMessage, Service,
@@ -1970,16 +2004,13 @@ pub mod rpc {
     impl<T: DeserializeOwned> From<quinn::RecvStream> for oneshot::Receiver<T> {
         fn from(mut read: quinn::RecvStream) -> Self {
             let fut = async move {
-                let size = read
-                    .read_varint_u64()
-                    .await?
-                    .ok_or(RecvError::Io(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "failed to read size",
-                    )))?;
+                let size = read.read_varint_u64().await?.ok_or(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to read size",
+                ))?;
                 if size > MAX_MESSAGE_SIZE {
                     read.stop(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
-                    return Err(RecvError::MaxMessageSizeExceeded);
+                    return Err(oneshot::RecvError::MaxMessageSizeExceeded);
                 }
                 let rest = read
                     .read_to_end(size as usize)
@@ -2076,7 +2107,12 @@ pub mod rpc {
         fn recv(
             &mut self,
         ) -> Pin<
-            Box<dyn Future<Output = std::result::Result<Option<T>, RecvError>> + Send + Sync + '_>,
+            Box<
+                dyn Future<Output = std::result::Result<Option<T>, mpsc::RecvError>>
+                    + Send
+                    + Sync
+                    + '_,
+            >,
         > {
             Box::pin(async {
                 let read = &mut self.recv;
@@ -2087,7 +2123,7 @@ pub mod rpc {
                     self.recv
                         .stop(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into())
                         .ok();
-                    return Err(RecvError::MaxMessageSizeExceeded);
+                    return Err(mpsc::RecvError::MaxMessageSizeExceeded);
                 }
                 let mut buf = vec![0; size as usize];
                 read.read_exact(&mut buf)
@@ -2375,7 +2411,7 @@ pub mod rpc {
                 ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
                 b"request exceeded max message size",
             );
-            return Err(RecvError::MaxMessageSizeExceeded.into());
+            return Err(mpsc::RecvError::MaxMessageSizeExceeded.into());
         }
         let mut buf = vec![0; size as usize];
         recv.read_exact(&mut buf)
