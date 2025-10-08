@@ -6,10 +6,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use iroh::{protocol::Router, Endpoint, NodeAddr, NodeId, SecretKey, Watcher};
+use iroh::{protocol::Router, Endpoint, NodeAddr, NodeId, SecretKey};
 use iroh_base::ticket::NodeTicket;
 use ping::EchoApi;
-use rand::SeedableRng;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,8 +19,8 @@ async fn main() -> Result<()> {
             let (server_router, server_addr) = {
                 let secret_key = get_or_generate_secret_key()?;
                 let endpoint = Endpoint::builder().secret_key(secret_key).bind().await?;
-                endpoint.home_relay().initialized().await;
-                let addr = endpoint.node_addr().initialized().await;
+                endpoint.online().await;
+                let addr = endpoint.node_addr();
                 let api = EchoApi::spawn();
                 let router = Router::builder(endpoint.clone());
                 let router = if !no_0rtt {
@@ -81,7 +80,7 @@ async fn ping_one_0rtt(
 ) -> Result<()> {
     let msg = i.to_be_bytes();
     let data = api.echo_0rtt(msg.to_vec()).await?;
-    let latency = endpoint.remote_info(node_id).and_then(|x| x.latency);
+    let latency = endpoint.latency(node_id);
     if wait_for_ticket {
         tokio::spawn(async move {
             let latency = latency.unwrap_or(Duration::from_millis(500));
@@ -112,7 +111,7 @@ async fn ping_one_no_0rtt(
 ) -> Result<()> {
     let msg = i.to_be_bytes();
     let data = api.echo(msg.to_vec()).await?;
-    let latency = endpoint.remote_info(node_id).and_then(|x| x.latency);
+    let latency = endpoint.latency(node_id);
     drop(api);
     let elapsed = t0.elapsed();
     assert!(data == msg);
@@ -153,7 +152,7 @@ pub fn get_or_generate_secret_key() -> Result<SecretKey> {
         SecretKey::from_str(&secret).context("Invalid secret key format")
     } else {
         // Generate a new random key
-        let secret_key = SecretKey::generate(&mut rand::rngs::StdRng::from_entropy());
+        let secret_key = SecretKey::generate(&mut rand::rng());
         println!(
             "Generated new secret key: {}",
             hex::encode(secret_key.to_bytes())

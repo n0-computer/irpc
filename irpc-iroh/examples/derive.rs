@@ -1,5 +1,5 @@
 use anyhow::Result;
-use iroh::{protocol::Router, Endpoint, Watcher};
+use iroh::{protocol::Router, Endpoint};
 
 use self::storage::StorageApi;
 
@@ -32,7 +32,7 @@ async fn remote() -> Result<()> {
         let router = Router::builder(endpoint.clone())
             .accept(StorageApi::ALPN, api.expose()?)
             .spawn();
-        let addr = endpoint.node_addr().initialized().await;
+        let addr = endpoint.node_addr();
         (router, addr)
     };
 
