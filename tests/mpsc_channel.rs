@@ -6,7 +6,10 @@ use std::{
 };
 
 use irpc::{
-    channel::{mpsc, RecvError, SendError},
+    channel::{
+        mpsc::{self, Receiver, RecvError},
+        SendError,
+    },
     util::AsyncWriteVarintExt,
 };
 use quinn::Endpoint;
@@ -122,7 +125,7 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
         .accept_bi()
         .await
         .map_err(|e| RecvError::Io(e.into()))?;
-    let mut recv = mpsc::Receiver::<Vec<u8>>::from(recv);
+    let mut recv = Receiver::<Vec<u8>>::from(recv);
     while recv.recv().await?.is_some() {}
     Err(RecvError::Io(io::ErrorKind::UnexpectedEof.into()))
 }
@@ -145,7 +148,7 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(matches!(cause, RecvError::Io(e) if e.kind() == ErrorKind::ConnectionReset));
+    assert!(matches!(cause, mpsc::RecvError::Io(e) if e.kind() == ErrorKind::ConnectionReset));
     Ok(())
 }
 
@@ -165,24 +168,24 @@ async fn mpsc_max_message_size_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(matches!(cause, RecvError::MaxMessageSizeExceeded));
+    assert!(matches!(cause, mpsc::RecvError::MaxMessageSizeExceeded));
     Ok(())
 }
 
-async fn noser_receiver(server: Endpoint) -> Result<(), RecvError> {
+async fn noser_receiver(server: Endpoint) -> Result<(), mpsc::RecvError> {
     let conn = server
         .accept()
         .await
         .unwrap()
         .await
-        .map_err(|e| RecvError::Io(e.into()))?;
+        .map_err(|e| mpsc::RecvError::Io(e.into()))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|e| RecvError::Io(e.into()))?;
+        .map_err(|e| mpsc::RecvError::Io(e.into()))?;
     let mut recv = mpsc::Receiver::<NoSer>::from(recv);
     while recv.recv().await?.is_some() {}
-    Err(RecvError::Io(io::ErrorKind::UnexpectedEof.into()))
+    Err(mpsc::RecvError::Io(io::ErrorKind::UnexpectedEof.into()))
 }
 
 /// Checks that a serialization error is caught and propagated to the receiver.
@@ -203,7 +206,7 @@ async fn mpsc_serialize_error_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert!(matches!(cause, RecvError::Io(e) if e.kind() == ErrorKind::ConnectionReset));
+    assert!(matches!(cause, mpsc::RecvError::Io(e) if e.kind() == ErrorKind::ConnectionReset));
     Ok(())
 }
 
@@ -220,6 +223,6 @@ async fn mpsc_serialize_error_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert!(matches!(cause, RecvError::Io(e) if e.kind() == ErrorKind::InvalidData));
+    assert!(matches!(cause, mpsc::RecvError::Io(e) if e.kind() == ErrorKind::InvalidData));
     Ok(())
 }
