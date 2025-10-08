@@ -305,7 +305,10 @@ use self::{
     },
     sealed::Sealed,
 };
+use crate::channel::SendError;
 
+#[cfg(test)]
+mod tests;
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod util;
@@ -462,9 +465,7 @@ pub mod channel {
                     Sender::Boxed(f) => f(value).await,
                 }
             }
-        }
 
-        impl<T> Sender<T> {
             /// Check if this is a remote sender
             pub fn is_rpc(&self) -> bool
             where
@@ -474,6 +475,45 @@ pub mod channel {
                     Sender::Tokio(_) => false,
                     Sender::Boxed(_) => true,
                 }
+            }
+        }
+
+        impl<T: Send + Sync + 'static> Sender<T> {
+            /// Applies a filter before sending.
+            ///
+            /// Messages that don't pass the filter are dropped.
+            pub fn with_filter(self, f: impl Fn(&T) -> bool + Send + Sync + 'static) -> Sender<T> {
+                self.with_filter_map(move |u| if f(&u) { Some(u) } else { None })
+            }
+
+            /// Applies a transform before sending.
+            pub fn with_map<U, F>(self, f: F) -> Sender<U>
+            where
+                F: Fn(U) -> T + Send + Sync + 'static,
+                U: Send + Sync + 'static,
+            {
+                self.with_filter_map(move |u| Some(f(u)))
+            }
+
+            /// Applies a filter and transform before sending.
+            ///
+            /// Messages that don't pass the filter are dropped.
+            pub fn with_filter_map<U, F>(self, f: F) -> Sender<U>
+            where
+                F: Fn(U) -> Option<T> + Send + Sync + 'static,
+                U: Send + Sync + 'static,
+            {
+                let inner: BoxedSender<U> = Box::new(move |value| {
+                    let opt = f(value);
+                    Box::pin(async move {
+                        if let Some(v) = opt {
+                            self.send(v).await
+                        } else {
+                            Ok(())
+                        }
+                    })
+                });
+                Sender::Boxed(inner)
             }
         }
 
@@ -546,10 +586,9 @@ pub mod channel {
     ///
     /// For the rpc case, the send side can not be cloned, hence mpsc instead of mpsc.
     pub mod mpsc {
-        use std::{fmt::Debug, future::Future, pin::Pin, sync::Arc};
+        use std::{fmt::Debug, future::Future, marker::PhantomData, pin::Pin, sync::Arc};
 
         use super::{RecvError, SendError};
-        use crate::RpcMessage;
 
         /// Create a local mpsc sender and receiver pair, with the given buffer size.
         ///
@@ -562,10 +601,18 @@ pub mod channel {
         /// Single producer, single consumer sender.
         ///
         /// For the local case, this wraps a tokio::sync::mpsc::Sender.
-        #[derive(Clone)]
         pub enum Sender<T> {
             Tokio(tokio::sync::mpsc::Sender<T>),
             Boxed(Arc<dyn DynSender<T>>),
+        }
+
+        impl<T> Clone for Sender<T> {
+            fn clone(&self) -> Self {
+                match self {
+                    Self::Tokio(tx) => Self::Tokio(tx.clone()),
+                    Self::Boxed(inner) => Self::Boxed(inner.clone()),
+                }
+            }
         }
 
         impl<T> Sender<T> {
@@ -579,25 +626,67 @@ pub mod channel {
                 }
             }
 
-            pub async fn closed(&self)
-            where
-                T: RpcMessage,
-            {
-                match self {
-                    Sender::Tokio(tx) => tx.closed().await,
-                    Sender::Boxed(sink) => sink.closed().await,
-                }
-            }
-
             #[cfg(feature = "stream")]
             pub fn into_sink(self) -> impl n0_future::Sink<T, Error = SendError> + Send + 'static
             where
-                T: RpcMessage,
+                T: Send + Sync + 'static,
             {
                 futures_util::sink::unfold(self, |sink, value| async move {
                     sink.send(value).await?;
                     Ok(sink)
                 })
+            }
+        }
+
+        impl<T: Send + Sync + 'static> Sender<T> {
+            /// Applies a filter before sending.
+            ///
+            /// Messages that don't pass the filter are dropped.
+            ///
+            /// If you want to combine multiple filters and maps with minimal
+            /// overhead, use `with_filter_map` directly.
+            pub fn with_filter<F>(self, f: F) -> Sender<T>
+            where
+                F: Fn(&T) -> bool + Send + Sync + 'static,
+            {
+                self.with_filter_map(move |u| if f(&u) { Some(u) } else { None })
+            }
+
+            /// Applies a transform before sending.
+            ///
+            /// If you want to combine multiple filters and maps with minimal
+            /// overhead, use `with_filter_map` directly.
+            pub fn with_map<U, F>(self, f: F) -> Sender<U>
+            where
+                F: Fn(U) -> T + Send + Sync + 'static,
+                U: Send + Sync + 'static,
+            {
+                self.with_filter_map(move |u| Some(f(u)))
+            }
+
+            /// Applies a filter and transform before sending.
+            ///
+            /// Any combination of filters and maps can be expressed using
+            /// a single filter_map.
+            pub fn with_filter_map<U, F>(self, f: F) -> Sender<U>
+            where
+                F: Fn(U) -> Option<T> + Send + Sync + 'static,
+                U: Send + Sync + 'static,
+            {
+                let inner: Arc<dyn DynSender<U>> = Arc::new(FilterMapSender {
+                    f,
+                    sender: self,
+                    _p: PhantomData,
+                });
+                Sender::Boxed(inner)
+            }
+
+            /// Future that resolves when the sender is closed
+            pub async fn closed(&self) {
+                match self {
+                    Sender::Tokio(tx) => tx.closed().await,
+                    Sender::Boxed(sink) => sink.closed().await,
+                }
             }
         }
 
@@ -673,7 +762,7 @@ pub mod channel {
             }
         }
 
-        impl<T: RpcMessage> Sender<T> {
+        impl<T: Send + 'static> Sender<T> {
             /// Send a message and yield until either it is sent or an error occurs.
             ///
             /// ## Cancellation safety
@@ -734,7 +823,7 @@ pub mod channel {
             Boxed(Box<dyn DynReceiver<T>>),
         }
 
-        impl<T: RpcMessage> Receiver<T> {
+        impl<T: Send + Sync + 'static> Receiver<T> {
             /// Receive a message
             ///
             /// Returns Ok(None) if the sender has been dropped or the remote end has
@@ -746,6 +835,41 @@ pub mod channel {
                     Self::Tokio(rx) => Ok(rx.recv().await),
                     Self::Boxed(rx) => Ok(rx.recv().await?),
                 }
+            }
+
+            /// Map messages, transforming them from type T to type U.
+            pub fn map<U, F>(self, f: F) -> Receiver<U>
+            where
+                F: Fn(T) -> U + Send + Sync + 'static,
+                U: Send + Sync + 'static,
+            {
+                self.filter_map(move |u| Some(f(u)))
+            }
+
+            /// Filter messages, only passing through those for which the predicate returns true.
+            ///
+            /// Messages that don't pass the filter are dropped.
+            pub fn filter<F>(self, f: F) -> Receiver<T>
+            where
+                F: Fn(&T) -> bool + Send + Sync + 'static,
+            {
+                self.filter_map(move |u| if f(&u) { Some(u) } else { None })
+            }
+
+            /// Filter and map messages, only passing through those for which the function returns Some.
+            ///
+            /// Messages that don't pass the filter are dropped.
+            pub fn filter_map<F, U>(self, f: F) -> Receiver<U>
+            where
+                U: Send + Sync + 'static,
+                F: Fn(T) -> Option<U> + Send + Sync + 'static,
+            {
+                let inner: Box<dyn DynReceiver<U>> = Box::new(FilterMapReceiver {
+                    f,
+                    receiver: self,
+                    _p: PhantomData,
+                });
+                Receiver::Boxed(inner)
             }
 
             #[cfg(feature = "stream")]
@@ -786,6 +910,107 @@ pub mod channel {
                         .finish(),
                     Self::Boxed(inner) => f.debug_tuple("Boxed").field(&inner).finish(),
                 }
+            }
+        }
+
+        struct FilterMapSender<F, T, U> {
+            f: F,
+            sender: Sender<T>,
+            _p: PhantomData<U>,
+        }
+
+        impl<F, T, U> Debug for FilterMapSender<F, T, U> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("FilterMapSender").finish_non_exhaustive()
+            }
+        }
+
+        impl<F, T, U> DynSender<U> for FilterMapSender<F, T, U>
+        where
+            F: Fn(U) -> Option<T> + Send + Sync + 'static,
+            T: Send + Sync + 'static,
+            U: Send + Sync + 'static,
+        {
+            fn send(
+                &self,
+                value: U,
+            ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>> {
+                Box::pin(async move {
+                    if let Some(v) = (self.f)(value) {
+                        self.sender.send(v).await
+                    } else {
+                        Ok(())
+                    }
+                })
+            }
+
+            fn try_send(
+                &self,
+                value: U,
+            ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + '_>> {
+                Box::pin(async move {
+                    if let Some(v) = (self.f)(value) {
+                        self.sender.try_send(v).await
+                    } else {
+                        Ok(true)
+                    }
+                })
+            }
+
+            fn is_rpc(&self) -> bool {
+                self.sender.is_rpc()
+            }
+
+            fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
+                match self {
+                    FilterMapSender {
+                        sender: Sender::Tokio(tx),
+                        ..
+                    } => Box::pin(tx.closed()),
+                    FilterMapSender {
+                        sender: Sender::Boxed(sink),
+                        ..
+                    } => sink.closed(),
+                }
+            }
+        }
+
+        struct FilterMapReceiver<F, T, U> {
+            f: F,
+            receiver: Receiver<T>,
+            _p: PhantomData<U>,
+        }
+
+        impl<F, T, U> Debug for FilterMapReceiver<F, T, U> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("FilterMapReceiver").finish_non_exhaustive()
+            }
+        }
+
+        impl<F, T, U> DynReceiver<U> for FilterMapReceiver<F, T, U>
+        where
+            F: Fn(T) -> Option<U> + Send + Sync + 'static,
+            T: Send + Sync + 'static,
+            U: Send + Sync + 'static,
+        {
+            fn recv(
+                &mut self,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = std::result::Result<Option<U>, RecvError>>
+                        + Send
+                        + Sync
+                        + '_,
+                >,
+            > {
+                Box::pin(async move {
+                    while let Some(msg) = self.receiver.recv().await? {
+                        if let Some(v) = (self.f)(msg) {
+                            return Ok(Some(v));
+                        }
+                    }
+                    Ok(None)
+                })
             }
         }
 
@@ -1045,8 +1270,9 @@ impl<S: Service> Client<S> {
     }
 
     /// Creates a new client from a `tokio::sync::mpsc::Sender`.
-    pub fn local(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
-        tx.into()
+    pub fn local(tx: impl Into<crate::channel::mpsc::Sender<S::Message>>) -> Self {
+        let tx: crate::channel::mpsc::Sender<S::Message> = tx.into();
+        Self(ClientInner::Local(tx), PhantomData)
     }
 
     /// Get the local sender. This is useful if you don't care about remote
@@ -1406,7 +1632,7 @@ impl<S: Service> Client<S> {
 
 #[derive(Debug)]
 pub(crate) enum ClientInner<M> {
-    Local(tokio::sync::mpsc::Sender<M>),
+    Local(crate::channel::mpsc::Sender<M>),
     #[cfg(feature = "rpc")]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     Remote(Box<dyn rpc::RemoteConnection>),
@@ -1498,7 +1724,7 @@ impl From<RequestError> for io::Error {
 /// [`WithChannels`].
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct LocalSender<S: Service>(tokio::sync::mpsc::Sender<S::Message>);
+pub struct LocalSender<S: Service>(crate::channel::mpsc::Sender<S::Message>);
 
 impl<S: Service> Clone for LocalSender<S> {
     fn clone(&self) -> Self {
@@ -1508,6 +1734,12 @@ impl<S: Service> Clone for LocalSender<S> {
 
 impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for LocalSender<S> {
     fn from(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
+        Self(tx.into())
+    }
+}
+
+impl<S: Service> From<crate::channel::mpsc::Sender<S::Message>> for LocalSender<S> {
+    fn from(tx: crate::channel::mpsc::Sender<S::Message>) -> Self {
         Self(tx)
     }
 }
@@ -2168,77 +2400,24 @@ pub enum Request<L, R> {
 
 impl<S: Service> LocalSender<S> {
     /// Send a message to the service
-    pub fn send<T>(&self, value: impl Into<WithChannels<T, S>>) -> SendFut<S::Message>
+    pub fn send<T>(
+        &self,
+        value: impl Into<WithChannels<T, S>>,
+    ) -> impl Future<Output = std::result::Result<(), SendError>> + Send + 'static
     where
         T: Channels<S>,
         S::Message: From<WithChannels<T, S>>,
     {
         let value: S::Message = value.into().into();
-        SendFut::new(self.0.clone(), value)
+        self.send_raw(value)
     }
 
     /// Send a message to the service without the type conversion magic
-    pub fn send_raw(&self, value: S::Message) -> SendFut<S::Message> {
-        SendFut::new(self.0.clone(), value)
+    pub fn send_raw(
+        &self,
+        value: S::Message,
+    ) -> impl Future<Output = std::result::Result<(), SendError>> + Send + 'static {
+        let x = self.0.clone();
+        async move { x.send(value).await }
     }
 }
-
-mod send_fut {
-    use std::{
-        future::Future,
-        pin::Pin,
-        task::{Context, Poll},
-    };
-
-    use tokio::sync::mpsc::Sender;
-    use tokio_util::sync::PollSender;
-
-    use crate::channel::SendError;
-
-    pub struct SendFut<T: Send> {
-        poll_sender: PollSender<T>,
-        value: Option<T>,
-    }
-
-    impl<T: Send> SendFut<T> {
-        pub fn new(sender: Sender<T>, value: T) -> Self {
-            Self {
-                poll_sender: PollSender::new(sender),
-                value: Some(value),
-            }
-        }
-    }
-
-    impl<T: Send + Unpin> Future for SendFut<T> {
-        type Output = std::result::Result<(), SendError>;
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let this = self.get_mut();
-
-            // Safely extract the value
-            let value = match this.value.take() {
-                Some(v) => v,
-                None => return Poll::Ready(Ok(())), // Already completed
-            };
-
-            // Try to reserve capacity
-            match this.poll_sender.poll_reserve(cx) {
-                Poll::Ready(Ok(())) => {
-                    // Send the item
-                    this.poll_sender.send_item(value).ok();
-                    Poll::Ready(Ok(()))
-                }
-                Poll::Ready(Err(_)) => {
-                    // Channel is closed
-                    Poll::Ready(Err(SendError::ReceiverClosed))
-                }
-                Poll::Pending => {
-                    // Restore the value and wait
-                    this.value = Some(value);
-                    Poll::Pending
-                }
-            }
-        }
-    }
-}
-use send_fut::SendFut;

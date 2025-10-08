@@ -55,12 +55,12 @@ struct Multiply {
 
 // The actor that processes requests
 struct ComputeActor {
-    recv: tokio::sync::mpsc::Receiver<ComputeMessage>,
+    recv: irpc::channel::mpsc::Receiver<ComputeMessage>,
 }
 
 impl ComputeActor {
     pub fn local() -> ComputeApi {
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let (tx, rx) = irpc::channel::mpsc::channel(128);
         let actor = Self { recv: rx };
         n0_future::task::spawn(actor.run());
         ComputeApi {
@@ -69,7 +69,7 @@ impl ComputeActor {
     }
 
     async fn run(mut self) {
-        while let Some(msg) = self.recv.recv().await {
+        while let Ok(Some(msg)) = self.recv.recv().await {
             n0_future::task::spawn(async move {
                 if let Err(cause) = Self::handle(msg).await {
                     eprintln!("Error: {cause}");
