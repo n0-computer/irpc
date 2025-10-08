@@ -594,7 +594,6 @@ pub mod channel {
         use std::{fmt::Debug, future::Future, marker::PhantomData, pin::Pin, sync::Arc};
 
         use super::{RecvError, SendError};
-        use crate::RpcMessage;
 
         /// Create a local mpsc sender and receiver pair, with the given buffer size.
         ///
@@ -632,6 +631,12 @@ pub mod channel {
                 }
             }
 
+            /// Applies a filter before sending.
+            ///
+            /// Messages that don't pass the filter are dropped.
+            ///
+            /// If you want to combine multiple filters and maps with minimal
+            /// overhead, use `with_filter_map` directly.
             pub fn with_filter<F>(self, f: F) -> Sender<T>
             where
                 F: Fn(&T) -> bool + Send + Sync + 'static,
@@ -640,6 +645,10 @@ pub mod channel {
                 self.with_filter_map(move |u| if f(&u) { Some(u) } else { None })
             }
 
+            /// Applies a transform before sending.
+            ///
+            /// If you want to combine multiple filters and maps with minimal
+            /// overhead, use `with_filter_map` directly.
             pub fn with_map<U, F>(self, f: F) -> Sender<U>
             where
                 F: Fn(U) -> T + Send + Sync + 'static,
@@ -649,6 +658,10 @@ pub mod channel {
                 self.with_filter_map(move |u| Some(f(u)))
             }
 
+            /// Applies a filter and transform before sending.
+            ///
+            /// Any combination of filters and maps can be expressed using
+            /// a single filter_map.
             pub fn with_filter_map<U, F>(self, f: F) -> Sender<U>
             where
                 F: Fn(U) -> Option<T> + Send + Sync + 'static,
@@ -663,9 +676,10 @@ pub mod channel {
                 Sender::Boxed(inner)
             }
 
+            /// Future that resolves when the sender is closed
             pub async fn closed(&self)
             where
-                T: RpcMessage,
+                T: Send + Sync + 'static,
             {
                 match self {
                     Sender::Tokio(tx) => tx.closed().await,
@@ -676,7 +690,7 @@ pub mod channel {
             #[cfg(feature = "stream")]
             pub fn into_sink(self) -> impl n0_future::Sink<T, Error = SendError> + Send + 'static
             where
-                T: RpcMessage,
+                T: Send + Sync + 'static,
             {
                 futures_util::sink::unfold(self, |sink, value| async move {
                     sink.send(value).await?;
