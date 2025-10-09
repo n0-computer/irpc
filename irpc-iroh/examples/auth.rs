@@ -4,7 +4,7 @@
 //! * Authenticating peers
 
 use anyhow::Result;
-use iroh::{protocol::Router, Endpoint, Watcher};
+use iroh::{protocol::Router, Endpoint};
 
 use self::storage::{StorageClient, StorageServer};
 
@@ -23,7 +23,7 @@ async fn remote() -> Result<()> {
         let router = Router::builder(endpoint.clone())
             .accept(StorageServer::ALPN, server.clone())
             .spawn();
-        let addr = endpoint.node_addr().initialized().await;
+        let addr = endpoint.node_addr();
         (router, addr)
     };
 
