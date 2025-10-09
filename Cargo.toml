@@ -107,11 +107,7 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.1.2", default-features = false }
 tracing-subscriber = { version = "0.3.20" }
-iroh = { version = "0.92" }
-iroh-base = { version = "0.92" }
+iroh = { version = "0.93" }
+iroh-base = { version = "0.93" }
 quinn = { package = "iroh-quinn", version = "0.14.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
-
-[patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "main"}
-iroh-base = { git = "https://github.com/n0-computer/iroh.git", branch = "main"}
