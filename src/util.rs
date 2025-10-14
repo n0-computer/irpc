@@ -44,7 +44,8 @@ mod quinn_setup_utils {
     pub fn configure_server() -> anyhow::Result<(ServerConfig, Vec<u8>)> {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
         let cert_der = cert.cert.der();
-        let priv_key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let priv_key =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
         let cert_chain = vec![cert_der.clone()];
 
         let mut server_config = ServerConfig::with_single_cert(cert_chain, priv_key.into())?;
