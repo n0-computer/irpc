@@ -263,8 +263,18 @@ pub async fn read_request_raw<R: DeserializeOwned + 'static>(
     recv.read_exact(&mut buf)
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-    let msg: R =
+
+    // Deserialize the payload which includes optional span context
+    // irpc-iroh uses irpc with default features, which include spans and rpc,
+    // so span_propagation module always exists
+    let (span_ctx, msg): (Option<irpc::span_propagation::SpanContextCarrier>, R) =
         postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    // Store span context in thread-local for use by with_remote_channels
+    if let Some(ctx) = span_ctx {
+        ctx.store_in_thread_local();
+    }
+
     let rx = recv;
     let tx = send;
     Ok(Some((msg, rx, tx)))
