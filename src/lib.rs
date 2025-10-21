@@ -1454,6 +1454,7 @@ impl<S: Service> Client<S> {
         }
     }
 
+    /// Performs a request for which the client can send updates but does not receive a reply from the server.
     pub fn notify_streaming<Req, Update>(
         &self,
         msg: Req,
