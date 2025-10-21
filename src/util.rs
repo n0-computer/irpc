@@ -175,6 +175,10 @@ mod quinn_setup_utils {
 pub use quinn_setup_utils::*;
 
 #[cfg(any(feature = "rpc", feature = "varint-util"))]
+#[cfg_attr(
+    quicrpc_docsrs,
+    doc(cfg(any(feature = "rpc", feature = "varint-util")))
+)]
 mod varint_util {
     use std::{
         future::Future,
@@ -384,6 +388,10 @@ mod varint_util {
 }
 
 #[cfg(any(feature = "rpc", feature = "varint-util"))]
+#[cfg_attr(
+    quicrpc_docsrs,
+    doc(cfg(any(feature = "rpc", feature = "varint-util")))
+)]
 pub use varint_util::{AsyncReadVarintExt, AsyncWriteVarintExt, WriteVarintExt};
 
 mod fuse_wrapper {
