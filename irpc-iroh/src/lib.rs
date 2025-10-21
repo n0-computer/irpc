@@ -23,7 +23,7 @@ use tracing::{debug, error_span, trace, trace_span, warn, Instrument};
 /// Returns a client that connects to a irpc service using an [`iroh::Endpoint`].
 pub fn client<S: irpc::Service>(
     endpoint: iroh::Endpoint,
-    addr: impl Into<iroh::NodeAddr>,
+    addr: impl Into<iroh::EndpointAddr>,
     alpn: impl AsRef<[u8]>,
 ) -> irpc::Client<S> {
     let conn = IrohRemoteConnection::new(endpoint, addr.into(), alpn.as_ref().to_vec());
@@ -39,13 +39,13 @@ pub struct IrohRemoteConnection(Arc<IrohRemoteConnectionInner>);
 #[derive(Debug)]
 struct IrohRemoteConnectionInner {
     endpoint: iroh::Endpoint,
-    addr: iroh::NodeAddr,
+    addr: iroh::EndpointAddr,
     connection: tokio::sync::Mutex<Option<Connection>>,
     alpn: Vec<u8>,
 }
 
 impl IrohRemoteConnection {
-    pub fn new(endpoint: iroh::Endpoint, addr: iroh::NodeAddr, alpn: Vec<u8>) -> Self {
+    pub fn new(endpoint: iroh::Endpoint, addr: iroh::EndpointAddr, alpn: Vec<u8>) -> Self {
         Self(Arc::new(IrohRemoteConnectionInner {
             endpoint,
             addr,
@@ -89,7 +89,7 @@ impl RemoteConnection for IrohRemoteConnection {
 
 async fn connect_and_open_bi(
     endpoint: &iroh::Endpoint,
-    addr: &iroh::NodeAddr,
+    addr: &iroh::EndpointAddr,
     alpn: &[u8],
     mut guard: tokio::sync::MutexGuard<'_, Option<Connection>>,
 ) -> anyhow::Result<(SendStream, RecvStream)> {
@@ -207,7 +207,7 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     connection: Connection,
     handler: Handler<R>,
 ) -> io::Result<()> {
-    if let Ok(remote) = connection.remote_node_id() {
+    if let Ok(remote) = connection.remote_id() {
         tracing::Span::current().record("remote", tracing::field::display(remote.fmt_short()));
     }
     debug!("connection accepted");

@@ -38,7 +38,7 @@
 //! quinn streams, specifically streams from the [iroh quinn fork].
 //!
 //! This restricts the possible rpc transports to quinn (QUIC with dial by
-//! socket address) and iroh (QUIC with dial by node id).
+//! socket address) and iroh (QUIC with dial by endpoint id).
 //!
 //! An upside of this is that the quinn streams can be tuned for each rpc
 //! request, e.g. by setting the stream priority or by directy using more
