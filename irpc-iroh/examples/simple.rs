@@ -7,7 +7,7 @@ mod proto {
     use std::collections::HashMap;
 
     use anyhow::Result;
-    use iroh::{protocol::Router, Endpoint, NodeId};
+    use iroh::{protocol::Router, Endpoint, EndpointId};
     use irpc::{channel::oneshot, rpc_requests, Client, WithChannels};
     use irpc_iroh::IrohProtocol;
     use serde::{Deserialize, Serialize};
@@ -38,10 +38,10 @@ mod proto {
         tokio::task::spawn(actor(rx));
         let client = Client::<FooProtocol>::local(tx);
 
-        let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+        let endpoint = Endpoint::bind().await?;
         let protocol = IrohProtocol::with_sender(client.as_local().unwrap());
         let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
-        println!("node id: {}", router.endpoint().node_id());
+        println!("endpoint id: {}", router.endpoint().id());
 
         tokio::signal::ctrl_c().await?;
         router.shutdown().await?;
@@ -74,10 +74,10 @@ mod proto {
         }
     }
 
-    pub async fn connect(node_id: NodeId) -> Result<Client<FooProtocol>> {
-        println!("connecting to {node_id}");
-        let endpoint = Endpoint::builder().discovery_n0().bind().await?;
-        let client = irpc_iroh::client(endpoint, node_id, ALPN);
+    pub async fn connect(endpoint_id: EndpointId) -> Result<Client<FooProtocol>> {
+        println!("connecting to {endpoint_id}");
+        let endpoint = Endpoint::bind().await?;
+        let client = irpc_iroh::client(endpoint, endpoint_id, ALPN);
         Ok(client)
     }
 }
@@ -85,7 +85,7 @@ mod proto {
 mod cli {
     use anyhow::Result;
     use clap::Parser;
-    use iroh::NodeId;
+    use iroh::EndpointId;
 
     use crate::proto::{connect, listen, GetRequest, SetRequest};
 
@@ -93,7 +93,7 @@ mod cli {
     enum Cli {
         Listen,
         Connect {
-            node_id: NodeId,
+            endpoint_id: EndpointId,
             #[clap(subcommand)]
             command: Command,
         },
@@ -108,8 +108,11 @@ mod cli {
     pub async fn run() -> Result<()> {
         match Cli::parse() {
             Cli::Listen => listen().await?,
-            Cli::Connect { node_id, command } => {
-                let client = connect(node_id).await?;
+            Cli::Connect {
+                endpoint_id,
+                command,
+            } => {
+                let client = connect(endpoint_id).await?;
                 match command {
                     Command::Get { key } => {
                         println!("get '{key}'");

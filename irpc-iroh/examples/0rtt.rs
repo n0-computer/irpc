@@ -6,13 +6,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use iroh::{protocol::Router, Endpoint, NodeAddr, NodeId, SecretKey};
-use iroh_base::ticket::NodeTicket;
+use iroh::{protocol::Router, Endpoint, EndpointAddr, EndpointId, SecretKey};
 use ping::EchoApi;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt::init();
     let args = cli::Args::parse();
     match args {
         cli::Args::Listen { no_0rtt } => {
@@ -20,7 +19,7 @@ async fn main() -> Result<()> {
                 let secret_key = get_or_generate_secret_key()?;
                 let endpoint = Endpoint::builder().secret_key(secret_key).bind().await?;
                 endpoint.online().await;
-                let addr = endpoint.node_addr();
+                let addr = endpoint.addr();
                 let api = EchoApi::spawn();
                 let router = Router::builder(endpoint.clone());
                 let router = if !no_0rtt {
@@ -31,9 +30,9 @@ async fn main() -> Result<()> {
                 let router = router.spawn();
                 (router, addr)
             };
-            println!("NodeId: {}", server_addr.node_id);
+            println!("EndpointId: {}", server_addr.id);
             println!("Accepting 0rtt connections: {}", !no_0rtt);
-            let ticket = NodeTicket::from(server_addr);
+            let ticket = server_addr.id.to_string();
             println!("Connect using:\n\ncargo run --example 0rtt connect {ticket}\n");
             println!("Control-C to stop");
             tokio::signal::ctrl_c()
@@ -58,10 +57,10 @@ async fn main() -> Result<()> {
                 .unwrap_or(u64::MAX);
             let delay = std::time::Duration::from_millis(delay_ms);
             let endpoint = Endpoint::builder().bind().await?;
-            let addr: NodeAddr = ticket.into();
+            let addr: EndpointAddr = ticket.into();
             for i in 0..n {
                 if let Err(e) = ping_one(no_0rtt, &endpoint, &addr, i, wait_for_ticket).await {
-                    eprintln!("Error pinging {}: {e}", addr.node_id);
+                    eprintln!("Error pinging {}: {e}", addr.id);
                 }
                 tokio::time::sleep(delay).await;
             }
@@ -73,14 +72,14 @@ async fn main() -> Result<()> {
 async fn ping_one_0rtt(
     api: EchoApi,
     endpoint: &Endpoint,
-    node_id: NodeId,
+    endpoint_id: EndpointId,
     wait_for_ticket: bool,
     i: u64,
     t0: Instant,
 ) -> Result<()> {
     let msg = i.to_be_bytes();
     let data = api.echo_0rtt(msg.to_vec()).await?;
-    let latency = endpoint.latency(node_id);
+    let latency = endpoint.latency(endpoint_id);
     if wait_for_ticket {
         tokio::spawn(async move {
             let latency = latency.unwrap_or(Duration::from_millis(500));
@@ -105,13 +104,13 @@ async fn ping_one_0rtt(
 async fn ping_one_no_0rtt(
     api: EchoApi,
     endpoint: &Endpoint,
-    node_id: NodeId,
+    endpoint_id: EndpointId,
     i: u64,
     t0: Instant,
 ) -> Result<()> {
     let msg = i.to_be_bytes();
     let data = api.echo(msg.to_vec()).await?;
-    let latency = endpoint.latency(node_id);
+    let latency = endpoint.latency(endpoint_id);
     drop(api);
     let elapsed = t0.elapsed();
     assert!(data == msg);
@@ -128,18 +127,18 @@ async fn ping_one_no_0rtt(
 async fn ping_one(
     no_0rtt: bool,
     endpoint: &Endpoint,
-    addr: &NodeAddr,
+    addr: &EndpointAddr,
     i: u64,
     wait_for_ticket: bool,
 ) -> Result<()> {
-    let node_id = addr.node_id;
+    let endpoint_id = addr.id;
     let t0 = Instant::now();
     if !no_0rtt {
         let api = EchoApi::connect_0rtt(endpoint.clone(), addr.clone()).await?;
-        ping_one_0rtt(api, endpoint, node_id, wait_for_ticket, i, t0).await?;
+        ping_one_0rtt(api, endpoint, endpoint_id, wait_for_ticket, i, t0).await?;
     } else {
         let api = EchoApi::connect(endpoint.clone(), addr.clone()).await?;
-        ping_one_no_0rtt(api, endpoint, node_id, i, t0).await?;
+        ping_one_no_0rtt(api, endpoint, endpoint_id, i, t0).await?;
     }
     Ok(())
 }
@@ -164,7 +163,7 @@ pub fn get_or_generate_secret_key() -> Result<SecretKey> {
 
 mod cli {
     use clap::Parser;
-    use iroh_base::ticket::NodeTicket;
+    use iroh::EndpointId;
 
     #[derive(Debug, Parser)]
     pub enum Args {
@@ -173,7 +172,7 @@ mod cli {
             no_0rtt: bool,
         },
         Connect {
-            ticket: NodeTicket,
+            ticket: EndpointId,
             #[clap(short)]
             n: Option<usize>,
             #[clap(long)]
@@ -243,7 +242,7 @@ mod ping {
 
         pub async fn connect(
             endpoint: Endpoint,
-            addr: impl Into<iroh::NodeAddr>,
+            addr: impl Into<iroh::EndpointAddr>,
         ) -> Result<EchoApi> {
             let conn = endpoint
                 .connect(addr, Self::ALPN)
@@ -258,7 +257,7 @@ mod ping {
 
         pub async fn connect_0rtt(
             endpoint: Endpoint,
-            addr: impl Into<iroh::NodeAddr>,
+            addr: impl Into<iroh::EndpointAddr>,
         ) -> Result<EchoApi> {
             let connecting = endpoint
                 .connect_with_opts(addr, Self::ALPN, Default::default())

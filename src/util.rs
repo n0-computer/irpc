@@ -44,7 +44,8 @@ mod quinn_setup_utils {
     pub fn configure_server() -> anyhow::Result<(ServerConfig, Vec<u8>)> {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
         let cert_der = cert.cert.der();
-        let priv_key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let priv_key =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
         let cert_chain = vec![cert_der.clone()];
 
         let mut server_config = ServerConfig::with_single_cert(cert_chain, priv_key.into())?;
@@ -338,7 +339,7 @@ mod varint_util {
         /// Write a varint
         #[allow(dead_code)]
         fn write_varint_u64(&mut self, value: u64) -> io::Result<usize>;
-        /// Write a value with a varint enoded length prefix.
+        /// Write a value with a varint encoded length prefix.
         fn write_length_prefixed<T: Serialize>(&mut self, value: T) -> io::Result<()>;
     }
 
@@ -357,7 +358,7 @@ mod varint_util {
     pub trait AsyncWriteVarintExt: AsyncWrite + Unpin {
         /// Write a varint
         fn write_varint_u64(&mut self, value: u64) -> impl Future<Output = io::Result<usize>>;
-        /// Write a value with a varint enoded length prefix.
+        /// Write a value with a varint encoded length prefix.
         fn write_length_prefixed<T: Serialize>(
             &mut self,
             value: T,

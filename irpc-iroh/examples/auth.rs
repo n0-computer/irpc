@@ -18,12 +18,12 @@ async fn main() -> Result<()> {
 
 async fn remote() -> Result<()> {
     let (server_router, server_addr) = {
-        let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+        let endpoint = Endpoint::bind().await?;
         let server = StorageServer::new("secret".to_string());
         let router = Router::builder(endpoint.clone())
             .accept(StorageServer::ALPN, server.clone())
             .spawn();
-        let addr = endpoint.node_addr();
+        let addr = endpoint.addr();
         (router, addr)
     };
 
@@ -224,7 +224,7 @@ mod storage {
     impl StorageClient {
         pub const ALPN: &[u8] = ALPN;
 
-        pub fn connect(endpoint: Endpoint, addr: impl Into<iroh::NodeAddr>) -> StorageClient {
+        pub fn connect(endpoint: Endpoint, addr: impl Into<iroh::EndpointAddr>) -> StorageClient {
             let conn = IrohRemoteConnection::new(endpoint, addr.into(), Self::ALPN.to_vec());
             StorageClient {
                 inner: Client::boxed(conn),
