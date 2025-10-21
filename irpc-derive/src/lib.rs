@@ -401,7 +401,7 @@ impl VariantRpcArgs {
         let mut this = Self::default();
         let mut remaining_attrs = Vec::new();
         for attr in attrs.drain(..) {
-            let ident = attr.path.get_ident().map(|ident| ident.to_string());
+            let ident = attr.path().get_ident().map(|ident| ident.to_string());
             match ident.as_deref() {
                 Some(RPC_ATTR_NAME) => {
                     if this.rpc.is_some() {
@@ -480,7 +480,7 @@ impl Parse for WrapArgs {
                 "derive" => {
                     let content;
                     syn::parenthesized!(content in input);
-                    let types: Punctuated<Type, Comma> = content.parse_terminated(Type::parse)?;
+                    let types: Punctuated<Type, Comma> = Punctuated::parse_terminated(&content)?;
                     this.derive = types.into_iter().collect();
                 }
                 _ => syn_err(arg.span(), "Unexpected argument in wrap argument")?,
@@ -532,6 +532,7 @@ fn single_unnamed_field(ty: Type) -> Fields {
         vis: Visibility::Inherited,
         ident: None,
         colon_token: None,
+        mutability: syn::FieldMutability::None,
         ty,
     };
     Fields::Unnamed(syn::FieldsUnnamed {
