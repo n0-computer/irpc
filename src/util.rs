@@ -339,7 +339,7 @@ mod varint_util {
         /// Write a varint
         #[allow(dead_code)]
         fn write_varint_u64(&mut self, value: u64) -> io::Result<usize>;
-        /// Write a value with a varint eendpointd length prefix.
+        /// Write a value with a varint encoded length prefix.
         fn write_length_prefixed<T: Serialize>(&mut self, value: T) -> io::Result<()>;
     }
 
@@ -358,7 +358,7 @@ mod varint_util {
     pub trait AsyncWriteVarintExt: AsyncWrite + Unpin {
         /// Write a varint
         fn write_varint_u64(&mut self, value: u64) -> impl Future<Output = io::Result<usize>>;
-        /// Write a value with a varint eendpointd length prefix.
+        /// Write a value with a varint encoded length prefix.
         fn write_length_prefixed<T: Serialize>(
             &mut self,
             value: T,
