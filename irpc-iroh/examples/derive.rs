@@ -157,7 +157,10 @@ mod storage {
             StorageActor::spawn()
         }
 
-        pub fn connect(endpoint: Endpoint, addr: impl Into<iroh::EndpointAddr>) -> Result<StorageApi> {
+        pub fn connect(
+            endpoint: Endpoint,
+            addr: impl Into<iroh::EndpointAddr>,
+        ) -> Result<StorageApi> {
             let conn = IrohRemoteConnection::new(endpoint, addr.into(), Self::ALPN.to_vec());
             Ok(StorageApi {
                 inner: Client::boxed(conn),
