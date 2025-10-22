@@ -323,8 +323,8 @@ mod sealed {
 #[cfg_attr(quicrpc_docsrs, doc(cfg(all(feature = "spans", feature = "rpc"))))]
 pub mod span_propagation {
     use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
     use std::cell::RefCell;
+    use std::collections::HashMap;
 
     // Re-export for use in macro-generated code
     pub use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -2513,9 +2513,8 @@ pub mod rpc {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         #[cfg(not(all(feature = "spans", feature = "rpc")))]
-        let (_span_ctx, msg): (Option<()>, R) =
-            postcard::from_bytes(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let (_span_ctx, msg): (Option<()>, R) = postcard::from_bytes(&buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Store span context in thread-local for use by with_remote_channels
         #[cfg(all(feature = "spans", feature = "rpc"))]
