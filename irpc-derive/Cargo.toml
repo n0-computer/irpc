@@ -16,3 +16,9 @@ proc-macro = true
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+
+[features]
+# These features should match irpc's features for proper code generation
+spans = []
+rpc = []
+default = ["spans", "rpc"]

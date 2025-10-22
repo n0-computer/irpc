@@ -46,6 +46,9 @@ n0-future = { workspace = true }
 futures-util = { workspace = true, optional = true }
 # for the derive reexport/feature
 irpc-derive = { version = "0.8.0", path = "./irpc-derive", optional = true }
+# for remote span propagation when both spans and rpc are enabled
+opentelemetry = { version = "0.31", optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 quinn = { workspace = true, optional = true, features = ["runtime-tokio"] }
@@ -64,11 +67,11 @@ testresult = "0.4.1"
 
 [features]
 # enable the remote transport
-rpc = ["dep:quinn", "dep:postcard", "dep:anyhow", "dep:smallvec", "dep:tracing", "tokio/io-util"]
+rpc = ["dep:quinn", "dep:postcard", "dep:anyhow", "dep:smallvec", "dep:tracing", "tokio/io-util", "dep:opentelemetry", "dep:tracing-opentelemetry", "irpc-derive?/rpc"]
 # add test utilities
 quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:anyhow", "dep:futures-buffered", "quinn/rustls-ring"]
 # pick up parent span when creating channel messages
-spans = ["dep:tracing"]
+spans = ["dep:tracing", "irpc-derive?/spans"]
 stream = ["dep:futures-util"]
 derive = ["dep:irpc-derive"]
 varint-util = ["dep:postcard", "dep:smallvec", "tokio/io-util"]

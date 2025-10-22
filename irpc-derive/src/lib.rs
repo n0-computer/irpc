@@ -285,6 +285,28 @@ fn generate_remote_service_impl(
     proto_enum_name: &Ident,
     variants_with_attr: &[(Ident, Type)],
 ) -> TokenStream2 {
+    // Generate match arms that set the span parent for each variant
+    #[cfg(all(feature = "spans", feature = "rpc"))]
+    let variants = variants_with_attr
+        .iter()
+        .map(|(variant_name, _inner_type)| {
+            let span_name = variant_name.to_string();
+            quote! {
+                #proto_enum_name::#variant_name(msg) => {
+                    // Create a span for this specific RPC operation
+                    let span = ::tracing::info_span!(#span_name);
+                    // Set its parent to the propagated remote context if available
+                    if let Some(ctx) = ::irpc::span_propagation::take_remote_span_context() {
+                        use ::irpc::span_propagation::OpenTelemetrySpanExt;
+                        let _ = span.set_parent(ctx);
+                    }
+                    let _guard = span.enter();
+                    #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
+                }
+            }
+        });
+
+    #[cfg(not(all(feature = "spans", feature = "rpc")))]
     let variants = variants_with_attr
         .iter()
         .map(|(variant_name, _inner_type)| {
