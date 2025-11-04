@@ -315,6 +315,81 @@ mod sealed {
     pub trait Sealed {}
 }
 
+/// Span context propagation for remote RPC calls
+///
+/// When both `spans` and `rpc` features are enabled, this module provides
+/// automatic propagation of OpenTelemetry trace context across remote boundaries.
+#[cfg(all(feature = "spans", feature = "rpc"))]
+#[cfg_attr(quicrpc_docsrs, doc(cfg(all(feature = "spans", feature = "rpc"))))]
+pub mod span_propagation {
+    use serde::{Deserialize, Serialize};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    // Re-export for use in macro-generated code
+    pub use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    thread_local! {
+        static SPAN_CONTEXT: RefCell<Option<opentelemetry::Context>> = RefCell::new(None);
+    }
+
+    /// Carrier for propagating span context across RPC boundaries using W3C Trace Context format
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct SpanContextCarrier {
+        headers: HashMap<String, String>,
+    }
+
+    impl opentelemetry::propagation::Injector for SpanContextCarrier {
+        fn set(&mut self, key: &str, value: String) {
+            self.headers.insert(key.to_string(), value);
+        }
+    }
+
+    impl opentelemetry::propagation::Extractor for SpanContextCarrier {
+        fn get(&self, key: &str) -> Option<&str> {
+            self.headers.get(key).map(|v| v.as_str())
+        }
+
+        fn keys(&self) -> Vec<&str> {
+            self.headers.keys().map(|k| k.as_str()).collect()
+        }
+    }
+
+    impl SpanContextCarrier {
+        /// Create a carrier from the current OpenTelemetry context
+        pub fn from_current() -> Self {
+            use opentelemetry::global;
+            let mut carrier = Self::default();
+            global::get_text_map_propagator(|prop| {
+                prop.inject_context(&opentelemetry::Context::current(), &mut carrier);
+            });
+            carrier
+        }
+
+        /// Extract an OpenTelemetry context from this carrier
+        pub fn to_context(&self) -> opentelemetry::Context {
+            use opentelemetry::global;
+            global::get_text_map_propagator(|prop| {
+                prop.extract_with_context(&opentelemetry::Context::current(), self)
+            })
+        }
+
+        /// Store this carrier's context in thread-local storage for use by with_remote_channels
+        pub fn store_in_thread_local(&self) {
+            let context = self.to_context();
+            SPAN_CONTEXT.with(|cell| {
+                *cell.borrow_mut() = Some(context);
+            });
+        }
+    }
+
+    /// Take the span context from thread-local storage (if any) and create a span with it as parent.
+    /// This is called by the generated `with_remote_channels` implementation.
+    pub fn take_remote_span_context() -> Option<opentelemetry::Context> {
+        SPAN_CONTEXT.with(|cell| cell.borrow_mut().take())
+    }
+}
+
 /// Requirements for a RPC message
 ///
 /// Even when just using the mem transport, we require messages to be Serializable and Deserializable.
@@ -1972,11 +2047,22 @@ pub mod rpc {
         msg: impl Into<S>,
     ) -> std::result::Result<SmallVec<[u8; 128]>, WriteError> {
         let msg = msg.into();
-        if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
+
+        // When both spans and rpc features are enabled, include span context
+        #[cfg(all(feature = "spans", feature = "rpc"))]
+        let payload = {
+            let span_ctx = crate::span_propagation::SpanContextCarrier::from_current();
+            (Some(span_ctx), msg)
+        };
+
+        #[cfg(not(all(feature = "spans", feature = "rpc")))]
+        let payload = (None::<()>, msg);
+
+        if postcard::experimental::serialized_size(&payload)? as u64 > MAX_MESSAGE_SIZE {
             return Err(WriteError::MaxMessageSizeExceeded);
         }
         let mut buf = SmallVec::<[u8; 128]>::new();
-        buf.write_length_prefixed(&msg)?;
+        buf.write_length_prefixed(&payload)?;
         Ok(buf)
     }
 
@@ -2419,8 +2505,23 @@ pub mod rpc {
         recv.read_exact(&mut buf)
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-        let msg: R = postcard::from_bytes(&buf)
+
+        // Deserialize the payload which includes optional span context
+        #[cfg(all(feature = "spans", feature = "rpc"))]
+        let (span_ctx, msg): (Option<crate::span_propagation::SpanContextCarrier>, R) =
+            postcard::from_bytes(&buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        #[cfg(not(all(feature = "spans", feature = "rpc")))]
+        let (_span_ctx, msg): (Option<()>, R) = postcard::from_bytes(&buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // Store span context in thread-local for use by with_remote_channels
+        #[cfg(all(feature = "spans", feature = "rpc"))]
+        if let Some(ctx) = span_ctx {
+            ctx.store_in_thread_local();
+        }
+
         let rx = recv;
         let tx = send;
         Ok(Some((msg, rx, tx)))
