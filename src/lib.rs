@@ -1776,7 +1776,7 @@ impl From<RequestError> for io::Error {
             #[cfg(feature = "rpc")]
             RequestError::Other { source, .. } => io::Error::other(source),
             #[cfg(not(feature = "rpc"))]
-            RequestError::Unreachable => unreachable!(),
+            RequestError::Unreachable { .. } => unreachable!(),
         }
     }
 }
