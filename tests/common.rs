@@ -3,6 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use irpc::util::{make_client_endpoint, make_server_endpoint};
+use n0_error::{e, stack_error};
 use quinn::Endpoint;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use testresult::TestResult;
@@ -19,9 +20,11 @@ pub fn create_connected_endpoints() -> TestResult<(Endpoint, Endpoint, SocketAdd
 #[derive(Debug)]
 pub struct NoSer(pub u64);
 
-#[derive(Debug, thiserror::Error)]
-#[error("Cannot serialize odd number: {0}")]
-pub struct OddNumberError(u64);
+#[stack_error(derive, add_meta)]
+#[error("Cannot serialize odd number")]
+pub struct OddNumberError {
+    value: u64,
+}
 
 impl Serialize for NoSer {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -29,7 +32,9 @@ impl Serialize for NoSer {
         S: Serializer,
     {
         if self.0 % 2 == 1 {
-            Err(serde::ser::Error::custom(OddNumberError(self.0)))
+            Err(serde::ser::Error::custom(e!(OddNumberError {
+                value: self.0
+            })))
         } else {
             serializer.serialize_u64(self.0)
         }
@@ -43,7 +48,7 @@ impl<'de> Deserialize<'de> for NoSer {
     {
         let value = u64::deserialize(deserializer)?;
         if value % 2 != 0 {
-            Err(serde::de::Error::custom(OddNumberError(value)))
+            Err(serde::de::Error::custom(e!(OddNumberError { value })))
         } else {
             Ok(NoSer(value))
         }
