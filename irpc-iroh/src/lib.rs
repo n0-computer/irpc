@@ -26,15 +26,48 @@ pub fn client<S: irpc::Service>(
     addr: impl Into<iroh::EndpointAddr>,
     alpn: impl AsRef<[u8]>,
 ) -> irpc::Client<S> {
-    let conn = IrohRemoteConnection::new(endpoint, addr.into(), alpn.as_ref().to_vec());
+    let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), alpn.as_ref().to_vec());
     irpc::Client::boxed(conn)
 }
+
+/// Wrap an existing iroh connection as an irpc remote connection.
+///
+/// This will stop working as soon as the underlying iroh connection is closed.
+/// If you need to support reconnects, use [`IrohLazyRemoteConnection`] instead.
+// TODO: remove this and provide a From instance as soon as iroh is 1.0 and
+// we can move irpc-iroh into irpc?
+#[derive(Debug, Clone)]
+pub struct IrohRemoteConnection(Connection);
+
+impl IrohRemoteConnection {
+    pub fn new(connection: Connection) -> Self {
+        Self(connection)
+    }
+}
+
+impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
+    fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
+        Box::new(self.clone())
+    }
+
+    fn open_bi(
+        &self,
+    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), irpc::RequestError>>
+    {
+        let conn = self.0.clone();
+        Box::pin(async move {
+            let (send, recv) = conn.open_bi().await?;
+            Ok((send, recv))
+        })
+    }
+}
+
 /// A connection to a remote service.
 ///
 /// Initially this does just have the endpoint and the address. Once a
 /// connection is established, it will be stored.
 #[derive(Debug, Clone)]
-pub struct IrohRemoteConnection(Arc<IrohRemoteConnectionInner>);
+pub struct IrohLazyRemoteConnection(Arc<IrohRemoteConnectionInner>);
 
 #[derive(Debug)]
 struct IrohRemoteConnectionInner {
@@ -44,7 +77,7 @@ struct IrohRemoteConnectionInner {
     alpn: Vec<u8>,
 }
 
-impl IrohRemoteConnection {
+impl IrohLazyRemoteConnection {
     pub fn new(endpoint: iroh::Endpoint, addr: iroh::EndpointAddr, alpn: Vec<u8>) -> Self {
         Self(Arc::new(IrohRemoteConnectionInner {
             endpoint,
@@ -55,7 +88,7 @@ impl IrohRemoteConnection {
     }
 }
 
-impl RemoteConnection for IrohRemoteConnection {
+impl RemoteConnection for IrohLazyRemoteConnection {
     fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
         Box::new(self.clone())
     }

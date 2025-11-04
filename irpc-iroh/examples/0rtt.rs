@@ -188,12 +188,9 @@ mod cli {
 mod ping {
     use anyhow::{Context, Result};
     use futures_util::FutureExt;
-    use iroh::{
-        endpoint::{Connection, RecvStream, SendStream},
-        Endpoint,
-    };
+    use iroh::Endpoint;
     use irpc::{channel::oneshot, rpc::RemoteService, rpc_requests, Client, WithChannels};
-    use irpc_iroh::{Iroh0RttProtocol, IrohProtocol};
+    use irpc_iroh::{Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection};
     use n0_future::future;
     use serde::{Deserialize, Serialize};
     use tracing::info;
@@ -250,7 +247,7 @@ mod ping {
                 .context("failed to connect to remote service")?;
             let fut: future::Boxed<bool> = Box::pin(async { true });
             Ok(EchoApi {
-                inner: Client::boxed(IrohConnection(conn)),
+                inner: Client::boxed(IrohRemoteConnection::new(conn)),
                 zero_rtt_accepted: fut.shared(),
             })
         }
@@ -268,7 +265,7 @@ mod ping {
                     info!("0-RTT possible from our side");
                     let fut: future::Boxed<bool> = Box::pin(zero_rtt_accepted);
                     Ok(EchoApi {
-                        inner: Client::boxed(IrohConnection(conn)),
+                        inner: Client::boxed(IrohRemoteConnection::new(conn)),
                         zero_rtt_accepted: fut.shared(),
                     })
                 }
@@ -277,7 +274,7 @@ mod ping {
                     let fut: future::Boxed<bool> = Box::pin(async { true });
                     let conn = connecting.await?;
                     Ok(EchoApi {
-                        inner: Client::boxed(IrohConnection(conn)),
+                        inner: Client::boxed(IrohRemoteConnection::new(conn)),
                         zero_rtt_accepted: fut.shared(),
                     })
                 }
@@ -319,27 +316,6 @@ mod ping {
                     tx.send(inner.data).await.ok();
                 }
             }
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct IrohConnection(Connection);
-
-    impl irpc::rpc::RemoteConnection for IrohConnection {
-        fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
-            Box::new(self.clone())
-        }
-
-        fn open_bi(
-            &self,
-        ) -> n0_future::future::Boxed<
-            std::result::Result<(SendStream, RecvStream), irpc::RequestError>,
-        > {
-            let conn = self.0.clone();
-            Box::pin(async move {
-                let (send, recv) = conn.open_bi().await?;
-                Ok((send, recv))
-            })
         }
     }
 }
