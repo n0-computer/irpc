@@ -4,7 +4,7 @@ use std::{
 };
 
 use iroh::{
-    endpoint::{Connecting, Connection, ConnectionError, RecvStream, SendStream},
+    endpoint::{Accepting, Connection, ConnectionError, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler},
 };
 use irpc::{
@@ -181,10 +181,8 @@ impl<R: DeserializeOwned + Send + 'static> Iroh0RttProtocol<R> {
 }
 
 impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for Iroh0RttProtocol<R> {
-    async fn on_connecting(&self, connecting: Connecting) -> Result<Connection, AcceptError> {
-        let (conn, _zero_rtt_accepted) = connecting
-            .into_0rtt()
-            .expect("accept into 0.5 RTT always succeeds");
+    async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
+        let conn = accepting.await?;
         Ok(conn)
     }
 
@@ -207,9 +205,8 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     connection: Connection,
     handler: Handler<R>,
 ) -> io::Result<()> {
-    if let Ok(remote) = connection.remote_id() {
-        tracing::Span::current().record("remote", tracing::field::display(remote.fmt_short()));
-    }
+    let remote = connection.remote_id();
+    tracing::Span::current().record("remote", tracing::field::display(remote.fmt_short()));
     debug!("connection accepted");
     loop {
         let Some((msg, rx, tx)) = read_request_raw(&connection).await? else {
