@@ -13,12 +13,12 @@ description = "Iroh transport for irpc"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-anyhow = { workspace = true }
 iroh = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
+n0-error = { workspace = true }
 n0-future = { workspace = true }
 irpc = { version = "0.10.0", path = ".." }
 iroh-base.workspace = true

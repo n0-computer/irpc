@@ -3,8 +3,8 @@
 //! * Manually implementing the connection loop
 //! * Authenticating peers
 
-use anyhow::Result;
 use iroh::{protocol::Router, Endpoint};
+use n0_error::Result;
 
 use self::storage::{StorageClient, StorageServer};
 
@@ -65,7 +65,6 @@ mod storage {
         sync::{Arc, Mutex},
     };
 
-    use anyhow::Result;
     use iroh::{
         endpoint::Connection,
         protocol::{AcceptError, ProtocolHandler},
@@ -77,6 +76,7 @@ mod storage {
     };
     // Import the macro
     use irpc_iroh::{read_request, IrohLazyRemoteConnection};
+    use n0_error::{AnyError, Result};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
@@ -231,13 +231,13 @@ mod storage {
             }
         }
 
-        pub async fn auth(&self, token: &str) -> Result<(), anyhow::Error> {
+        pub async fn auth(&self, token: &str) -> Result<()> {
             self.inner
                 .rpc(Auth {
                     token: token.to_string(),
                 })
                 .await?
-                .map_err(|err| anyhow::anyhow!(err))
+                .map_err(AnyError::from_string)
         }
 
         pub async fn get(&self, key: String) -> Result<Option<String>, irpc::Error> {

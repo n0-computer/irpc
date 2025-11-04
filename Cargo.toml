@@ -37,8 +37,6 @@ smallvec = { version = "1.14.0", features = ["write"], optional = true }
 rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
 # used in the test utils to generate quinn endpoints
 rcgen = { version = "0.14.5", optional = true }
-# used in the test utils to generate quinn endpoints
-anyhow = { workspace = true, optional = true }
 # used in the benches
 futures-buffered ={ version = "0.2.9", optional = true }
 # for AbortOnDropHandle
@@ -64,9 +62,9 @@ testresult = "0.4.1"
 
 [features]
 # enable the remote transport
-rpc = ["dep:quinn", "dep:postcard", "dep:anyhow", "dep:smallvec", "dep:tracing", "tokio/io-util"]
+rpc = ["dep:quinn", "dep:postcard", "dep:smallvec", "dep:tracing", "tokio/io-util"]
 # add test utilities
-quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:anyhow", "dep:futures-buffered", "quinn/rustls-ring"]
+quinn_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:futures-buffered", "quinn/rustls-ring"]
 # pick up parent span when creating channel messages
 spans = ["dep:tracing"]
 stream = ["dep:futures-util"]
@@ -101,7 +99,6 @@ rustdoc-args = ["--cfg", "quicrpc_docsrs"]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(quicrpc_docsrs)"] }
 
 [workspace.dependencies]
-anyhow = { version = "1.0.98" }
 tokio = { version = "1.44", default-features = false }
 postcard = { version = "1.1.1", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
@@ -113,3 +110,6 @@ iroh = { version = "0.94" }
 iroh-base = { version = "0.94" }
 quinn = { package = "iroh-quinn", version = "0.14.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
+
+[patch.crates-io]
+iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }

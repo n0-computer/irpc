@@ -3,7 +3,6 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
 
-use anyhow::{Context, Result};
 use irpc::{
     channel::{mpsc, oneshot},
     rpc::RemoteService,
@@ -11,6 +10,7 @@ use irpc::{
     util::{make_client_endpoint, make_server_endpoint},
     Client, WithChannels,
 };
+use n0_error::{Result, StdResultExt};
 // Import the macro
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
@@ -129,7 +129,7 @@ impl StorageApi {
         let local = self
             .inner
             .as_local()
-            .context("cannot listen on remote API")?;
+            .std_context("cannot listen on remote API")?;
         let join_handle = task::spawn(irpc::rpc::listen(
             endpoint,
             StorageProtocol::remote_handler(local),

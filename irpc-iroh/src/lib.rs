@@ -16,6 +16,7 @@ use irpc::{
     util::AsyncReadVarintExt,
     LocalSender, RequestError,
 };
+use n0_error::{e, Result};
 use n0_future::{future::Boxed as BoxFuture, TryFutureExt};
 use serde::de::DeserializeOwned;
 use tracing::{debug, error_span, trace, trace_span, warn, Instrument};
@@ -106,14 +107,11 @@ impl RemoteConnection for IrohLazyRemoteConnection {
                             // try with a new connection, just once
                             *guard = None;
                             connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
-                                .await
-                                .map_err(RequestError::Other)?
+                                .await?
                         }
                     }
                 }
-                None => connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
-                    .await
-                    .map_err(RequestError::Other)?,
+                None => connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard).await?,
             };
             Ok(pair)
         })
@@ -125,8 +123,11 @@ async fn connect_and_open_bi(
     addr: &iroh::EndpointAddr,
     alpn: &[u8],
     mut guard: tokio::sync::MutexGuard<'_, Option<Connection>>,
-) -> anyhow::Result<(SendStream, RecvStream)> {
-    let conn = endpoint.connect(addr.clone(), alpn).await?;
+) -> Result<(SendStream, RecvStream), RequestError> {
+    let conn = endpoint
+        .connect(addr.clone(), alpn)
+        .await
+        .map_err(|err| e!(RequestError::Other, err.into()))?;
     let (send, recv) = conn.open_bi().await?;
     *guard = Some(conn);
     Ok((send, recv))
@@ -290,7 +291,7 @@ pub async fn read_request_raw<R: DeserializeOwned + 'static>(
             ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
             b"request exceeded max message size",
         );
-        return Err(oneshot::RecvError::MaxMessageSizeExceeded.into());
+        return Err(e!(oneshot::RecvError::MaxMessageSizeExceeded).into());
     }
     let mut buf = vec![0; size as usize];
     recv.read_exact(&mut buf)

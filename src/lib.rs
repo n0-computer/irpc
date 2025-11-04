@@ -80,7 +80,7 @@
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! async fn main() -> n0_error::Result<()> {
 //!     let client = spawn_server();
 //!     let res = client.rpc(Multiply(3, 7)).await?;
 //!     assert_eq!(res, 21);
@@ -266,7 +266,7 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, resul
 ///     Set { key: String, value: String },
 /// }
 ///
-/// async fn client_usage(client: Client<StoreProtocol>) -> anyhow::Result<()> {
+/// async fn client_usage(client: Client<StoreProtocol>) -> n0_error::Result<()> {
 ///     client
 ///         .rpc(SetRequest {
 ///             key: "foo".to_string(),
