@@ -106,10 +106,11 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.3", default-features = false }
 n0-error = { version = "0.1.0" }
 tracing-subscriber = { version = "0.3.20" }
-iroh = { version = "0.94" }
-iroh-base = { version = "0.94" }
+iroh = { version = "0.95" }
+iroh-base = { version = "0.95" }
 quinn = { package = "iroh-quinn", version = "0.14.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
 
 [patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
+iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "Frando/0rtt-api" }
+iroh-base = { git = "https://github.com/n0-computer/iroh.git", branch = "Frando/0rtt-api" }

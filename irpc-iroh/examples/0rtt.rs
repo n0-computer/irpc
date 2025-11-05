@@ -187,9 +187,11 @@ mod cli {
 
 mod ping {
     use futures_util::FutureExt;
-    use iroh::Endpoint;
+    use iroh::{endpoint::ZeroRttStatus, Endpoint};
     use irpc::{channel::oneshot, rpc::RemoteService, rpc_requests, Client, WithChannels};
-    use irpc_iroh::{Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection};
+    use irpc_iroh::{
+        Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection, IrohZrttRemoteConnection,
+    };
     use n0_error::{Result, StdResultExt};
     use n0_future::future;
     use serde::{Deserialize, Serialize};
@@ -261,11 +263,20 @@ mod ping {
                 .await
                 .std_context("failed to connect to remote service")?;
             match connecting.into_0rtt() {
-                Ok((conn, zero_rtt_accepted)) => {
+                Ok(conn) => {
                     info!("0-RTT possible from our side");
-                    let fut: future::Boxed<bool> = Box::pin(zero_rtt_accepted);
+                    let fut: future::Boxed<bool> = Box::pin({
+                        let conn = conn.clone();
+                        async move {
+                            match conn.handshake_completed().await {
+                                Err(_) => false,
+                                Ok(ZeroRttStatus::Accepted(_)) => true,
+                                Ok(ZeroRttStatus::Rejected(_)) => false,
+                            }
+                        }
+                    });
                     Ok(EchoApi {
-                        inner: Client::boxed(IrohRemoteConnection::new(conn)),
+                        inner: Client::boxed(IrohZrttRemoteConnection::new(conn)),
                         zero_rtt_accepted: fut.shared(),
                     })
                 }
