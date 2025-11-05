@@ -1541,11 +1541,7 @@ impl<S: Service> Client<S> {
     /// Compared to [Self::notify], this variant takes a future that returns true
     /// if 0rtt has been accepted. If not, the data is sent again via the same
     /// remote channel. For local requests, the future is ignored.
-    pub fn notify_0rtt<Req>(
-        &self,
-        msg: Req,
-        zero_rtt_accepted: impl Future<Output = bool> + Send + 'static,
-    ) -> impl Future<Output = Result<()>> + Send + 'static
+    pub fn notify_0rtt<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1556,7 +1552,6 @@ impl<S: Service> Client<S> {
             match this.request().await? {
                 Request::Local(request) => {
                     request.send((msg,)).await?;
-                    zero_rtt_accepted.await;
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
@@ -1565,7 +1560,7 @@ impl<S: Service> Client<S> {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, _rx) = request.write_raw(&buf).await?;
-                    if !zero_rtt_accepted.await {
+                    if !this.0.zero_rtt_accepted().await {
                         // 0rtt was not accepted, the data is lost, send it again!
                         let Request::Remote(request) = this.request().await? else {
                             unreachable!()
@@ -1583,11 +1578,7 @@ impl<S: Service> Client<S> {
     /// Compared to [Self::rpc], this variant takes a future that returns true
     /// if 0rtt has been accepted. If not, the data is sent again via the same
     /// remote channel. For local requests, the future is ignored.
-    pub fn rpc_0rtt<Req, Res>(
-        &self,
-        msg: Req,
-        zero_rtt_accepted: impl Future<Output = bool> + Send + 'static,
-    ) -> impl Future<Output = Result<Res>> + Send + 'static
+    pub fn rpc_0rtt<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1600,7 +1591,6 @@ impl<S: Service> Client<S> {
                 Request::Local(request) => {
                     let (tx, rx) = oneshot::channel();
                     request.send((msg, tx)).await?;
-                    zero_rtt_accepted.await;
                     rx
                 }
                 #[cfg(not(feature = "rpc"))]
@@ -1610,7 +1600,7 @@ impl<S: Service> Client<S> {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, rx) = request.write_raw(&buf).await?;
-                    if zero_rtt_accepted.await {
+                    if this.0.zero_rtt_accepted().await {
                         rx
                     } else {
                         // 0rtt was not accepted, the data is lost, send it again!
@@ -1637,7 +1627,6 @@ impl<S: Service> Client<S> {
         &self,
         msg: Req,
         local_response_cap: usize,
-        zero_rtt_accepted: impl Future<Output = bool> + Send + 'static,
     ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
     where
         S: From<Req>,
@@ -1651,7 +1640,6 @@ impl<S: Service> Client<S> {
                 Request::Local(request) => {
                     let (tx, rx) = mpsc::channel(local_response_cap);
                     request.send((msg, tx)).await?;
-                    zero_rtt_accepted.await;
                     rx
                 }
                 #[cfg(not(feature = "rpc"))]
@@ -1661,7 +1649,7 @@ impl<S: Service> Client<S> {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, rx) = request.write_raw(&buf).await?;
-                    if zero_rtt_accepted.await {
+                    if this.0.zero_rtt_accepted().await {
                         rx
                     } else {
                         // 0rtt was not accepted, the data is lost, send it again!
@@ -1699,6 +1687,15 @@ impl<M> Clone for ClientInner<M> {
             Self::Remote(conn) => Self::Remote(conn.clone_boxed()),
             #[cfg(not(feature = "rpc"))]
             Self::Remote(_) => unreachable!(),
+        }
+    }
+}
+
+impl<M> ClientInner<M> {
+    async fn zero_rtt_accepted(&self) -> bool {
+        match self {
+            ClientInner::Local(_sender) => true,
+            ClientInner::Remote(remote_connection) => remote_connection.zero_rtt_accepted().await,
         }
     }
 }
@@ -1929,6 +1926,11 @@ pub mod rpc {
         fn open_bi(
             &self,
         ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
+
+        /// Returns whether 0-RTT data was accepted by the server.
+        ///
+        /// For connections that were fully authenticated before allowing to send any data, this should return `true`.
+        fn zero_rtt_accepted(&self) -> BoxFuture<bool>;
     }
 
     /// A connection to a remote service.
@@ -1959,6 +1961,10 @@ pub mod rpc {
                 let pair = conn.open_bi().await?;
                 Ok(pair)
             })
+        }
+
+        fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
+            Box::pin(async { true })
         }
     }
 
@@ -2000,6 +2006,10 @@ pub mod rpc {
                 };
                 Ok(pair)
             })
+        }
+
+        fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
+            Box::pin(async { true })
         }
     }
 
