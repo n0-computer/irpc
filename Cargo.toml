@@ -59,6 +59,8 @@ thousands = "0.2.0"
 # macro tests
 trybuild = "1.0.104"
 testresult = "0.4.1"
+# used in examples
+anyhow = { workspace = true }
 
 [features]
 # enable the remote transport
@@ -99,6 +101,7 @@ rustdoc-args = ["--cfg", "quicrpc_docsrs"]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(quicrpc_docsrs)"] }
 
 [workspace.dependencies]
+anyhow = { version = "1" }
 tokio = { version = "1.44", default-features = false }
 postcard = { version = "1.1.1", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }

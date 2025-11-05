@@ -1,15 +1,15 @@
 #[tokio::main]
-async fn main() -> n0_error::Result<()> {
+async fn main() -> anyhow::Result<()> {
     cli::run().await
 }
 
 mod proto {
     use std::collections::HashMap;
 
+    use anyhow::Result;
     use iroh::{protocol::Router, Endpoint, EndpointId};
     use irpc::{channel::oneshot, rpc_requests, Client, WithChannels};
     use irpc_iroh::IrohProtocol;
-    use n0_error::{Result, StdResultExt};
     use serde::{Deserialize, Serialize};
 
     const ALPN: &[u8] = b"iroh-irpc/simple/1";
@@ -44,7 +44,7 @@ mod proto {
         println!("endpoint id: {}", router.endpoint().id());
 
         tokio::signal::ctrl_c().await?;
-        router.shutdown().await.anyerr()?;
+        router.shutdown().await?;
         Ok(())
     }
 
@@ -83,9 +83,9 @@ mod proto {
 }
 
 mod cli {
+    use anyhow::Result;
     use clap::Parser;
     use iroh::EndpointId;
-    use n0_error::Result;
 
     use crate::proto::{connect, listen, GetRequest, SetRequest};
 

@@ -1,5 +1,5 @@
+use anyhow::Result;
 use iroh::{protocol::Router, Endpoint};
-use n0_error::Result;
 
 use self::storage::StorageApi;
 
@@ -57,6 +57,7 @@ mod storage {
 
     use std::collections::BTreeMap;
 
+    use anyhow::{Context, Result};
     use iroh::{protocol::ProtocolHandler, Endpoint};
     use irpc::{
         channel::{mpsc, oneshot},
@@ -65,7 +66,6 @@ mod storage {
     };
     // Import the macro
     use irpc_iroh::{IrohLazyRemoteConnection, IrohProtocol};
-    use n0_error::{Result, StdResultExt};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
@@ -171,7 +171,7 @@ mod storage {
             let local = self
                 .inner
                 .as_local()
-                .std_context("can not listen on remote service")?;
+                .context("can not listen on remote service")?;
             Ok(IrohProtocol::new(StorageProtocol::remote_handler(local)))
         }
 

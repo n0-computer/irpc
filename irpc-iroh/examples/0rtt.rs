@@ -4,9 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::{protocol::Router, Endpoint, EndpointAddr, EndpointId, SecretKey};
-use n0_error::{Result, StdResultExt};
 use ping::EchoApi;
 
 #[tokio::main]
@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
             tokio::signal::ctrl_c()
                 .await
                 .expect("failed to listen for ctrl_c");
-            server_router.shutdown().await.anyerr()?;
+            server_router.shutdown().await?;
         }
         cli::Args::Connect {
             ticket,
@@ -148,7 +148,7 @@ async fn ping_one(
 pub fn get_or_generate_secret_key() -> Result<SecretKey> {
     if let Ok(secret) = env::var("IROH_SECRET") {
         // Parse the secret key from string
-        SecretKey::from_str(&secret).std_context("Invalid secret key format")
+        SecretKey::from_str(&secret).context("Invalid secret key format")
     } else {
         // Generate a new random key
         let secret_key = SecretKey::generate(&mut rand::rng());
@@ -186,13 +186,13 @@ mod cli {
 }
 
 mod ping {
+    use anyhow::{Context, Result};
     use futures_util::FutureExt;
     use iroh::{endpoint::ZeroRttStatus, Endpoint};
     use irpc::{channel::oneshot, rpc::RemoteService, rpc_requests, Client, WithChannels};
     use irpc_iroh::{
         Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection, IrohZrttRemoteConnection,
     };
-    use n0_error::{Result, StdResultExt};
     use n0_future::future;
     use serde::{Deserialize, Serialize};
     use tracing::info;
@@ -227,7 +227,7 @@ mod ping {
             let local = self
                 .inner
                 .as_local()
-                .std_context("can not listen on remote service")?;
+                .context("can not listen on remote service")?;
             Ok(Iroh0RttProtocol::new(EchoProtocol::remote_handler(local)))
         }
 
@@ -235,7 +235,7 @@ mod ping {
             let local = self
                 .inner
                 .as_local()
-                .std_context("can not listen on remote service")?;
+                .context("can not listen on remote service")?;
             Ok(IrohProtocol::new(EchoProtocol::remote_handler(local)))
         }
 
@@ -246,7 +246,7 @@ mod ping {
             let conn = endpoint
                 .connect(addr, Self::ALPN)
                 .await
-                .std_context("failed to connect to remote service")?;
+                .context("failed to connect to remote service")?;
             let fut: future::Boxed<bool> = Box::pin(async { true });
             Ok(EchoApi {
                 inner: Client::boxed(IrohRemoteConnection::new(conn)),
@@ -261,7 +261,7 @@ mod ping {
             let connecting = endpoint
                 .connect_with_opts(addr, Self::ALPN, Default::default())
                 .await
-                .std_context("failed to connect to remote service")?;
+                .context("failed to connect to remote service")?;
             match connecting.into_0rtt() {
                 Ok(conn) => {
                     info!("0-RTT possible from our side");
@@ -283,7 +283,7 @@ mod ping {
                 Err(connecting) => {
                     info!("0-RTT not possible from our side");
                     let fut: future::Boxed<bool> = Box::pin(async { true });
-                    let conn = connecting.await.anyerr()?;
+                    let conn = connecting.await?;
                     Ok(EchoApi {
                         inner: Client::boxed(IrohRemoteConnection::new(conn)),
                         zero_rtt_accepted: fut.shared(),

@@ -3,13 +3,13 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
 
+use anyhow::bail;
 use irpc::{
     channel::{mpsc, none::NoReceiver, oneshot},
     rpc::{listen, RemoteService},
     util::{make_client_endpoint, make_server_endpoint},
     Channels, Client, Request, Service, WithChannels,
 };
-use n0_error::{bail_any, Result};
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -125,15 +125,15 @@ struct StorageApi {
 }
 
 impl StorageApi {
-    pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> Result<StorageApi> {
+    pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> anyhow::Result<StorageApi> {
         Ok(StorageApi {
             inner: Client::quinn(endpoint, addr),
         })
     }
 
-    pub fn listen(&self, endpoint: quinn::Endpoint) -> Result<AbortOnDropHandle<()>> {
+    pub fn listen(&self, endpoint: quinn::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
         let Some(local) = self.inner.as_local() else {
-            bail_any!("cannot listen on a remote service");
+            bail!("cannot listen on a remote service");
         };
         let handler = StorageProtocol::remote_handler(local);
         Ok(AbortOnDropHandle::new(task::spawn(listen(
@@ -141,7 +141,7 @@ impl StorageApi {
         ))))
     }
 
-    pub async fn get(&self, key: String) -> Result<oneshot::Receiver<Option<String>>> {
+    pub async fn get(&self, key: String) -> anyhow::Result<oneshot::Receiver<Option<String>>> {
         let msg = Get { key };
         match self.inner.request().await? {
             Request::Local(request) => {
@@ -156,7 +156,7 @@ impl StorageApi {
         }
     }
 
-    pub async fn list(&self) -> Result<mpsc::Receiver<String>> {
+    pub async fn list(&self) -> anyhow::Result<mpsc::Receiver<String>> {
         let msg = List;
         match self.inner.request().await? {
             Request::Local(request) => {
@@ -171,7 +171,7 @@ impl StorageApi {
         }
     }
 
-    pub async fn set(&self, key: String, value: String) -> Result<oneshot::Receiver<()>> {
+    pub async fn set(&self, key: String, value: String) -> anyhow::Result<oneshot::Receiver<()>> {
         let msg = Set { key, value };
         match self.inner.request().await? {
             Request::Local(request) => {
@@ -187,7 +187,7 @@ impl StorageApi {
     }
 }
 
-async fn local() -> Result<()> {
+async fn local() -> anyhow::Result<()> {
     let api = StorageActor::local();
     api.set("hello".to_string(), "world".to_string())
         .await?
@@ -201,7 +201,7 @@ async fn local() -> Result<()> {
     Ok(())
 }
 
-async fn remote() -> Result<()> {
+async fn remote() -> anyhow::Result<()> {
     let port = 10113;
     let (server, cert) =
         make_server_endpoint(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
@@ -227,7 +227,7 @@ async fn remote() -> Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     println!("Local use");
     local().await?;

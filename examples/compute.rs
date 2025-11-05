@@ -3,6 +3,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
 
+use anyhow::bail;
 use futures_buffered::BufferedStreamExt;
 use irpc::{
     channel::{mpsc, oneshot},
@@ -11,7 +12,6 @@ use irpc::{
     util::{make_client_endpoint, make_server_endpoint},
     Client, Request, WithChannels,
 };
-use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::{
     stream::StreamExt,
     task::{self, AbortOnDropHandle},
@@ -144,15 +144,15 @@ struct ComputeApi {
 }
 
 impl ComputeApi {
-    pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> Result<ComputeApi> {
+    pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> anyhow::Result<ComputeApi> {
         Ok(ComputeApi {
             inner: Client::quinn(endpoint, addr),
         })
     }
 
-    pub fn listen(&self, endpoint: quinn::Endpoint) -> Result<AbortOnDropHandle<()>> {
+    pub fn listen(&self, endpoint: quinn::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
         let Some(local) = self.inner.as_local() else {
-            bail_any!("cannot listen on a remote service");
+            bail!("cannot listen on a remote service");
         };
         let handler = ComputeProtocol::remote_handler(local);
         Ok(AbortOnDropHandle::new(task::spawn(listen(
@@ -160,7 +160,7 @@ impl ComputeApi {
         ))))
     }
 
-    pub async fn sqr(&self, num: u64) -> Result<oneshot::Receiver<u128>> {
+    pub async fn sqr(&self, num: u64) -> anyhow::Result<oneshot::Receiver<u128>> {
         let msg = Sqr { num };
         match self.inner.request().await? {
             Request::Local(request) => {
@@ -175,7 +175,7 @@ impl ComputeApi {
         }
     }
 
-    pub async fn sum(&self) -> Result<(mpsc::Sender<i64>, oneshot::Receiver<i64>)> {
+    pub async fn sum(&self) -> anyhow::Result<(mpsc::Sender<i64>, oneshot::Receiver<i64>)> {
         let msg = Sum;
         match self.inner.request().await? {
             Request::Local(request) => {
@@ -191,7 +191,7 @@ impl ComputeApi {
         }
     }
 
-    pub async fn fibonacci(&self, max: u64) -> Result<mpsc::Receiver<u64>> {
+    pub async fn fibonacci(&self, max: u64) -> anyhow::Result<mpsc::Receiver<u64>> {
         let msg = Fibonacci { max };
         match self.inner.request().await? {
             Request::Local(request) => {
@@ -206,7 +206,10 @@ impl ComputeApi {
         }
     }
 
-    pub async fn multiply(&self, initial: u64) -> Result<(mpsc::Sender<u64>, mpsc::Receiver<u64>)> {
+    pub async fn multiply(
+        &self,
+        initial: u64,
+    ) -> anyhow::Result<(mpsc::Sender<u64>, mpsc::Receiver<u64>)> {
         let msg = Multiply { initial };
         match self.inner.request().await? {
             Request::Local(request) => {
@@ -224,7 +227,7 @@ impl ComputeApi {
 }
 
 // Local usage example
-async fn local() -> Result<()> {
+async fn local() -> anyhow::Result<()> {
     let api = ComputeActor::local();
 
     // Test Sqr
@@ -262,7 +265,7 @@ async fn local() -> Result<()> {
     Ok(())
 }
 
-fn remote_api() -> Result<(ComputeApi, AbortOnDropHandle<()>)> {
+fn remote_api() -> anyhow::Result<(ComputeApi, AbortOnDropHandle<()>)> {
     let port = 10114;
     let (server, cert) =
         make_server_endpoint(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
@@ -275,7 +278,7 @@ fn remote_api() -> Result<(ComputeApi, AbortOnDropHandle<()>)> {
 }
 
 // Remote usage example
-async fn remote() -> Result<()> {
+async fn remote() -> anyhow::Result<()> {
     let (api, handle) = remote_api()?;
 
     // Test Sqr
@@ -315,7 +318,7 @@ async fn remote() -> Result<()> {
 }
 
 // Benchmark function using the new ComputeApi
-async fn bench(api: ComputeApi, n: u64) -> Result<()> {
+async fn bench(api: ComputeApi, n: u64) -> anyhow::Result<()> {
     // Individual RPCs (sequential)
     {
         let mut sum = 0;
@@ -339,7 +342,7 @@ async fn bench(api: ComputeApi, n: u64) -> Result<()> {
         let api = api.clone();
         let reqs = n0_future::stream::iter((0..n).map(move |i| {
             let api = api.clone();
-            async move { n0_error::Ok(api.sqr(i).await?.await?) }
+            async move { anyhow::Ok(api.sqr(i).await?.await?) }
         }));
         let resp: Vec<_> = reqs.buffered_unordered(32).try_collect().await?;
         let sum = resp.into_iter().sum::<u128>();
@@ -373,7 +376,7 @@ async fn bench(api: ComputeApi, n: u64) -> Result<()> {
         assert_eq!(sum, (0..n).map(|x| x * 2).sum::<u64>());
         clear_line()?;
         println!("bidi seq {} rps", rps.separate_with_underscores());
-        handle.await.std_context("panic in task")??;
+        handle.await??;
     }
 
     Ok(())
@@ -392,7 +395,7 @@ fn clear_line() -> io::Result<()> {
 }
 
 // Simple benchmark sending oneshot senders via an mpsc channel
-pub async fn reference_bench(n: u64) -> Result<()> {
+pub async fn reference_bench(n: u64) -> anyhow::Result<()> {
     // Create an mpsc channel to send oneshot senders
     let (tx, mut rx) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<u64>>(32);
 
@@ -411,8 +414,8 @@ pub async fn reference_bench(n: u64) -> Result<()> {
         let t0 = std::time::Instant::now();
         for i in 0..n {
             let (send, recv) = tokio::sync::oneshot::channel();
-            tx.send(send).await.anyerr()?;
-            sum += recv.await.anyerr()?;
+            tx.send(send).await?;
+            sum += recv.await?;
             if i % 10000 == 0 {
                 print!(".");
                 io::stdout().flush()?;
@@ -429,8 +432,8 @@ pub async fn reference_bench(n: u64) -> Result<()> {
         let t0 = std::time::Instant::now();
         let reqs = n0_future::stream::iter((0..n).map(|_| async {
             let (send, recv) = tokio::sync::oneshot::channel();
-            tx.send(send).await.anyerr()?;
-            n0_error::Ok(recv.await.anyerr()?)
+            tx.send(send).await?;
+            anyhow::Ok(recv.await?)
         }));
         let resp: Vec<_> = reqs.buffered_unordered(32).try_collect().await?;
         let sum = resp.into_iter().sum::<u64>();
@@ -444,7 +447,7 @@ pub async fn reference_bench(n: u64) -> Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     println!("Local use");
     local().await?;
