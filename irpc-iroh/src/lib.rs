@@ -1,11 +1,17 @@
 use std::{
-    fmt, io,
+    fmt,
+    future::Future,
+    io,
     sync::{atomic::AtomicU64, Arc},
 };
 
 use iroh::{
-    endpoint::{Connecting, Connection, ConnectionError, RecvStream, SendStream},
+    endpoint::{
+        Accepting, ConnectingError, Connection, ConnectionError, IncomingZeroRttConnection,
+        OutgoingZeroRttConnection, RecvStream, RemoteEndpointIdError, SendStream, VarInt,
+    },
     protocol::{AcceptError, ProtocolHandler},
+    EndpointId,
 };
 use irpc::{
     channel::oneshot,
@@ -47,6 +53,32 @@ impl IrohRemoteConnection {
 }
 
 impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
+    fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
+        Box::new(self.clone())
+    }
+
+    fn open_bi(
+        &self,
+    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), irpc::RequestError>>
+    {
+        let conn = self.0.clone();
+        Box::pin(async move {
+            let (send, recv) = conn.open_bi().await?;
+            Ok((send, recv))
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IrohZrttRemoteConnection(OutgoingZeroRttConnection);
+
+impl IrohZrttRemoteConnection {
+    pub fn new(connection: OutgoingZeroRttConnection) -> Self {
+        Self(connection)
+    }
+}
+
+impl irpc::rpc::RemoteConnection for IrohZrttRemoteConnection {
     fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
         Box::new(self.clone())
     }
@@ -166,17 +198,14 @@ impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
 }
 
 impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
-    fn accept(
-        &self,
-        connection: Connection,
-    ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let handler = self.handler.clone();
         let request_id = self
             .request_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let fut = handle_connection(connection, handler).map_err(AcceptError::from_err);
+        let fut = handle_connection(&connection, handler).map_err(AcceptError::from_err);
         let span = trace_span!("rpc", id = request_id);
-        Box::pin(fut.instrument(span))
+        fut.instrument(span).await
     }
 }
 
@@ -215,30 +244,32 @@ impl<R: DeserializeOwned + Send + 'static> Iroh0RttProtocol<R> {
 }
 
 impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for Iroh0RttProtocol<R> {
-    async fn on_connecting(&self, connecting: Connecting) -> Result<Connection, AcceptError> {
-        let (conn, _zero_rtt_accepted) = connecting
-            .into_0rtt()
-            .expect("accept into 0.5 RTT always succeeds");
-        Ok(conn)
-    }
-
-    fn accept(
-        &self,
-        connection: Connection,
-    ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
+    async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
+        let zrtt_conn = accepting.into_0rtt();
         let handler = self.handler.clone();
         let request_id = self
             .request_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let fut = handle_connection(connection, handler).map_err(AcceptError::from_err);
-        let span = trace_span!("rpc", id = request_id);
-        Box::pin(fut.instrument(span))
+        handle_connection(&zrtt_conn, handler)
+            .map_err(AcceptError::from_err)
+            .instrument(trace_span!("rpc", id = request_id))
+            .await?;
+        let conn = zrtt_conn
+            .handshake_completed()
+            .await
+            .map_err(|err| AcceptError::from(ConnectingError::from(err)))?;
+        Ok(conn)
+    }
+
+    async fn accept(&self, _connection: Connection) -> Result<(), AcceptError> {
+        // Noop, handled in [`Self::on_accepting`]
+        Ok(())
     }
 }
 
 /// Handles a single iroh connection with the provided `handler`.
 pub async fn handle_connection<R: DeserializeOwned + 'static>(
-    connection: Connection,
+    connection: &impl IncomingRemoteConnection,
     handler: Handler<R>,
 ) -> io::Result<()> {
     if let Ok(remote) = connection.remote_id() {
@@ -246,19 +277,64 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     }
     debug!("connection accepted");
     loop {
-        let Some((msg, rx, tx)) = read_request_raw(&connection).await? else {
+        let Some((msg, rx, tx)) = read_request_raw(connection).await? else {
             return Ok(());
         };
         handler(msg, rx, tx).await?;
     }
 }
 
+/// Reads a single request from a connection, and a message with channels.
 pub async fn read_request<S: RemoteService>(
-    connection: &Connection,
+    connection: &impl IncomingRemoteConnection,
 ) -> std::io::Result<Option<S::Message>> {
     Ok(read_request_raw::<S>(connection)
         .await?
         .map(|(msg, rx, tx)| S::with_remote_channels(msg, rx, tx)))
+}
+
+/// Abstracts over [`Connection`] and [`IncomingZeroRttConnection`].
+///
+/// You don't need to implement this trait yourself. It is used by [`read_request`] and
+/// [`handle_connection`] to work with both fully authenticated connections and with
+/// 0-RTT connections.
+pub trait IncomingRemoteConnection {
+    /// Accepts a single bidirectional stream.
+    fn accept_bi(
+        &self,
+    ) -> impl Future<Output = Result<(SendStream, RecvStream), ConnectionError>> + Send;
+    /// Close the connection.
+    fn close(&self, error_code: VarInt, reason: &[u8]);
+    /// Returns the remote's endpoint id.
+    ///
+    /// This may only fail for 0-RTT connections.
+    fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError>;
+}
+
+impl IncomingRemoteConnection for IncomingZeroRttConnection {
+    async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
+        self.accept_bi().await
+    }
+
+    fn close(&self, error_code: VarInt, reason: &[u8]) {
+        self.close(error_code, reason)
+    }
+    fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError> {
+        self.remote_id()
+    }
+}
+
+impl IncomingRemoteConnection for Connection {
+    async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
+        self.accept_bi().await
+    }
+
+    fn close(&self, error_code: VarInt, reason: &[u8]) {
+        self.close(error_code, reason)
+    }
+    fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError> {
+        Ok(self.remote_id())
+    }
 }
 
 /// Reads a single request from the connection.
@@ -269,7 +345,7 @@ pub async fn read_request<S: RemoteService>(
 /// Returns None if the remote closed the connection with error code `0`.
 /// Returns an error for all other failure cases.
 pub async fn read_request_raw<R: DeserializeOwned + 'static>(
-    connection: &Connection,
+    connection: &impl IncomingRemoteConnection,
 ) -> std::io::Result<Option<(R, RecvStream, SendStream)>> {
     let (send, mut recv) = match connection.accept_bi().await {
         Ok((s, r)) => (s, r),
@@ -324,7 +400,7 @@ pub async fn listen<R: DeserializeOwned + 'static>(endpoint: iroh::Endpoint, han
         let handler = handler.clone();
         let fut = async move {
             match incoming.await {
-                Ok(connection) => match handle_connection(connection, handler).await {
+                Ok(connection) => match handle_connection(&connection, handler).await {
                     Err(err) => warn!("connection closed with error: {err:?}"),
                     Ok(()) => debug!("connection closed"),
                 },
