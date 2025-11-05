@@ -284,19 +284,30 @@ pub async fn handle_connection<R: DeserializeOwned + 'static>(
     }
 }
 
+/// Reads a single request from a connection, and a message with channels.
 pub async fn read_request<S: RemoteService>(
-    connection: &Connection,
+    connection: &impl IncomingRemoteConnection,
 ) -> std::io::Result<Option<S::Message>> {
     Ok(read_request_raw::<S>(connection)
         .await?
         .map(|(msg, rx, tx)| S::with_remote_channels(msg, rx, tx)))
 }
 
+/// Abstracts over [`Connection`] and [`IncomingZeroRttConnection`].
+///
+/// You don't need to implement this trait yourself. It is used by [`read_request`] and
+/// [`handle_connection`] to work with both fully authenticated connections and with
+/// 0-RTT connections.
 pub trait IncomingRemoteConnection {
+    /// Accepts a single bidirectional stream.
     fn accept_bi(
         &self,
     ) -> impl Future<Output = Result<(SendStream, RecvStream), ConnectionError>> + Send;
+    /// Close the connection.
     fn close(&self, error_code: VarInt, reason: &[u8]);
+    /// Returns the remote's endpoint id.
+    ///
+    /// This may only fail for 0-RTT connections.
     fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError>;
 }
 
