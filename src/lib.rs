@@ -1285,7 +1285,7 @@ impl<S: Service> Client<S> {
     /// and a socket `addr` of the remote service.
     #[cfg(feature = "rpc")]
     pub fn quinn(endpoint: quinn::Endpoint, addr: std::net::SocketAddr) -> Self {
-        Self::boxed(rpc::QuinnRemoteConnection::new(endpoint, addr))
+        Self::boxed(rpc::QuinnLazyRemoteConnection::new(endpoint, addr))
     }
 
     /// Create a new client from a `rpc::RemoteConnection` trait object.
@@ -1899,18 +1899,35 @@ pub mod rpc {
     /// Initially this does just have the endpoint and the address. Once a
     /// connection is established, it will be stored.
     #[derive(Debug, Clone)]
-    pub(crate) struct QuinnRemoteConnection(Arc<QuinnRemoteConnectionInner>);
+    pub(crate) struct QuinnLazyRemoteConnection(Arc<QuinnLazyRemoteConnectionInner>);
 
     #[derive(Debug)]
-    struct QuinnRemoteConnectionInner {
+    struct QuinnLazyRemoteConnectionInner {
         pub endpoint: quinn::Endpoint,
         pub addr: std::net::SocketAddr,
         pub connection: tokio::sync::Mutex<Option<quinn::Connection>>,
     }
 
-    impl QuinnRemoteConnection {
+    impl RemoteConnection for quinn::Connection {
+        fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
+            Box::new(self.clone())
+        }
+
+        fn open_bi(
+            &self,
+        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
+        {
+            let conn = self.clone();
+            Box::pin(async move {
+                let pair = conn.open_bi().await?;
+                Ok(pair)
+            })
+        }
+    }
+
+    impl QuinnLazyRemoteConnection {
         pub fn new(endpoint: quinn::Endpoint, addr: std::net::SocketAddr) -> Self {
-            Self(Arc::new(QuinnRemoteConnectionInner {
+            Self(Arc::new(QuinnLazyRemoteConnectionInner {
                 endpoint,
                 addr,
                 connection: Default::default(),
@@ -1918,7 +1935,7 @@ pub mod rpc {
         }
     }
 
-    impl RemoteConnection for QuinnRemoteConnection {
+    impl RemoteConnection for QuinnLazyRemoteConnection {
         fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
             Box::new(self.clone())
         }

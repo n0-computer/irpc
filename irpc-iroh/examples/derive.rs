@@ -65,7 +65,7 @@ mod storage {
         rpc_requests, Client, WithChannels,
     };
     // Import the macro
-    use irpc_iroh::{IrohProtocol, IrohRemoteConnection};
+    use irpc_iroh::{IrohLazyRemoteConnection, IrohProtocol};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
@@ -161,7 +161,7 @@ mod storage {
             endpoint: Endpoint,
             addr: impl Into<iroh::EndpointAddr>,
         ) -> Result<StorageApi> {
-            let conn = IrohRemoteConnection::new(endpoint, addr.into(), Self::ALPN.to_vec());
+            let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), Self::ALPN.to_vec());
             Ok(StorageApi {
                 inner: Client::boxed(conn),
             })
