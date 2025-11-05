@@ -70,11 +70,11 @@ impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
 }
 
 #[derive(Debug, Clone)]
-pub struct IrohZrttRemoteConnection(Arc<OutgoingZeroRttConnection>);
+pub struct IrohZrttRemoteConnection(OutgoingZeroRttConnection);
 
 impl IrohZrttRemoteConnection {
     pub fn new(connection: OutgoingZeroRttConnection) -> Self {
-        Self(Arc::new(connection))
+        Self(connection)
     }
 }
 
