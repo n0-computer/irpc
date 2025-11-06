@@ -1,6 +1,6 @@
 [package]
 name = "irpc"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>", "n0 team"]
 keywords = ["api", "protocol", "network", "rpc"]
@@ -43,7 +43,7 @@ futures-buffered ={ version = "0.2.9", optional = true }
 n0-future = { workspace = true }
 futures-util = { workspace = true, optional = true }
 # for the derive reexport/feature
-irpc-derive = { version = "0.8.0", path = "./irpc-derive", optional = true }
+irpc-derive = { version = "0.9.0", path = "./irpc-derive", optional = true }
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 quinn = { workspace = true, optional = true, features = ["runtime-tokio"] }
