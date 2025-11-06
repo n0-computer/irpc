@@ -3,6 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use irpc::util::{make_client_endpoint, make_server_endpoint};
+use n0_error::stack_error;
 use quinn::Endpoint;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use testresult::TestResult;
@@ -19,8 +20,8 @@ pub fn create_connected_endpoints() -> TestResult<(Endpoint, Endpoint, SocketAdd
 #[derive(Debug)]
 pub struct NoSer(pub u64);
 
-#[derive(Debug, thiserror::Error)]
-#[error("Cannot serialize odd number: {0}")]
+#[stack_error(derive)]
+#[error("Cannot serialize odd number")]
 pub struct OddNumberError(u64);
 
 impl Serialize for NoSer {

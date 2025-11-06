@@ -7,7 +7,7 @@
 mod quinn_setup_utils {
     use std::{sync::Arc, time::Duration};
 
-    use anyhow::Result;
+    use n0_error::{Result, StdResultExt};
     use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, ServerConfig};
 
     /// Create a quinn client config and trusts given certificates.
@@ -19,7 +19,7 @@ mod quinn_setup_utils {
         let mut certs = rustls::RootCertStore::empty();
         for cert in server_certs {
             let cert = rustls::pki_types::CertificateDer::from(cert.to_vec());
-            certs.add(cert)?;
+            certs.add(cert).std_context("Error configuring certs")?;
         }
 
         let provider = rustls::crypto::ring::default_provider();
@@ -29,7 +29,8 @@ mod quinn_setup_utils {
             .with_root_certificates(certs)
             .with_no_client_auth();
         let quic_client_config =
-            quinn::crypto::rustls::QuicClientConfig::try_from(crypto_client_config)?;
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto_client_config)
+                .std_context("Error creating QUIC client config")?;
 
         let mut transport_config = quinn::TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(1)));
@@ -41,14 +42,16 @@ mod quinn_setup_utils {
     /// Create a quinn server config with a self-signed certificate
     ///
     /// Returns the server config and the certificate in DER format
-    pub fn configure_server() -> anyhow::Result<(ServerConfig, Vec<u8>)> {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+    pub fn configure_server() -> Result<(ServerConfig, Vec<u8>)> {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .std_context("Error generating self-signed cert")?;
         let cert_der = cert.cert.der();
         let priv_key =
             rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
         let cert_chain = vec![cert_der.clone()];
 
-        let mut server_config = ServerConfig::with_single_cert(cert_chain, priv_key.into())?;
+        let mut server_config = ServerConfig::with_single_cert(cert_chain, priv_key.into())
+            .std_context("Error creating server config")?;
         Arc::get_mut(&mut server_config.transport)
             .unwrap()
             .max_concurrent_uni_streams(0_u8.into());
@@ -65,7 +68,8 @@ mod quinn_setup_utils {
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
             .with_no_client_auth();
-        let client_cfg = QuicClientConfig::try_from(crypto)?;
+        let client_cfg =
+            QuicClientConfig::try_from(crypto).std_context("Error creating QUIC client config")?;
         let client_cfg = ClientConfig::new(Arc::new(client_cfg));
         Ok(client_cfg)
     }
