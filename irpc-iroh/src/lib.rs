@@ -9,6 +9,7 @@ use iroh::{
     endpoint::{
         Accepting, ConnectingError, Connection, ConnectionError, IncomingZeroRttConnection,
         OutgoingZeroRttConnection, RecvStream, RemoteEndpointIdError, SendStream, VarInt,
+        ZeroRttStatus,
     },
     protocol::{AcceptError, ProtocolHandler},
     EndpointId,
@@ -67,6 +68,10 @@ impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
             Ok((send, recv))
         })
     }
+
+    fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
+        Box::pin(async { true })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +96,17 @@ impl irpc::rpc::RemoteConnection for IrohZrttRemoteConnection {
         Box::pin(async move {
             let (send, recv) = conn.open_bi().await?;
             Ok((send, recv))
+        })
+    }
+
+    fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
+        let conn = self.0.clone();
+        Box::pin(async move {
+            match conn.handshake_completed().await {
+                Err(_) => false,
+                Ok(ZeroRttStatus::Accepted(_)) => true,
+                Ok(ZeroRttStatus::Rejected(_)) => false,
+            }
         })
     }
 }
@@ -147,6 +163,10 @@ impl RemoteConnection for IrohLazyRemoteConnection {
             };
             Ok(pair)
         })
+    }
+
+    fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
+        Box::pin(async { true })
     }
 }
 
