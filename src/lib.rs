@@ -1692,6 +1692,7 @@ impl<M> Clone for ClientInner<M> {
 }
 
 impl<M> ClientInner<M> {
+    #[allow(dead_code)]
     async fn zero_rtt_accepted(&self) -> bool {
         match self {
             ClientInner::Local(_sender) => true,
