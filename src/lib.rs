@@ -1695,7 +1695,10 @@ impl<M> ClientInner<M> {
     async fn zero_rtt_accepted(&self) -> bool {
         match self {
             ClientInner::Local(_sender) => true,
+            #[cfg(feature = "rpc")]
             ClientInner::Remote(remote_connection) => remote_connection.zero_rtt_accepted().await,
+            #[cfg(not(feature = "rpc"))]
+            Self::Remote(_) => unreachable!(),
         }
     }
 }
