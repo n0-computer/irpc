@@ -79,7 +79,7 @@ async fn ping_one_0rtt(
 ) -> Result<()> {
     let msg = i.to_be_bytes();
     let data = api.echo_0rtt(msg.to_vec()).await?;
-    let latency = endpoint.latency(endpoint_id);
+    let latency = endpoint.latency(endpoint_id).await;
     if wait_for_ticket {
         tokio::spawn(async move {
             let latency = latency.unwrap_or(Duration::from_millis(500));
@@ -110,7 +110,7 @@ async fn ping_one_no_0rtt(
 ) -> Result<()> {
     let msg = i.to_be_bytes();
     let data = api.echo(msg.to_vec()).await?;
-    let latency = endpoint.latency(endpoint_id);
+    let latency = endpoint.latency(endpoint_id).await;
     drop(api);
     let elapsed = t0.elapsed();
     assert!(data == msg);
