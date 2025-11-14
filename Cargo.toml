@@ -113,3 +113,6 @@ iroh = { version = "0.95" }
 iroh-base = { version = "0.95" }
 quinn = { package = "iroh-quinn", version = "0.14.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
+
+[patch.crates-io]
+iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "connection-state" }
