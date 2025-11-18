@@ -1296,6 +1296,12 @@ impl<S: Service> From<LocalSender<S>> for Client<S> {
     }
 }
 
+impl<S: Service> From<mpsc::Sender<S::Message>> for Client<S> {
+    fn from(tx: mpsc::Sender<S::Message>) -> Self {
+        Self(ClientInner::Local(tx), PhantomData)
+    }
+}
+
 impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for Client<S> {
     fn from(tx: tokio::sync::mpsc::Sender<S::Message>) -> Self {
         LocalSender::from(tx).into()
