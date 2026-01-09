@@ -107,16 +107,13 @@ postcard = { version = "1.1.1", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
 tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.3", default-features = false }
-n0-error = { version = "0.1.0" }
+n0-error = { version = "0.1" }
 tracing-subscriber = { version = "0.3.20" }
 iroh = { version = "0.95" }
 iroh-base = { version = "0.95" }
-quinn = { package = "iroh-quinn", version = "0.14.0", default-features = false }
+quinn = { package = "iroh-quinn", version = "0.15.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
 
 [patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "feat-multipath" }
-iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "feat-multipath" }
-iroh-quinn = { git = "https://github.com/n0-computer/quinn", branch = "main-iroh" }
-iroh-quinn-proto = { git = "https://github.com/n0-computer/quinn", branch = "main-iroh" }
-iroh-quinn-udp = { git = "https://github.com/n0-computer/quinn", branch = "main-iroh" }
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "release-0-96" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "release-0-96" }

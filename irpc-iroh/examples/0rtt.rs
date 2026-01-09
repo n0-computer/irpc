@@ -1,12 +1,18 @@
 use std::{
+    collections::HashMap,
     env,
     str::FromStr,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use iroh::{protocol::Router, Endpoint, EndpointAddr, EndpointId, SecretKey};
+use iroh::{
+    endpoint::{AfterHandshakeOutcome, ConnectionInfo, EndpointHooks},
+    protocol::Router,
+    Endpoint, EndpointAddr, EndpointId, SecretKey,
+};
 use ping::EchoApi;
 
 #[tokio::main]
@@ -56,10 +62,23 @@ async fn main() -> Result<()> {
                 .next()
                 .unwrap_or(u64::MAX);
             let delay = std::time::Duration::from_millis(delay_ms);
-            let endpoint = Endpoint::builder().bind().await?;
+            let connection_stats = ConnectionStats::default();
+            let endpoint = Endpoint::builder()
+                .hooks(connection_stats.clone())
+                .bind()
+                .await?;
             let addr: EndpointAddr = ticket.into();
             for i in 0..n {
-                if let Err(e) = ping_one(no_0rtt, &endpoint, &addr, i, wait_for_ticket).await {
+                if let Err(e) = ping_one(
+                    no_0rtt,
+                    endpoint.clone(),
+                    &addr,
+                    i,
+                    wait_for_ticket,
+                    connection_stats.clone(),
+                )
+                .await
+                {
                     eprintln!("Error pinging {}: {e}", addr.id);
                 }
                 tokio::time::sleep(delay).await;
@@ -69,21 +88,42 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Default, Clone)]
+struct ConnectionStats(Arc<Mutex<HashMap<EndpointId, ConnectionInfo>>>);
+
+impl ConnectionStats {
+    fn rtt(&self, endpoint_id: &EndpointId) -> Option<Duration> {
+        let stats = self.0.lock().expect("poisoned");
+        stats
+            .get(endpoint_id)
+            .map(|conn_info| conn_info.selected_path().map(|path| path.rtt()))
+            .flatten()
+    }
+}
+
+impl EndpointHooks for ConnectionStats {
+    async fn after_handshake<'a>(&'a self, conn: &'a ConnectionInfo) -> AfterHandshakeOutcome {
+        let mut stats = self.0.lock().expect("lock poisoned");
+        let _ = stats.insert(conn.remote_id(), conn.clone());
+        AfterHandshakeOutcome::Accept
+    }
+}
+
 async fn ping_one_0rtt(
     api: EchoApi,
-    endpoint: &Endpoint,
     endpoint_id: EndpointId,
     wait_for_ticket: bool,
     i: u64,
     t0: Instant,
+    connection_stats: ConnectionStats,
 ) -> Result<()> {
     let msg = i.to_be_bytes();
     let data = api.echo_0rtt(msg.to_vec()).await?;
-    let latency = endpoint.latency(endpoint_id).await;
+    let rtt = connection_stats.rtt(&endpoint_id);
     if wait_for_ticket {
         tokio::spawn(async move {
-            let latency = latency.unwrap_or(Duration::from_millis(500));
-            tokio::time::sleep(latency * 2).await;
+            let rtt = rtt.unwrap_or(Duration::from_millis(500));
+            tokio::time::sleep(rtt).await;
             drop(api);
         });
     } else {
@@ -92,9 +132,8 @@ async fn ping_one_0rtt(
     let elapsed = t0.elapsed();
     assert!(data == msg);
     println!(
-        "latency: {}",
-        latency
-            .map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
+        "round-trip time: {}",
+        rtt.map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
             .unwrap_or("unknown".into())
     );
     println!("ping:    {}ms\n", elapsed.as_micros() as f64 / 1000.0);
@@ -103,21 +142,20 @@ async fn ping_one_0rtt(
 
 async fn ping_one_no_0rtt(
     api: EchoApi,
-    endpoint: &Endpoint,
     endpoint_id: EndpointId,
     i: u64,
     t0: Instant,
+    connection_stats: ConnectionStats,
 ) -> Result<()> {
     let msg = i.to_be_bytes();
     let data = api.echo(msg.to_vec()).await?;
-    let latency = endpoint.latency(endpoint_id).await;
+    let rtt = connection_stats.rtt(&endpoint_id);
     drop(api);
     let elapsed = t0.elapsed();
     assert!(data == msg);
     println!(
-        "latency: {}",
-        latency
-            .map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
+        "rtt: {}",
+        rtt.map(|x| format!("{}ms", x.as_micros() as f64 / 1000.0))
             .unwrap_or("unknown".into())
     );
     println!("ping:    {}ms\n", elapsed.as_micros() as f64 / 1000.0);
@@ -126,19 +164,20 @@ async fn ping_one_no_0rtt(
 
 async fn ping_one(
     no_0rtt: bool,
-    endpoint: &Endpoint,
+    endpoint: Endpoint,
     addr: &EndpointAddr,
     i: u64,
     wait_for_ticket: bool,
+    connection_stats: ConnectionStats,
 ) -> Result<()> {
     let endpoint_id = addr.id;
     let t0 = Instant::now();
     if !no_0rtt {
-        let api = EchoApi::connect_0rtt(endpoint.clone(), addr.clone()).await?;
-        ping_one_0rtt(api, endpoint, endpoint_id, wait_for_ticket, i, t0).await?;
+        let api = EchoApi::connect_0rtt(endpoint, addr.clone()).await?;
+        ping_one_0rtt(api, endpoint_id, wait_for_ticket, i, t0, connection_stats).await?;
     } else {
-        let api = EchoApi::connect(endpoint.clone(), addr.clone()).await?;
-        ping_one_no_0rtt(api, endpoint, endpoint_id, i, t0).await?;
+        let api = EchoApi::connect(endpoint, addr.clone()).await?;
+        ping_one_no_0rtt(api, endpoint_id, i, t0, connection_stats).await?;
     }
     Ok(())
 }
