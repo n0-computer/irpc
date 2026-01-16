@@ -44,6 +44,9 @@ n0-future = { workspace = true }
 futures-util = { workspace = true, optional = true }
 # for the derive reexport/feature
 irpc-derive = { version = "0.9.0", path = "./irpc-derive", optional = true }
+# for remote span propagation when use-tracing-opentelemetry feature is enabled
+opentelemetry = { version = "0.31", optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 quinn = { workspace = true, optional = true, features = ["runtime-tokio"] }
@@ -72,6 +75,8 @@ spans = ["dep:tracing"]
 stream = ["dep:futures-util"]
 derive = ["dep:irpc-derive"]
 varint-util = ["dep:postcard", "dep:smallvec", "tokio/io-util"]
+# enable OpenTelemetry span context propagation across remote connections
+use-tracing-opentelemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry", "rpc"]
 default = ["rpc", "quinn_endpoint_setup", "spans", "stream", "derive"]
 
 [[example]]
@@ -108,7 +113,7 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.3", default-features = false }
 n0-error = { version = "0.1" }
-tracing-subscriber = { version = "0.3.20" }
+tracing-subscriber = { version = "0.3" }
 iroh = { version = "0.96" }
 iroh-base = { version = "0.96" }
 quinn = { package = "iroh-quinn", version = "0.16.0", default-features = false }

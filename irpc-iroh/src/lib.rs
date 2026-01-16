@@ -21,11 +21,10 @@ use irpc::{
         MAX_MESSAGE_SIZE,
     },
     util::AsyncReadVarintExt,
-    LocalSender, RequestError,
+    LocalSender, RequestError, Service,
 };
 use n0_error::{e, Result};
 use n0_future::{future::Boxed as BoxFuture, TryFutureExt};
-use serde::de::DeserializeOwned;
 use tracing::{debug, error_span, trace, trace_span, warn, Instrument};
 
 /// Returns a client that connects to a irpc service using an [`iroh::Endpoint`].
@@ -188,8 +187,8 @@ async fn connect_and_open_bi(
 /// A [`ProtocolHandler`] for an irpc protocol.
 ///
 /// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
-pub struct IrohProtocol<R> {
-    handler: Handler<R>,
+pub struct IrohProtocol<S> {
+    handler: Handler<S>,
     request_id: AtomicU64,
 }
 
@@ -199,17 +198,17 @@ impl<T> fmt::Debug for IrohProtocol<T> {
     }
 }
 
-impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
-    pub fn with_sender(local_sender: impl Into<LocalSender<R>>) -> Self
+impl<S: Service> IrohProtocol<S> {
+    pub fn with_sender(local_sender: impl Into<LocalSender<S>>) -> Self
     where
-        R: RemoteService,
+        S: RemoteService,
     {
-        let handler = R::remote_handler(local_sender.into());
+        let handler = S::remote_handler(local_sender.into());
         Self::new(handler)
     }
 
     /// Creates a new [`IrohProtocol`] for the `handler`.
-    pub fn new(handler: Handler<R>) -> Self {
+    pub fn new(handler: Handler<S>) -> Self {
         Self {
             handler,
             request_id: Default::default(),
@@ -217,13 +216,13 @@ impl<R: DeserializeOwned + Send + 'static> IrohProtocol<R> {
     }
 }
 
-impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
+impl<S: Service> ProtocolHandler for IrohProtocol<S> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let handler = self.handler.clone();
         let request_id = self
             .request_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let fut = handle_connection(&connection, handler).map_err(AcceptError::from_err);
+        let fut = handle_connection::<S>(&connection, handler).map_err(AcceptError::from_err);
         let span = trace_span!("rpc", id = request_id);
         fut.instrument(span).await
     }
@@ -234,8 +233,9 @@ impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
 /// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
 ///
 /// For details about when it is safe to use 0rtt, see <https://www.iroh.computer/blog/0rtt-api>
-pub struct Iroh0RttProtocol<R> {
-    handler: Handler<R>,
+/// For details about when it is safe to use 0rtt, see <https://www.iroh.computer/blog/0rtt-api>
+pub struct Iroh0RttProtocol<S> {
+    handler: Handler<S>,
     request_id: AtomicU64,
 }
 
@@ -245,17 +245,17 @@ impl<T> fmt::Debug for Iroh0RttProtocol<T> {
     }
 }
 
-impl<R: DeserializeOwned + Send + 'static> Iroh0RttProtocol<R> {
-    pub fn with_sender(local_sender: impl Into<LocalSender<R>>) -> Self
+impl<S: Service> Iroh0RttProtocol<S> {
+    pub fn with_sender(local_sender: impl Into<LocalSender<S>>) -> Self
     where
-        R: RemoteService,
+        S: RemoteService,
     {
-        let handler = R::remote_handler(local_sender.into());
+        let handler = S::remote_handler(local_sender.into());
         Self::new(handler)
     }
 
     /// Creates a new [`Iroh0RttProtocol`] for the `handler`.
-    pub fn new(handler: Handler<R>) -> Self {
+    pub fn new(handler: Handler<S>) -> Self {
         Self {
             handler,
             request_id: Default::default(),
@@ -263,14 +263,14 @@ impl<R: DeserializeOwned + Send + 'static> Iroh0RttProtocol<R> {
     }
 }
 
-impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for Iroh0RttProtocol<R> {
+impl<S: Service> ProtocolHandler for Iroh0RttProtocol<S> {
     async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
         let zrtt_conn = accepting.into_0rtt();
         let handler = self.handler.clone();
         let request_id = self
             .request_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        handle_connection(&zrtt_conn, handler)
+        handle_connection::<S>(&zrtt_conn, handler)
             .map_err(AcceptError::from_err)
             .instrument(trace_span!("rpc", id = request_id))
             .await?;
@@ -288,23 +288,27 @@ impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for Iroh0RttProtocol<
 }
 
 /// Handles a single iroh connection with the provided `handler`.
-pub async fn handle_connection<R: DeserializeOwned + 'static>(
+///
+/// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
+pub async fn handle_connection<S: Service>(
     connection: &impl IncomingRemoteConnection,
-    handler: Handler<R>,
+    handler: Handler<S>,
 ) -> io::Result<()> {
     if let Ok(remote) = connection.remote_id() {
         tracing::Span::current().record("remote", tracing::field::display(remote.fmt_short()));
     }
     debug!("connection accepted");
     loop {
-        let Some((msg, rx, tx)) = read_request_raw(connection).await? else {
+        let Some((msg, rx, tx)) = read_request_raw::<S>(connection).await? else {
             return Ok(());
         };
         handler(msg, rx, tx).await?;
     }
 }
 
-/// Reads a single request from a connection, and a message with channels.
+/// Reads a request from a connection and converts it to a message enum.
+///
+/// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
 pub async fn read_request<S: RemoteService>(
     connection: &impl IncomingRemoteConnection,
 ) -> std::io::Result<Option<S::Message>> {
@@ -361,12 +365,16 @@ impl IncomingRemoteConnection for Connection {
 ///
 /// This accepts a bi-directional stream from the connection and reads and parses the request.
 ///
+/// The wire format used depends on `S::SPAN_PROPAGATION`:
+/// - When `true`: expects `(Option<SpanContextCarrier>, Message)` tuple format
+/// - When `false`: expects plain `Message` format
+///
 /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
 /// Returns None if the remote closed the connection with error code `0`.
 /// Returns an error for all other failure cases.
-pub async fn read_request_raw<R: DeserializeOwned + 'static>(
+pub async fn read_request_raw<S: Service>(
     connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<Option<(R, RecvStream, SendStream)>> {
+) -> std::io::Result<Option<(S, RecvStream, SendStream)>> {
     let (send, mut recv) = match connection.accept_bi().await {
         Ok((s, r)) => (s, r),
         Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
@@ -393,15 +401,32 @@ pub async fn read_request_raw<R: DeserializeOwned + 'static>(
     recv.read_exact(&mut buf)
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-    let msg: R =
-        postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    // Deserialize based on S::SPAN_PROPAGATION
+    let msg: S = if S::SPAN_PROPAGATION {
+        let (span_ctx, msg): (Option<irpc::span_propagation::SpanContextCarrier>, S) =
+            postcard::from_bytes(&buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // Store span context in thread-local for use by with_remote_channels
+        if let Some(ctx) = span_ctx {
+            ctx.store_in_thread_local();
+        }
+
+        msg
+    } else {
+        postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+    };
+
     let rx = recv;
     let tx = send;
     Ok(Some((msg, rx, tx)))
 }
 
-/// Utility function to listen for incoming connections and handle them with the provided handler
-pub async fn listen<R: DeserializeOwned + 'static>(endpoint: iroh::Endpoint, handler: Handler<R>) {
+/// Utility function to listen for incoming connections and handle them with the provided handler.
+///
+/// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
+pub async fn listen<S: Service>(endpoint: iroh::Endpoint, handler: Handler<S>) {
     let mut request_id = 0u64;
     let mut tasks = n0_future::task::JoinSet::new();
     loop {
@@ -420,7 +445,7 @@ pub async fn listen<R: DeserializeOwned + 'static>(endpoint: iroh::Endpoint, han
         let handler = handler.clone();
         let fut = async move {
             match incoming.await {
-                Ok(connection) => match handle_connection(&connection, handler).await {
+                Ok(connection) => match handle_connection::<S>(&connection, handler).await {
                     Err(err) => warn!("connection closed with error: {err:?}"),
                     Ok(()) => debug!("connection closed"),
                 },

@@ -152,15 +152,21 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         let message_from_impls =
             generate_message_enum_from_impls(message_enum_name, &variants_with_attr, enum_name);
 
+        let span_propagation = args.span_propagation;
         let service_impl = quote! {
             impl ::irpc::Service for #enum_name {
                 type Message = #message_enum_name;
+                const SPAN_PROPAGATION: bool = #span_propagation;
             }
         };
 
         let remote_service_impl = if !args.no_rpc {
-            let block =
-                generate_remote_service_impl(message_enum_name, enum_name, &variants_with_attr);
+            let block = generate_remote_service_impl(
+                message_enum_name,
+                enum_name,
+                &variants_with_attr,
+                args.span_propagation,
+            );
             quote! {
                 #cfg_feature_rpc
                 #block
@@ -280,17 +286,37 @@ fn generate_message_enum_from_impls(
 }
 
 /// Generate `RemoteService` impl for message enums.
+///
+/// When `span_propagation` is true, the generated code will create spans for each
+/// request and set their parent from the propagated remote context.
 fn generate_remote_service_impl(
     message_enum_name: &Ident,
     proto_enum_name: &Ident,
     variants_with_attr: &[(Ident, Type)],
+    span_propagation: bool,
 ) -> TokenStream2 {
     let variants = variants_with_attr
         .iter()
         .map(|(variant_name, _inner_type)| {
-            quote! {
-                #proto_enum_name::#variant_name(msg) => {
-                    #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
+            let span_name = variant_name.to_string();
+
+            if span_propagation {
+                // When span_propagation is enabled, create spans and set parent from remote context
+                quote! {
+                    #proto_enum_name::#variant_name(msg) => {
+                        // Create a span for this specific RPC operation
+                        let span = ::tracing::info_span!(#span_name);
+                        // Set its parent to the propagated remote context if available
+                        ::irpc::span_propagation::set_span_parent_from_remote(&span);
+                        let _guard = span.enter();
+                        #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
+                    }
+                }
+            } else {
+                quote! {
+                    #proto_enum_name::#variant_name(msg) => {
+                        #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
+                    }
                 }
             }
         });
@@ -339,6 +365,8 @@ struct MacroArgs {
     rpc_feature: Option<String>,
     no_rpc: bool,
     no_spans: bool,
+    /// When true, includes span context in the wire format and enables span propagation.
+    span_propagation: bool,
 }
 
 impl Parse for MacroArgs {
@@ -373,6 +401,9 @@ impl Parse for MacroArgs {
                 }
                 "no_spans" => {
                     this.no_spans = true;
+                }
+                "span_propagation" => {
+                    this.span_propagation = true;
                 }
                 _ => {
                     return syn_err(arg.span(), format!("Unknown parameter: {arg}"));
