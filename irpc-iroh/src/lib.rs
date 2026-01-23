@@ -8,7 +8,7 @@ use std::{
 use iroh::{
     EndpointId,
     endpoint::{
-        Accepting, ConnectingError, Connection, ConnectionError, IncomingZeroRttConnection,
+        Accepting, Connection, ConnectionError, IncomingZeroRttConnection,
         OutgoingZeroRttConnection, RecvStream, RemoteEndpointIdError, SendStream, VarInt,
         ZeroRttStatus,
     },
@@ -277,7 +277,7 @@ impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for Iroh0RttProtocol<
         let conn = zrtt_conn
             .handshake_completed()
             .await
-            .map_err(|err| AcceptError::from(err))?;
+            .map_err(AcceptError::from)?;
         Ok(conn)
     }
 
