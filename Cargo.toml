@@ -115,5 +115,8 @@ quinn = { package = "iroh-quinn", version = "0.15.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
 
 [patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "main" }
-iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "main" }
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "release-0-96" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "release-0-96" }
+iroh-quinn = { git = "https://github.com/n0-computer/quinn", branch = "main" }
+iroh-quinn-udp = { git = "https://github.com/n0-computer/quinn", branch = "main" }
+iroh-quinn-proto = { git = "https://github.com/n0-computer/quinn", branch = "main" }

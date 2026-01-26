@@ -92,7 +92,7 @@ mod quinn_setup_utils {
             server_certs: &[&[u8]],
         ) -> Result<Endpoint> {
             let client_cfg = configure_client(server_certs)?;
-            let mut endpoint = Endpoint::client(bind_addr)?;
+            let endpoint = Endpoint::client(bind_addr)?;
             endpoint.set_default_client_config(client_cfg);
             Ok(endpoint)
         }
@@ -102,7 +102,7 @@ mod quinn_setup_utils {
         /// This is useful for testing and local connections, but should be used with care.
         pub fn make_insecure_client_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
             let client_cfg = configure_client_insecure()?;
-            let mut endpoint = Endpoint::client(bind_addr)?;
+            let endpoint = Endpoint::client(bind_addr)?;
             endpoint.set_default_client_config(client_cfg);
             Ok(endpoint)
         }
