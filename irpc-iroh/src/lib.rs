@@ -7,7 +7,7 @@ use std::{
 
 use iroh::{
     endpoint::{
-        Accepting, ConnectingError, Connection, ConnectionError, IncomingZeroRttConnection,
+        Accepting, Connection, ConnectionError, IncomingZeroRttConnection,
         OutgoingZeroRttConnection, RecvStream, RemoteEndpointIdError, SendStream, VarInt,
         ZeroRttStatus,
     },
@@ -233,7 +233,7 @@ impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
 ///
 /// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
 ///
-/// For details about when it is safe to use 0rtt, see https://www.iroh.computer/blog/0rtt-api
+/// For details about when it is safe to use 0rtt, see <https://www.iroh.computer/blog/0rtt-api>
 pub struct Iroh0RttProtocol<R> {
     handler: Handler<R>,
     request_id: AtomicU64,
@@ -277,7 +277,7 @@ impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for Iroh0RttProtocol<
         let conn = zrtt_conn
             .handshake_completed()
             .await
-            .map_err(|err| AcceptError::from(ConnectingError::from(err)))?;
+            .map_err(AcceptError::from)?;
         Ok(conn)
     }
 

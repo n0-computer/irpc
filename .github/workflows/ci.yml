@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  MSRV: "1.76"
+  MSRV: "1.89"
   RUST_BACKTRACE: 1
   RUSTFLAGS: -Dwarnings
 
@@ -104,6 +104,26 @@ jobs:
       - uses: swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --release --locked --workspace --all-features --bins --tests --examples
+
+    check_docs:
+    timeout-minutes: 30
+    name: Checking docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: "sccache"
+      SCCACHE_GHA_ENABLED: "on"
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/install@cargo-docs-rs
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: irpc
+        run: cargo docs-rs -p irpc
+      - name: irpc-iroh
+        run: cargo docs-rs -p irpc
 
   wasm_build:
     name: Build wasm32
