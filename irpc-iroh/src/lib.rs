@@ -233,7 +233,7 @@ impl<R: DeserializeOwned + Send + 'static> ProtocolHandler for IrohProtocol<R> {
 ///
 /// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
 ///
-/// For details about when it is safe to use 0rtt, see https://www.iroh.computer/blog/0rtt-api
+/// For details about when it is safe to use 0rtt, see <https://www.iroh.computer/blog/0rtt-api>
 pub struct Iroh0RttProtocol<R> {
     handler: Handler<R>,
     request_id: AtomicU64,

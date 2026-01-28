@@ -41,7 +41,7 @@
 //! socket address) and iroh (QUIC with dial by endpoint id).
 //!
 //! An upside of this is that the quinn streams can be tuned for each rpc
-//! request, e.g. by setting the stream priority or by directy using more
+//! request, e.g. by setting the stream priority or by directly using more
 //! advanced part of the quinn SendStream and RecvStream APIs such as out of
 //! order receiving.
 //!

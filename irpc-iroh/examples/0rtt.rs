@@ -96,8 +96,7 @@ impl ConnectionStats {
         let stats = self.0.lock().expect("poisoned");
         stats
             .get(endpoint_id)
-            .map(|conn_info| conn_info.selected_path().map(|path| path.rtt()))
-            .flatten()
+            .and_then(|conn_info| conn_info.selected_path().map(|path| path.rtt()))
     }
 }
 

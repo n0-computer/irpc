@@ -10,7 +10,7 @@ repository = "https://github.com/n0-computer/irpc"
 description = "A streaming rpc system based on quic"
 
 # Sadly this also needs to be updated in .github/workflows/ci.yml
-rust-version = "1.76"
+rust-version = "1.89"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -109,14 +109,7 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.3", default-features = false }
 n0-error = { version = "0.1" }
 tracing-subscriber = { version = "0.3.20" }
-iroh = { version = "0.95" }
-iroh-base = { version = "0.95" }
-quinn = { package = "iroh-quinn", version = "0.15.0", default-features = false }
+iroh = { version = "0.96" }
+iroh-base = { version = "0.96" }
+quinn = { package = "iroh-quinn", version = "0.16.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
-
-[patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "release-0-96" }
-iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "release-0-96" }
-iroh-quinn = { git = "https://github.com/n0-computer/quinn", branch = "main" }
-iroh-quinn-udp = { git = "https://github.com/n0-computer/quinn", branch = "main" }
-iroh-quinn-proto = { git = "https://github.com/n0-computer/quinn", branch = "main" }
