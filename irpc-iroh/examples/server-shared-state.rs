@@ -143,7 +143,10 @@ mod storage {
                     let WithChannels { tx, .. } = msg;
                     let values = {
                         let state = self.state();
-                        // TODO: use async lock to not clone here.
+                        // We clone the values so that we don't keep the lock open for the lifetime of the request.
+                        // If we wouldn't want to clone here because there can be many entries,
+                        // we have to redesign the storage to support a notion of snapshots, or use an async lock
+                        // but that would mean that no other requests can be processed while the stream here is sent out.
                         let values: Vec<_> = state
                             .iter()
                             .map(|(key, value)| format!("{key}={value}"))
