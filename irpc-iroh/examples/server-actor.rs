@@ -1,3 +1,6 @@
+//! Demonstrates the typical pattern where the server runs an actor loop that processes incoming
+//! messages sequentially.
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     cli::run().await
