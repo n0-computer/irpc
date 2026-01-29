@@ -24,13 +24,13 @@ async fn main() -> Result<()> {
     // Connect by passing an endpoint, which allows automatic reconnection.
     let client_endpoint = Endpoint::bind().await?;
     let api = StorageClient::connect(client_endpoint, server_addr.clone());
-    api.set("hello".to_string(), "world".to_string()).await?;
-    api.set("goodbye".to_string(), "world".to_string()).await?;
+    api.set("hello", "world").await?;
+    api.set("goodbye", "see you soon").await?;
     let value = api.get("hello").await?;
-    println!("value = {value:?}");
+    println!("hello = {value:?}");
     let mut list = api.list().await?;
     while let Some(value) = list.recv().await? {
-        println!("list value = {value:?}");
+        println!("list: {value:?}");
     }
 
     // Or create a client from a connection directly.
@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     let conn = client2.connect(server_addr, storage::ALPN).await?;
     let api = StorageClient::from_connection(conn);
     let value = api.get("goodbye").await?;
-    println!("value = {value:?}");
+    println!("goodbye = {value:?}");
 
     drop(server_router);
     Ok(())
@@ -204,8 +204,15 @@ mod storage {
             self.inner.server_streaming(List, 10).await
         }
 
-        pub async fn set(&self, key: String, value: String) -> Result<(), irpc::Error> {
-            let msg = Set { key, value };
+        pub async fn set(
+            &self,
+            key: impl ToString,
+            value: impl ToString,
+        ) -> Result<(), irpc::Error> {
+            let msg = Set {
+                key: key.to_string(),
+                value: value.to_string(),
+            };
             self.inner.rpc(msg).await
         }
     }
