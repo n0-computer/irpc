@@ -1527,7 +1527,12 @@ impl<S: Service> Client<S> {
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(request) => {
-                    let (_tx, _rx) = request.write(msg).await?;
+                    let (mut tx, _rx) = request.write(msg).await?;
+                    tx.finish()
+                        .map_err(|e| rpc::WriteError::from(quinn::WriteError::from(e)))?;
+                    tx.stopped()
+                        .await
+                        .map_err(|e| rpc::WriteError::from(io::Error::from(e)))?;
                 }
             };
             Ok(())
@@ -1559,14 +1564,20 @@ impl<S: Service> Client<S> {
                 Request::Remote(request) => {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
-                    let (_tx, _rx) = request.write_raw(&buf).await?;
+                    let (mut tx, _rx) = request.write_raw(&buf).await?;
                     if !this.0.zero_rtt_accepted().await {
                         // 0rtt was not accepted, the data is lost, send it again!
                         let Request::Remote(request) = this.request().await? else {
                             unreachable!()
                         };
-                        let (_tx, _rx) = request.write_raw(&buf).await?;
+                        let (tx2, _rx) = request.write_raw(&buf).await?;
+                        tx = tx2;
                     }
+                    tx.finish()
+                        .map_err(|e| rpc::WriteError::from(quinn::WriteError::from(e)))?;
+                    tx.stopped()
+                        .await
+                        .map_err(|e| rpc::WriteError::from(io::Error::from(e)))?;
                 }
             };
             Ok(())
