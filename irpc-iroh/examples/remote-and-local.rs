@@ -1,3 +1,7 @@
+//! Demonstrates how to talk to an actor loop both from the same process and from remotes.
+//!
+//! The [`StorageApi`] struct is only defined once and can be used both locally and as a remote client.
+
 use anyhow::Result;
 use iroh::{protocol::Router, Endpoint};
 
@@ -30,7 +34,7 @@ async fn remote() -> Result<()> {
         let endpoint = Endpoint::bind().await?;
         let api = StorageApi::spawn();
         let router = Router::builder(endpoint.clone())
-            .accept(StorageApi::ALPN, api.expose()?)
+            .accept(StorageApi::ALPN, api.protocol_handler()?)
             .spawn();
         let addr = endpoint.addr();
         (router, addr)
@@ -55,7 +59,7 @@ mod storage {
     //!
     //! The only `pub` item is [`StorageApi`], everything else is private.
 
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use anyhow::{Context, Result};
     use iroh::{protocol::ProtocolHandler, Endpoint};
@@ -66,6 +70,7 @@ mod storage {
     };
     // Import the macro
     use irpc_iroh::{IrohLazyRemoteConnection, IrohProtocol};
+    use n0_future::task::AbortOnDropHandle;
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
@@ -96,26 +101,14 @@ mod storage {
         List(List),
     }
 
+    #[derive(Default)]
     struct StorageActor {
-        recv: tokio::sync::mpsc::Receiver<StorageMessage>,
         state: BTreeMap<String, String>,
     }
 
     impl StorageActor {
-        pub fn spawn() -> StorageApi {
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
-            let actor = Self {
-                recv: rx,
-                state: BTreeMap::new(),
-            };
-            n0_future::task::spawn(actor.run());
-            StorageApi {
-                inner: Client::local(tx),
-            }
-        }
-
-        async fn run(mut self) {
-            while let Some(msg) = self.recv.recv().await {
+        async fn run(mut self, mut rx: tokio::sync::mpsc::Receiver<StorageMessage>) {
+            while let Some(msg) = rx.recv().await {
                 self.handle(msg).await;
             }
         }
@@ -147,14 +140,21 @@ mod storage {
     }
 
     pub struct StorageApi {
-        inner: Client<StorageProtocol>,
+        client: Client<StorageProtocol>,
+        _actor_task: Option<Arc<AbortOnDropHandle<()>>>,
     }
 
     impl StorageApi {
         pub const ALPN: &[u8] = b"irpc-iroh/derive-demo/0";
 
         pub fn spawn() -> Self {
-            StorageActor::spawn()
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            let actor = StorageActor::default();
+            let actor_task = n0_future::task::spawn(actor.run(rx));
+            StorageApi {
+                client: Client::local(tx),
+                _actor_task: Some(Arc::new(AbortOnDropHandle::new(actor_task))),
+            }
         }
 
         pub fn connect(
@@ -163,29 +163,30 @@ mod storage {
         ) -> Result<StorageApi> {
             let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), Self::ALPN.to_vec());
             Ok(StorageApi {
-                inner: Client::boxed(conn),
+                client: Client::boxed(conn),
+                _actor_task: None,
             })
         }
 
-        pub fn expose(&self) -> Result<impl ProtocolHandler> {
+        pub fn protocol_handler(&self) -> Result<impl ProtocolHandler> {
             let local = self
-                .inner
+                .client
                 .as_local()
                 .context("can not listen on remote service")?;
             Ok(IrohProtocol::new(StorageProtocol::remote_handler(local)))
         }
 
         pub async fn get(&self, key: String) -> irpc::Result<Option<String>> {
-            self.inner.rpc(Get { key }).await
+            self.client.rpc(Get { key }).await
         }
 
         pub async fn list(&self) -> irpc::Result<mpsc::Receiver<String>> {
-            self.inner.server_streaming(List, 10).await
+            self.client.server_streaming(List, 10).await
         }
 
         pub async fn set(&self, key: String, value: String) -> irpc::Result<()> {
             let msg = Set { key, value };
-            self.inner.rpc(msg).await
+            self.client.rpc(msg).await
         }
     }
 }
