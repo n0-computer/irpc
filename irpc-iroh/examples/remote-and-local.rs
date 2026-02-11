@@ -9,6 +9,15 @@ use self::storage::StorageApi;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    run().await
+}
+
+#[tokio::test]
+async fn test() -> Result<()> {
+    run().await
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt::init();
     println!("Local use");
     local().await?;
@@ -30,18 +39,16 @@ async fn local() -> Result<()> {
 }
 
 async fn remote() -> Result<()> {
-    let (server_router, server_addr) = {
-        let endpoint = Endpoint::bind().await?;
-        let api = StorageApi::spawn();
-        let router = Router::builder(endpoint.clone())
-            .accept(StorageApi::ALPN, api.protocol_handler()?)
-            .spawn();
-        let addr = endpoint.addr();
-        (router, addr)
-    };
+    let endpoint = Endpoint::bind().await?;
+    let api = StorageApi::spawn();
+    let router = Router::builder(endpoint.clone())
+        .accept(StorageApi::ALPN, api.protocol_handler()?)
+        .spawn();
+
+    endpoint.online().await;
 
     let client_endpoint = Endpoint::builder().bind().await?;
-    let api = StorageApi::connect(client_endpoint, server_addr)?;
+    let api = StorageApi::connect(client_endpoint, endpoint.addr())?;
     api.set("hello".to_string(), "world".to_string()).await?;
     api.set("goodbye".to_string(), "world".to_string()).await?;
     let value = api.get("hello".to_string()).await?;
@@ -50,7 +57,9 @@ async fn remote() -> Result<()> {
     while let Some(value) = list.recv().await? {
         println!("list value = {value:?}");
     }
-    drop(server_router);
+
+    router.shutdown().await?;
+
     Ok(())
 }
 
