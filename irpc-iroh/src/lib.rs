@@ -69,8 +69,8 @@ impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
         })
     }
 
-    fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
-        Box::pin(async { true })
+    fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
+        Box::pin(async { false })
     }
 }
 
@@ -99,13 +99,13 @@ impl irpc::rpc::RemoteConnection for IrohZrttRemoteConnection {
         })
     }
 
-    fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
+    fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
         let conn = self.0.clone();
         Box::pin(async move {
             match conn.handshake_completed().await {
-                Err(_) => false,
-                Ok(ZeroRttStatus::Accepted(_)) => true,
-                Ok(ZeroRttStatus::Rejected(_)) => false,
+                Err(_) => true,
+                Ok(ZeroRttStatus::Accepted(_)) => false,
+                Ok(ZeroRttStatus::Rejected(_)) => true,
             }
         })
     }
@@ -165,8 +165,8 @@ impl RemoteConnection for IrohLazyRemoteConnection {
         })
     }
 
-    fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
-        Box::pin(async { true })
+    fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
+        Box::pin(async { false })
     }
 }
 

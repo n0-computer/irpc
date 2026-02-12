@@ -1484,7 +1484,7 @@ impl<S: Service> Client<S> {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, _rx) = request.write_raw(&buf).await?;
-                    if !this.0.zero_rtt_accepted().await {
+                    if this.0.zero_rtt_rejected().await {
                         // 0rtt was not accepted, the data is lost, send it again!
                         let Request::Remote(request) = this.request().await? else {
                             unreachable!()
@@ -1523,14 +1523,14 @@ impl<S: Service> Client<S> {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, rx) = request.write_raw(&buf).await?;
-                    if this.0.zero_rtt_accepted().await {
-                        rx
-                    } else {
+                    if this.0.zero_rtt_rejected().await {
                         // 0rtt was not accepted, the data is lost, send it again!
                         let Request::Remote(request) = this.request().await? else {
                             unreachable!()
                         };
                         let (_tx, rx) = request.write_raw(&buf).await?;
+                        rx
+                    } else {
                         rx
                     }
                     .into()
@@ -1571,14 +1571,14 @@ impl<S: Service> Client<S> {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
                     let buf = rpc::prepare_write::<S>(msg)?;
                     let (_tx, rx) = request.write_raw(&buf).await?;
-                    if this.0.zero_rtt_accepted().await {
-                        rx
-                    } else {
+                    if this.0.zero_rtt_rejected().await {
                         // 0rtt was not accepted, the data is lost, send it again!
                         let Request::Remote(request) = this.request().await? else {
                             unreachable!()
                         };
                         let (_tx, rx) = request.write_raw(&buf).await?;
+                        rx
+                    } else {
                         rx
                     }
                     .into()
@@ -1654,11 +1654,11 @@ impl<M> Clone for ClientInner<M> {
 
 impl<M> ClientInner<M> {
     #[allow(dead_code)]
-    async fn zero_rtt_accepted(&self) -> bool {
+    async fn zero_rtt_rejected(&self) -> bool {
         match self {
-            ClientInner::Local(_sender) => true,
+            ClientInner::Local(_sender) => false,
             #[cfg(feature = "rpc")]
-            ClientInner::Remote(remote_connection) => remote_connection.zero_rtt_accepted().await,
+            ClientInner::Remote(remote_connection) => remote_connection.zero_rtt_rejected().await,
             #[cfg(not(feature = "rpc"))]
             Self::Remote(_) => unreachable!(),
         }
@@ -1892,10 +1892,10 @@ pub mod rpc {
             &self,
         ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
 
-        /// Returns whether 0-RTT data was accepted by the server.
+        /// Returns whether 0-RTT data was rejected by the server.
         ///
-        /// For connections that were fully authenticated before allowing to send any data, this should return `true`.
-        fn zero_rtt_accepted(&self) -> BoxFuture<bool>;
+        /// For connections that were fully authenticated before allowing to send any data, this should return `false`.
+        fn zero_rtt_rejected(&self) -> BoxFuture<bool>;
     }
 
     /// A connection to a remote service.
@@ -1928,8 +1928,8 @@ pub mod rpc {
             })
         }
 
-        fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
-            Box::pin(async { true })
+        fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
+            Box::pin(async { false })
         }
     }
 
@@ -1973,8 +1973,8 @@ pub mod rpc {
             })
         }
 
-        fn zero_rtt_accepted(&self) -> BoxFuture<bool> {
-            Box::pin(async { true })
+        fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
+            Box::pin(async { false })
         }
     }
 

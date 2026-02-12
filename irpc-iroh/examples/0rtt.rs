@@ -252,7 +252,6 @@ mod ping {
             self.inner.rpc(Echo { data }).await
         }
 
-
         pub fn expose_0rtt(self) -> Result<Iroh0RttProtocol<EchoProtocol>> {
             let local = self
                 .inner
