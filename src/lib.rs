@@ -404,6 +404,7 @@ pub mod span_propagation {
         pub fn store_in_thread_local(&self) {
             #[cfg(feature = "use-tracing-opentelemetry")]
             {
+                tracing::debug!("store context in thread local: {self:?}");
                 let context = self.to_context();
                 SPAN_CONTEXT.with(|cell| {
                     *cell.borrow_mut() = Some(context);
@@ -425,7 +426,10 @@ pub mod span_propagation {
         {
             if let Some(ctx) = SPAN_CONTEXT.with(|cell| cell.borrow_mut().take()) {
                 use tracing_opentelemetry::OpenTelemetrySpanExt;
+                tracing::debug!("set span parent from context: {ctx:?}");
                 let _ = span.set_parent(ctx);
+            } else {
+                tracing::debug!("no parent context");
             }
         }
         let _ = span; // Suppress unused variable warning when feature is disabled
@@ -2171,13 +2175,19 @@ pub mod rpc {
 
         if S::SPAN_PROPAGATION {
             // Include span context in wire format
+            tracing::debug!(
+                "prepare_write, current span: {:?}",
+                tracing::Span::current()
+            );
             let span_ctx = Some(crate::span_propagation::SpanContextCarrier::from_current());
+            tracing::debug!("prepare_write, span_ctx: {span_ctx:?}");
             let payload = (span_ctx, msg);
             if postcard::experimental::serialized_size(&payload)? as u64 > MAX_MESSAGE_SIZE {
                 return Err(e!(WriteError::MaxMessageSizeExceeded));
             }
             buf.write_length_prefixed(&payload)?;
         } else {
+            tracing::debug!("prepare_write, span propagation disabled");
             // Original wire format without span context
             if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
                 return Err(e!(WriteError::MaxMessageSizeExceeded));

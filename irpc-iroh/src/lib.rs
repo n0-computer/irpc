@@ -411,6 +411,7 @@ pub async fn read_request_raw<S: Service>(
             postcard::from_bytes(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
+        debug!("reading request, span_ctx: {span_ctx:?}");
         // Store span context in thread-local for use by with_remote_channels
         if let Some(ctx) = span_ctx {
             ctx.store_in_thread_local();

@@ -309,6 +309,7 @@ fn generate_remote_service_impl(
                         // Set its parent to the propagated remote context if available
                         ::irpc::span_propagation::set_span_parent_from_remote(&span);
                         let _guard = span.enter();
+                        info!("parent should be set & entered");
                         #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
                     }
                 }
