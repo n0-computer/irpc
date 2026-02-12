@@ -1510,7 +1510,19 @@ impl<S: Service> Client<S> {
 
     /// Performs a request for which the server returns nothing.
     ///
-    /// The returned future completes once the message is sent.
+    /// The purpose of notify is to send messages to the remote without waiting
+    /// for the remote to respond.
+    ///
+    /// The returned future completes once the message is written *locally*.
+    /// Therefore we have no guarantee that the remote has received the message.
+    ///
+    /// If we close the connection immediately after the future returns, the
+    /// connection might be closed *before* the message is on the wire, so the
+    /// remote might never receive it.
+    ///
+    /// If you need to send a message with unit result but want to wait until the
+    /// remote has received it, consider using [`rpc`] with a unit `()` return
+    /// type instead.
     pub fn notify<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
     where
         S: From<Req>,
