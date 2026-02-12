@@ -253,7 +253,7 @@ mod ping {
         }
 
         pub async fn echo_0rtt(&self, data: Vec<u8>) -> irpc::Result<Vec<u8>> {
-            self.inner.rpc_0rtt(Echo { data }).await
+            self.inner.rpc(Echo { data }).await
         }
 
         pub fn expose_0rtt(self) -> Result<Iroh0RttProtocol<EchoProtocol>> {

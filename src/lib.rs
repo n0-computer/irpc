@@ -1376,67 +1376,6 @@ impl<S: Service> Client<S> {
         }
     }
 
-    /// Performs a request for which the server returns a oneshot receiver.
-    pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
-    where
-        S: From<Req>,
-        S::Message: From<WithChannels<Req, S>>,
-        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = NoReceiver>,
-        Res: RpcMessage,
-    {
-        let request = self.request();
-        async move {
-            let recv: oneshot::Receiver<Res> = match request.await? {
-                Request::Local(request) => {
-                    let (tx, rx) = oneshot::channel();
-                    request.send((msg, tx)).await?;
-                    rx
-                }
-                #[cfg(not(feature = "rpc"))]
-                Request::Remote(_request) => unreachable!(),
-                #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
-                    let (_tx, rx) = request.write(msg).await?;
-                    rx.into()
-                }
-            };
-            let res = recv.await?;
-            Ok(res)
-        }
-    }
-
-    /// Performs a request for which the server returns a mpsc receiver.
-    pub fn server_streaming<Req, Res>(
-        &self,
-        msg: Req,
-        local_response_cap: usize,
-    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
-    where
-        S: From<Req>,
-        S::Message: From<WithChannels<Req, S>>,
-        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = NoReceiver>,
-        Res: RpcMessage,
-    {
-        let request = self.request();
-        async move {
-            let recv: mpsc::Receiver<Res> = match request.await? {
-                Request::Local(request) => {
-                    let (tx, rx) = mpsc::channel(local_response_cap);
-                    request.send((msg, tx)).await?;
-                    rx
-                }
-                #[cfg(not(feature = "rpc"))]
-                Request::Remote(_request) => unreachable!(),
-                #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
-                    let (_tx, rx) = request.write(msg).await?;
-                    rx.into()
-                }
-            };
-            Ok(recv)
-        }
-    }
-
     /// Performs a request for which the client can send updates.
     pub fn client_streaming<Req, Update, Res>(
         &self,
@@ -1523,36 +1462,10 @@ impl<S: Service> Client<S> {
     /// If you need to send a message with unit result but want to wait until the
     /// remote has received it, consider using [`rpc`] with a unit `()` return
     /// type instead.
+    ///
+    /// This method is safe to use with both regular and 0-RTT connections.
+    /// If 0-RTT data is rejected, the message will be automatically re-sent.
     pub fn notify<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
-    where
-        S: From<Req>,
-        S::Message: From<WithChannels<Req, S>>,
-        Req: Channels<S, Tx = NoSender, Rx = NoReceiver>,
-    {
-        let request = self.request();
-        async move {
-            match request.await? {
-                Request::Local(request) => {
-                    request.send((msg,)).await?;
-                }
-                #[cfg(not(feature = "rpc"))]
-                Request::Remote(_request) => unreachable!(),
-                #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
-                    let (_tx, _rx) = request.write(msg).await?;
-                }
-            };
-            Ok(())
-        }
-    }
-
-    /// Performs a request for which the server returns nothing.
-    ///
-    /// Compared to [`Self::notify`], this variant will re-send the message if 0rtt
-    /// was not accepted, so it will work for 0rtt connections.
-    ///
-    /// For when to use this, see [`Self::notify`].
-    pub fn notify_0rtt<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1586,10 +1499,9 @@ impl<S: Service> Client<S> {
 
     /// Performs a request for which the server returns a oneshot receiver.
     ///
-    /// Compared to [Self::rpc], this variant takes a future that returns true
-    /// if 0rtt has been accepted. If not, the data is sent again via the same
-    /// remote channel. For local requests, the future is ignored.
-    pub fn rpc_0rtt<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
+    /// This method is safe to use with both regular and 0-RTT connections.
+    /// If 0-RTT data is rejected, the message will be automatically re-sent.
+    pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1631,10 +1543,9 @@ impl<S: Service> Client<S> {
 
     /// Performs a request for which the server returns a mpsc receiver.
     ///
-    /// Compared to [Self::server_streaming], this variant takes a future that returns true
-    /// if 0rtt has been accepted. If not, the data is sent again via the same
-    /// remote channel. For local requests, the future is ignored.
-    pub fn server_streaming_0rtt<Req, Res>(
+    /// This method is safe to use with both regular and 0-RTT connections.
+    /// If 0-RTT data is rejected, the message will be automatically re-sent.
+    pub fn server_streaming<Req, Res>(
         &self,
         msg: Req,
         local_response_cap: usize,
@@ -1675,6 +1586,45 @@ impl<S: Service> Client<S> {
             };
             Ok(recv)
         }
+    }
+
+    /// Deprecated: use [`Self::notify`] instead, it handles 0rtt automatically.
+    #[deprecated(note = "use `notify` instead, it handles 0rtt automatically")]
+    pub fn notify_0rtt<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = NoSender, Rx = NoReceiver>,
+    {
+        self.notify(msg)
+    }
+
+    /// Deprecated: use [`Self::rpc`] instead, it handles 0rtt automatically.
+    #[deprecated(note = "use `rpc` instead, it handles 0rtt automatically")]
+    pub fn rpc_0rtt<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = NoReceiver>,
+        Res: RpcMessage,
+    {
+        self.rpc(msg)
+    }
+
+    /// Deprecated: use [`Self::server_streaming`] instead, it handles 0rtt automatically.
+    #[deprecated(note = "use `server_streaming` instead, it handles 0rtt automatically")]
+    pub fn server_streaming_0rtt<Req, Res>(
+        &self,
+        msg: Req,
+        local_response_cap: usize,
+    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = NoReceiver>,
+        Res: RpcMessage,
+    {
+        self.server_streaming(msg, local_response_cap)
     }
 }
 
