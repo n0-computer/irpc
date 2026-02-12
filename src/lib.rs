@@ -74,8 +74,9 @@
 //!
 //! ```
 //! use irpc::{
+//!     Client, WithChannels,
 //!     channel::{mpsc, oneshot},
-//!     rpc_requests, Client, WithChannels,
+//!     rpc_requests,
 //! };
 //! use serde::{Deserialize, Serialize};
 //!
@@ -247,8 +248,9 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// With `wrap`:
 /// ```
 /// use irpc::{
+///     Client,
 ///     channel::{mpsc, oneshot},
-///     rpc_requests, Client,
+///     rpc_requests,
 /// };
 /// use serde::{Deserialize, Serialize};
 ///
