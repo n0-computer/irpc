@@ -498,7 +498,7 @@ pub mod channel {
             ///
             /// If this is a boxed sender that represents a remote connection, sending may yield or fail with an io error.
             /// Local senders will never yield, but can fail if the receiver has been closed.
-            pub async fn send(self, value: T) -> std::result::Result<(), SendError> {
+            pub async fn send(self, value: T) -> Result<(), SendError> {
                 match self {
                     Sender::Tokio(tx) => tx.send(value).map_err(|_| e!(SendError::ReceiverClosed)),
                     Sender::Boxed(f) => f(value).await,
@@ -569,7 +569,7 @@ pub mod channel {
         }
 
         impl<T> Future for Receiver<T> {
-            type Output = std::result::Result<T, RecvError>;
+            type Output = Result<T, RecvError>;
 
             fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
                 match self.get_mut() {
@@ -814,14 +814,7 @@ pub mod channel {
         pub trait DynReceiver<T>: Debug + Send + Sync + 'static {
             fn recv(
                 &mut self,
-            ) -> Pin<
-                Box<
-                    dyn Future<Output = std::result::Result<Option<T>, RecvError>>
-                        + Send
-                        + Sync
-                        + '_,
-                >,
-            >;
+            ) -> Pin<Box<dyn Future<Output = Result<Option<T>, RecvError>> + Send + Sync + '_>>;
         }
 
         impl<T> Debug for Sender<T> {
@@ -846,7 +839,7 @@ pub mod channel {
             /// then the sender will be closed and further sends will return an [`SendError::Io`]
             /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
             /// future until completion if you want to reuse the sender or any clone afterwards.
-            pub async fn send(&self, value: T) -> std::result::Result<(), SendError> {
+            pub async fn send(&self, value: T) -> Result<(), SendError> {
                 match self {
                     Sender::Tokio(tx) => tx
                         .send(value)
@@ -877,7 +870,7 @@ pub mod channel {
             /// then the sender will be closed and further sends will return an [`SendError::Io`]
             /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
             /// future until completion if you want to reuse the sender or any clone afterwards.
-            pub async fn try_send(&self, value: T) -> std::result::Result<bool, SendError> {
+            pub async fn try_send(&self, value: T) -> Result<bool, SendError> {
                 match self {
                     Sender::Tokio(tx) => match tx.try_send(value) {
                         Ok(()) => Ok(true),
@@ -906,7 +899,7 @@ pub mod channel {
             /// cleanly closed the connection.
             ///
             /// Returns an an io error if there was an error receiving the message.
-            pub async fn recv(&mut self) -> std::result::Result<Option<T>, RecvError> {
+            pub async fn recv(&mut self) -> Result<Option<T>, RecvError> {
                 match self {
                     Self::Tokio(rx) => Ok(rx.recv().await),
                     Self::Boxed(rx) => Ok(rx.recv().await?),
@@ -951,7 +944,7 @@ pub mod channel {
             #[cfg(feature = "stream")]
             pub fn into_stream(
                 self,
-            ) -> impl n0_future::Stream<Item = std::result::Result<T, RecvError>> + Send + Sync + 'static
+            ) -> impl n0_future::Stream<Item = Result<T, RecvError>> + Send + Sync + 'static
             {
                 n0_future::stream::unfold(self, |mut recv| async move {
                     recv.recv().await.transpose().map(|msg| (msg, recv))
@@ -1069,14 +1062,8 @@ pub mod channel {
         {
             fn recv(
                 &mut self,
-            ) -> Pin<
-                Box<
-                    dyn Future<Output = std::result::Result<Option<U>, RecvError>>
-                        + Send
-                        + Sync
-                        + '_,
-                >,
-            > {
+            ) -> Pin<Box<dyn Future<Output = Result<Option<U>, RecvError>> + Send + Sync + '_>>
+            {
                 Box::pin(async move {
                     while let Some(msg) = self.receiver.recv().await? {
                         if let Some(v) = (self.f)(msg) {
@@ -1345,9 +1332,7 @@ impl<S: Service> Client<S> {
     #[allow(clippy::type_complexity)]
     pub fn request(
         &self,
-    ) -> impl Future<
-        Output = result::Result<Request<LocalSender<S>, rpc::RemoteSender<S>>, RequestError>,
-    >
+    ) -> impl Future<Output = Result<Request<LocalSender<S>, rpc::RemoteSender<S>>, RequestError>>
     + 'static
     + use<S> {
         #[cfg(feature = "rpc")]
@@ -1768,7 +1753,7 @@ pub enum Error {
 }
 
 /// Type alias for a result with an irpc error type.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl From<Error> for io::Error {
     fn from(e: Error) -> Self {
@@ -1946,7 +1931,7 @@ pub mod rpc {
         /// Open a bidirectional stream to the remote service.
         fn open_bi(
             &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
+        ) -> BoxFuture<Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
 
         /// Returns whether 0-RTT data was accepted by the server.
         ///
@@ -1975,8 +1960,7 @@ pub mod rpc {
 
         fn open_bi(
             &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
-        {
+        ) -> BoxFuture<Result<(quinn::SendStream, quinn::RecvStream), RequestError>> {
             let conn = self.clone();
             Box::pin(async move {
                 let pair = conn.open_bi().await?;
@@ -2006,8 +1990,7 @@ pub mod rpc {
 
         fn open_bi(
             &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
-        {
+        ) -> BoxFuture<Result<(quinn::SendStream, quinn::RecvStream), RequestError>> {
             let this = self.0.clone();
             Box::pin(async move {
                 let mut guard = this.connection.lock().await;
@@ -2055,7 +2038,7 @@ pub mod rpc {
 
     pub(crate) fn prepare_write<S: Service>(
         msg: impl Into<S>,
-    ) -> std::result::Result<SmallVec<[u8; 128]>, WriteError> {
+    ) -> Result<SmallVec<[u8; 128]>, WriteError> {
         let msg = msg.into();
         if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
             return Err(e!(WriteError::MaxMessageSizeExceeded));
@@ -2073,7 +2056,7 @@ pub mod rpc {
         pub async fn write(
             self,
             msg: impl Into<S>,
-        ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
+        ) -> Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
             let buf = prepare_write(msg)?;
             self.write_raw(&buf).await
         }
@@ -2081,7 +2064,7 @@ pub mod rpc {
         pub(crate) async fn write_raw(
             self,
             buf: &[u8],
-        ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
+        ) -> Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
             let RemoteSender(mut send, recv, _) = self;
             send.write_all(buf).await?;
             Ok((send, recv))
@@ -2193,14 +2176,8 @@ pub mod rpc {
     impl<T: RpcMessage> DynReceiver<T> for QuinnReceiver<T> {
         fn recv(
             &mut self,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = std::result::Result<Option<T>, mpsc::RecvError>>
-                    + Send
-                    + Sync
-                    + '_,
-            >,
-        > {
+        ) -> Pin<Box<dyn Future<Output = Result<Option<T>, mpsc::RecvError>> + Send + Sync + '_>>
+        {
             Box::pin(async {
                 let read = &mut self.recv;
                 let Some(size) = read.read_varint_u64().await? else {
@@ -2373,11 +2350,7 @@ pub mod rpc {
 
     /// Type alias for a handler fn for remote requests
     pub type Handler<R> = Arc<
-        dyn Fn(
-                R,
-                quinn::RecvStream,
-                quinn::SendStream,
-            ) -> BoxFuture<std::result::Result<(), SendError>>
+        dyn Fn(R, quinn::RecvStream, quinn::SendStream) -> BoxFuture<Result<(), SendError>>
             + Send
             + Sync
             + 'static,
@@ -2529,7 +2502,7 @@ impl<S: Service> LocalSender<S> {
     pub fn send<T>(
         &self,
         value: impl Into<WithChannels<T, S>>,
-    ) -> impl Future<Output = std::result::Result<(), SendError>> + Send + 'static
+    ) -> impl Future<Output = Result<(), SendError>> + Send + 'static
     where
         T: Channels<S>,
         S::Message: From<WithChannels<T, S>>,
@@ -2542,7 +2515,7 @@ impl<S: Service> LocalSender<S> {
     pub fn send_raw(
         &self,
         value: S::Message,
-    ) -> impl Future<Output = std::result::Result<(), SendError>> + Send + 'static + use<S> {
+    ) -> impl Future<Output = Result<(), SendError>> + Send + 'static + use<S> {
         let x = self.0.clone();
         async move { x.send(value).await }
     }
