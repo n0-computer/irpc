@@ -151,7 +151,7 @@
 //! quic-rpc, this crate does not abstract over the stream type and is focused
 //! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [iroh quinn fork](https://docs.rs/iroh-quinn/latest/iroh-quinn/index.html).
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
-use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
+use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 
 /// Processes an RPC request enum and generates trait implementations for use with `irpc`.
 ///
@@ -1332,9 +1332,8 @@ impl<S: Service> Client<S> {
     #[allow(clippy::type_complexity)]
     pub fn request(
         &self,
-    ) -> impl Future<Output = Result<Request<LocalSender<S>, rpc::RemoteSender<S>>, RequestError>>
-    + 'static
-    + use<S> {
+    ) -> impl Future<Output = Result<Request<LocalSender<S>, rpc::RemoteSender<S>>, RequestError>> + use<S>
+    {
         #[cfg(feature = "rpc")]
         {
             let cloned = match &self.0 {
