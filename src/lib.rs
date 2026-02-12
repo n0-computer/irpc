@@ -1548,11 +1548,10 @@ impl<S: Service> Client<S> {
 
     /// Performs a request for which the server returns nothing.
     ///
-    /// The returned future completes once the message is sent.
+    /// Compared to [`Self::notify`], this variant will re-send the message if 0rtt
+    /// was not accepted, so it will work for 0rtt connections.
     ///
-    /// Compared to [Self::notify], this variant takes a future that returns true
-    /// if 0rtt has been accepted. If not, the data is sent again via the same
-    /// remote channel. For local requests, the future is ignored.
+    /// For when to use this, see [`Self::notify`].
     pub fn notify_0rtt<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
     where
         S: From<Req>,
