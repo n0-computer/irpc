@@ -219,15 +219,14 @@ mod varint_util {
 
             // Read a single byte
             let res = reader.read_u8().await;
-            if shift == 0 {
-                if let Err(cause) = res {
+            if shift == 0
+                && let Err(cause) = res {
                     if cause.kind() == io::ErrorKind::UnexpectedEof {
                         return Ok(None);
                     } else {
                         return Err(cause);
                     }
                 }
-            }
 
             let byte = res?;
 
