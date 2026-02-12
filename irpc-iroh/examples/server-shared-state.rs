@@ -2,7 +2,7 @@
 //! on the server side instead of with an actor loop.
 
 use anyhow::Result;
-use iroh::{protocol::Router, Endpoint};
+use iroh::{Endpoint, protocol::Router};
 
 use self::storage::{StorageClient, StorageServer};
 
@@ -54,16 +54,17 @@ mod storage {
 
     use anyhow::Result;
     use iroh::{
+        Endpoint,
         endpoint::Connection,
         protocol::{AcceptError, ProtocolHandler},
-        Endpoint,
     };
     use irpc::{
+        Client, WithChannels,
         channel::{mpsc, oneshot},
-        rpc_requests, Client, WithChannels,
+        rpc_requests,
     };
     // Import the macro
-    use irpc_iroh::{read_request, IrohLazyRemoteConnection, IrohRemoteConnection};
+    use irpc_iroh::{IrohLazyRemoteConnection, IrohRemoteConnection, read_request};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
