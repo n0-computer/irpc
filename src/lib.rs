@@ -1012,11 +1012,11 @@ pub mod channel {
                 value: U,
             ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>> {
                 Box::pin(async move {
-                    if let Some(v) = (self.f)(value) {
+                    match (self.f)(value) { Some(v) => {
                         self.sender.send(v).await
-                    } else {
+                    } _ => {
                         Ok(())
-                    }
+                    }}
                 })
             }
 
@@ -1025,11 +1025,11 @@ pub mod channel {
                 value: U,
             ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + '_>> {
                 Box::pin(async move {
-                    if let Some(v) = (self.f)(value) {
+                    match (self.f)(value) { Some(v) => {
                         self.sender.try_send(v).await
-                    } else {
+                    } _ => {
                         Ok(true)
-                    }
+                    }}
                 })
             }
 
@@ -1349,7 +1349,7 @@ impl<S: Service> Client<S> {
         &self,
     ) -> impl Future<
         Output = result::Result<Request<LocalSender<S>, rpc::RemoteSender<S>>, RequestError>,
-    > + 'static {
+    > + 'static + use<S> {
         #[cfg(feature = "rpc")]
         {
             let cloned = match &self.0 {
@@ -1377,7 +1377,7 @@ impl<S: Service> Client<S> {
     }
 
     /// Performs a request for which the server returns a oneshot receiver.
-    pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
+    pub fn rpc<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static + use<Req, Res, S>
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1410,7 +1410,7 @@ impl<S: Service> Client<S> {
         &self,
         msg: Req,
         local_response_cap: usize,
-    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
+    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static + use<Req, Res, S>
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1442,7 +1442,7 @@ impl<S: Service> Client<S> {
         &self,
         msg: Req,
         local_update_cap: usize,
-    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>>
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, oneshot::Receiver<Res>)>> + use<Req, Update, Res, S>
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1478,7 +1478,7 @@ impl<S: Service> Client<S> {
         msg: Req,
         local_update_cap: usize,
         local_response_cap: usize,
-    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, mpsc::Receiver<Res>)>> + Send + 'static
+    ) -> impl Future<Output = Result<(mpsc::Sender<Update>, mpsc::Receiver<Res>)>> + Send + 'static + use<Req, Update, Res, S>
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1511,7 +1511,7 @@ impl<S: Service> Client<S> {
     /// Performs a request for which the server returns nothing.
     ///
     /// The returned future completes once the message is sent.
-    pub fn notify<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
+    pub fn notify<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static + use<Req, S>
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1541,7 +1541,7 @@ impl<S: Service> Client<S> {
     /// Compared to [Self::notify], this variant takes a future that returns true
     /// if 0rtt has been accepted. If not, the data is sent again via the same
     /// remote channel. For local requests, the future is ignored.
-    pub fn notify_0rtt<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
+    pub fn notify_0rtt<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static + use<Req, S>
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1578,7 +1578,7 @@ impl<S: Service> Client<S> {
     /// Compared to [Self::rpc], this variant takes a future that returns true
     /// if 0rtt has been accepted. If not, the data is sent again via the same
     /// remote channel. For local requests, the future is ignored.
-    pub fn rpc_0rtt<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
+    pub fn rpc_0rtt<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static + use<Req, Res, S>
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -1627,7 +1627,7 @@ impl<S: Service> Client<S> {
         &self,
         msg: Req,
         local_response_cap: usize,
-    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
+    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static + use<Req, Res, S>
     where
         S: From<Req>,
         S::Message: From<WithChannels<Req, S>>,
@@ -2525,7 +2525,7 @@ impl<S: Service> LocalSender<S> {
     pub fn send_raw(
         &self,
         value: S::Message,
-    ) -> impl Future<Output = std::result::Result<(), SendError>> + Send + 'static {
+    ) -> impl Future<Output = std::result::Result<(), SendError>> + Send + 'static + use<S> {
         let x = self.0.clone();
         async move { x.send(value).await }
     }
