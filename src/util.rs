@@ -8,7 +8,7 @@ mod quinn_setup_utils {
     use std::{sync::Arc, time::Duration};
 
     use n0_error::{Result, StdResultExt};
-    use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, ServerConfig};
+    use quinn::{ClientConfig, ServerConfig, crypto::rustls::QuicClientConfig};
 
     /// Create a quinn client config and trusts given certificates.
     ///
@@ -189,7 +189,7 @@ mod varint_util {
         io::{self, Error},
     };
 
-    use serde::{de::DeserializeOwned, Serialize};
+    use serde::{Serialize, de::DeserializeOwned};
     use smallvec::SmallVec;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -219,13 +219,13 @@ mod varint_util {
 
             // Read a single byte
             let res = reader.read_u8().await;
-            if shift == 0 {
-                if let Err(cause) = res {
-                    if cause.kind() == io::ErrorKind::UnexpectedEof {
-                        return Ok(None);
-                    } else {
-                        return Err(cause);
-                    }
+            if shift == 0
+                && let Err(cause) = res
+            {
+                if cause.kind() == io::ErrorKind::UnexpectedEof {
+                    return Ok(None);
+                } else {
+                    return Err(cause);
                 }
             }
 

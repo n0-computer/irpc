@@ -27,10 +27,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: swatinem/rust-cache@v2
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
+      - uses: taiki-e/install-action@cargo-make
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets --all-features
+      - run: cargo make format-check
 
   test:
     runs-on: ${{ matrix.target.os }}

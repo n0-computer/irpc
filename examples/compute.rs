@@ -6,11 +6,11 @@ use std::{
 use anyhow::bail;
 use futures_buffered::BufferedStreamExt;
 use irpc::{
+    Client, Request, WithChannels,
     channel::{mpsc, oneshot},
-    rpc::{listen, RemoteService},
+    rpc::{RemoteService, listen},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, Request, WithChannels,
 };
 use n0_future::{
     stream::StreamExt,

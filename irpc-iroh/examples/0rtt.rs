@@ -9,9 +9,9 @@ use std::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::{
+    Endpoint, EndpointAddr, EndpointId, SecretKey,
     endpoint::{AfterHandshakeOutcome, ConnectionInfo, EndpointHooks},
     protocol::Router,
-    Endpoint, EndpointAddr, EndpointId, SecretKey,
 };
 use ping::EchoApi;
 
@@ -54,7 +54,9 @@ async fn main() -> Result<()> {
             wait_for_ticket,
         } => {
             if !no_0rtt && !wait_for_ticket {
-                eprintln!("0-RTT is enabled but wait_for_ticket is not set. After 2 requests with 0rtt the 0rtt resumption tickets will be consumed and a connection will be done without 0rtt.");
+                eprintln!(
+                    "0-RTT is enabled but wait_for_ticket is not set. After 2 requests with 0rtt the 0rtt resumption tickets will be consumed and a connection will be done without 0rtt."
+                );
             }
             let n = n
                 .iter()
@@ -226,7 +228,7 @@ mod cli {
 mod ping {
     use anyhow::{Context, Result};
     use iroh::Endpoint;
-    use irpc::{channel::oneshot, rpc::RemoteService, rpc_requests, Client, WithChannels};
+    use irpc::{Client, WithChannels, channel::oneshot, rpc::RemoteService, rpc_requests};
     use irpc_iroh::{
         Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection, IrohZrttRemoteConnection,
     };
