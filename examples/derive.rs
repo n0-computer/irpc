@@ -5,11 +5,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use irpc::{
+    Client, WithChannels,
     channel::{mpsc, oneshot},
     rpc::RemoteService,
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
-    Client, WithChannels,
 };
 // Import the macro
 use n0_future::task::{self, AbortOnDropHandle};

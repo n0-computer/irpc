@@ -7,8 +7,8 @@ use std::{
 
 use irpc::{
     channel::{
-        mpsc::{self, Receiver, RecvError},
         SendError,
+        mpsc::{self, Receiver, RecvError},
     },
     util::AsyncWriteVarintExt,
 };
@@ -46,7 +46,7 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
         loop {
             match send3.send(vec![1, 2, 3]).await {
                 Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {
-                    break
+                    break;
                 }
                 _ => {}
             };
@@ -94,7 +94,7 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
         loop {
             match send3.send(vec![1, 2, 3]).await {
                 Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {
-                    break
+                    break;
                 }
                 _ => {}
             };
