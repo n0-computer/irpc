@@ -27,6 +27,9 @@ use n0_error::{e, Result};
 use n0_future::{future::Boxed as BoxFuture, TryFutureExt};
 use tracing::{debug, error_span, trace, trace_span, warn, Instrument};
 
+#[cfg(test)]
+mod tests;
+
 /// Returns a client that connects to a irpc service using an [`iroh::Endpoint`].
 pub fn client<S: irpc::Service>(
     endpoint: iroh::Endpoint,
