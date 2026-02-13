@@ -2404,36 +2404,54 @@ pub mod rpc {
         endpoint: quinn::Endpoint,
         handler: Handler<R>,
     ) {
-        let mut request_id = 0u64;
-        let mut tasks = JoinSet::new();
-        loop {
-            let incoming = tokio::select! {
-                Some(res) = tasks.join_next(), if !tasks.is_empty() => {
-                    res.expect("irpc connection task panicked");
-                    continue;
-                }
-                incoming = endpoint.accept() => {
-                    match incoming {
-                        None => break,
-                        Some(incoming) => incoming
+        Listener::new(endpoint, handler).run().await
+    }
+
+    /// A listener that accepts incoming connections and handles them with the provided handler.
+    pub struct Listener<R> {
+        endpoint: quinn::Endpoint,
+        handler: Handler<R>,
+    }
+
+    impl<R: DeserializeOwned + 'static> Listener<R> {
+        /// Creates a new listener.
+        pub fn new(endpoint: quinn::Endpoint, handler: Handler<R>) -> Self {
+            Self { endpoint, handler }
+        }
+
+        /// Runs the listener, accepting connections until the endpoint is closed.
+        pub async fn run(self) {
+            let mut request_id = 0u64;
+            let mut tasks = JoinSet::new();
+            loop {
+                let incoming = tokio::select! {
+                    Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                        res.expect("irpc connection task panicked");
+                        continue;
                     }
-                }
-            };
-            let handler = handler.clone();
-            let fut = async move {
-                match incoming.await {
-                    Ok(connection) => match handle_connection(connection, handler).await {
-                        Err(err) => warn!("connection closed with error: {err:?}"),
-                        Ok(()) => debug!("connection closed"),
-                    },
-                    Err(cause) => {
-                        warn!("failed to accept connection: {cause:?}");
+                    incoming = self.endpoint.accept() => {
+                        match incoming {
+                            None => break,
+                            Some(incoming) => incoming
+                        }
                     }
                 };
-            };
-            let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
-            tasks.spawn(fut.instrument(span));
-            request_id += 1;
+                let handler = self.handler.clone();
+                let fut = async move {
+                    match incoming.await {
+                        Ok(connection) => match handle_connection(connection, handler).await {
+                            Err(err) => warn!("connection closed with error: {err:?}"),
+                            Ok(()) => debug!("connection closed"),
+                        },
+                        Err(cause) => {
+                            warn!("failed to accept connection: {cause:?}");
+                        }
+                    };
+                };
+                let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
+                tasks.spawn(fut.instrument(span));
+                request_id += 1;
+            }
         }
     }
 
