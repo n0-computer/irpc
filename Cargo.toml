@@ -61,6 +61,8 @@ trybuild = "1.0.104"
 testresult = "0.4.1"
 # used in examples
 anyhow = { workspace = true }
+# used in rate_limit example
+governor = "0.10"
 
 [features]
 # enable the remote transport
@@ -89,6 +91,10 @@ required-features = ["derive"]
 [[example]]
 name = "storage"
 required-features = ["rpc", "quinn_endpoint_setup"]
+
+[[example]]
+name = "rate_limit"
+required-features = ["rpc", "derive", "quinn_endpoint_setup"]
 
 [workspace]
 members = ["irpc-derive", "irpc-iroh"]

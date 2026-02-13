@@ -2411,17 +2411,26 @@ pub mod rpc {
     ///
     /// Implement this trait to add rate limiting or other connection filtering.
     ///
-    /// The [`Self::accept`] method is guaranteed to be called at least once with
-    /// `validated = true` before the connection is handed to the request handler.
+    /// Most implementations only need [`Self::accept`], which is called with
+    /// a validated (non-spoofable) remote address. Override
+    /// [`Self::accept_unvalidated`] for coarse pre-handshake flood protection.
     pub trait ConnectionFilter: Send + Sync + 'static {
-        /// Check whether to accept a connection from the given address.
+        /// Check whether to accept a connection from the given validated address.
         ///
-        /// `validated` indicates whether the address has been verified by QUIC
-        /// source address validation. When `false`, the address may be spoofed —
-        /// use only for coarse, high-threshold flood protection.
+        /// The address has been verified by QUIC source address validation.
         ///
         /// Returns `true` to accept, `false` to refuse.
-        fn accept(&self, _addr: &std::net::SocketAddr, _validated: bool) -> bool {
+        fn accept(&self, _addr: &std::net::SocketAddr) -> bool {
+            true
+        }
+
+        /// Check whether to accept a connection before address validation.
+        ///
+        /// The address may be spoofed at this stage — use only for coarse,
+        /// high-threshold flood protection (e.g. blocking known-bad IPs).
+        ///
+        /// Returns `true` to accept, `false` to refuse. Defaults to `true`.
+        fn accept_unvalidated(&self, _addr: &std::net::SocketAddr) -> bool {
             true
         }
     }
@@ -2470,8 +2479,14 @@ pub mod rpc {
                         }
                     }
                 };
+                let addr = incoming.remote_address();
                 let validated = incoming.remote_address_validated();
-                if !self.filter.accept(&incoming.remote_address(), validated) {
+                let refused = if validated {
+                    !self.filter.accept(&addr)
+                } else {
+                    !self.filter.accept_unvalidated(&addr)
+                };
+                if refused {
                     incoming.refuse();
                     continue;
                 }
@@ -2481,7 +2496,7 @@ pub mod rpc {
                     match incoming.await {
                         Ok(connection) => {
                             if !validated
-                                && !filter.accept(&connection.remote_address(), true)
+                                && !filter.accept(&connection.remote_address())
                             {
                                 connection.close(0u32.into(), b"rate limited");
                                 return;
