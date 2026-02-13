@@ -1864,6 +1864,9 @@ pub mod rpc {
     /// Error code on streams if the sender tried to send an message that could not be postcard serialized.
     pub const ERROR_CODE_INVALID_POSTCARD: u32 = 2;
 
+    /// Error code on connections/streams if the request was rate limited.
+    pub const ERROR_CODE_REQUEST_LIMITED: u32 = 3;
+
     /// Error that can occur when writing the initial message when doing a
     /// cross-process RPC.
     #[stack_error(derive, add_meta, from_sources)]
@@ -2377,6 +2380,31 @@ pub mod rpc {
             + 'static,
     >;
 
+    /// Per-request filter, called after deserialization but before the handler.
+    ///
+    /// Implement this trait to add per-request rate limiting or access control.
+    pub trait RequestFilter<R>: Send + Sync + 'static {
+        /// Check whether to accept the request.
+        ///
+        /// Returns `true` to accept, `false` to drop the request.
+        fn accept(&self, request: &R) -> bool;
+    }
+
+    fn wrap_request_filter<R: Send + 'static>(
+        handler: Handler<R>,
+        filter: Arc<dyn RequestFilter<R>>,
+    ) -> Handler<R> {
+        Arc::new(move |r, rx, mut tx| {
+            if filter.accept(&r) {
+                handler(r, rx, tx)
+            } else {
+                tx.reset(ERROR_CODE_REQUEST_LIMITED.into()).ok();
+                drop(rx);
+                Box::pin(async { Ok(()) })
+            }
+        })
+    }
+
     /// Extension trait to [`Service`] to create a [`Service::Message`] from a [`Service`]
     /// and a pair of QUIC streams.
     ///
@@ -2400,11 +2428,11 @@ pub mod rpc {
     }
 
     /// Utility function to listen for incoming connections and handle them with the provided handler
-    pub async fn listen<R: DeserializeOwned + 'static>(
+    pub async fn listen<R: DeserializeOwned + Send + 'static>(
         endpoint: quinn::Endpoint,
         handler: Handler<R>,
     ) {
-        Listener::new(endpoint, handler, AcceptAll).listen().await
+        ListenerBuilder::new(endpoint, handler).listen().await
     }
 
     /// Filter for incoming connections, called before accepting.
@@ -2441,29 +2469,63 @@ pub mod rpc {
 
     impl ConnectionFilter for AcceptAll {}
 
-    /// A listener that accepts incoming connections and handles them with the provided handler.
-    pub struct Listener<R> {
+    /// Builder for configuring and running a listener with optional filters.
+    ///
+    /// Created via [`ListenerBuilder::new`].
+    pub struct ListenerBuilder<R> {
+        endpoint: quinn::Endpoint,
+        handler: Handler<R>,
+        connection_filter: Arc<dyn ConnectionFilter>,
+    }
+
+    impl<R: DeserializeOwned + Send + 'static> ListenerBuilder<R> {
+        /// Creates a new listener builder.
+        pub fn new(endpoint: quinn::Endpoint, handler: Handler<R>) -> Self {
+            Self {
+                endpoint,
+                handler,
+                connection_filter: Arc::new(AcceptAll),
+            }
+        }
+
+        /// Sets a connection filter for per-IP rate limiting.
+        ///
+        /// The filter is called with validated remote addresses before
+        /// accepting connections. See [`ConnectionFilter`] for details.
+        pub fn connection_filter(mut self, filter: impl ConnectionFilter) -> Self {
+            self.connection_filter = Arc::new(filter);
+            self
+        }
+
+        /// Sets a per-request filter.
+        ///
+        /// The filter is called with `&R` (the deserialized protocol enum)
+        /// before the handler. If it returns `false`, the request is dropped.
+        pub fn request_filter(mut self, filter: impl RequestFilter<R>) -> Self {
+            self.handler = wrap_request_filter(self.handler, Arc::new(filter));
+            self
+        }
+
+        /// Runs the listener, accepting connections until the endpoint is closed.
+        pub async fn listen(self) {
+            Listener {
+                endpoint: self.endpoint,
+                handler: self.handler,
+                filter: self.connection_filter,
+            }
+            .run()
+            .await
+        }
+    }
+
+    struct Listener<R> {
         endpoint: quinn::Endpoint,
         handler: Handler<R>,
         filter: Arc<dyn ConnectionFilter>,
     }
 
     impl<R: DeserializeOwned + 'static> Listener<R> {
-        /// Creates a new listener with the given connection filter.
-        pub fn new(
-            endpoint: quinn::Endpoint,
-            handler: Handler<R>,
-            filter: impl ConnectionFilter,
-        ) -> Self {
-            Self {
-                endpoint,
-                handler,
-                filter: Arc::new(filter),
-            }
-        }
-
-        /// Runs the listener, accepting connections until the endpoint is closed.
-        pub async fn listen(self) {
+        async fn run(self) {
             let mut request_id = 0u64;
             let mut tasks = JoinSet::new();
             loop {
@@ -2498,7 +2560,7 @@ pub mod rpc {
                             if !validated
                                 && !filter.accept(&connection.remote_address())
                             {
-                                connection.close(0u32.into(), b"rate limited");
+                                connection.close(ERROR_CODE_REQUEST_LIMITED.into(), b"rate limited");
                                 return;
                             }
                             match handle_connection(connection, handler).await {

@@ -1,13 +1,14 @@
-//! Example demonstrating how to use the [`irpc::rpc::ConnectionFilter`] trait
-//! with the `governor` crate for per-IP rate limiting on a real RPC endpoint.
+//! Example demonstrating per-connection and per-request rate limiting.
+//!
+//! Uses [`irpc::rpc::ConnectionFilter`] for per-IP connection filtering and
+//! [`irpc::rpc::map_filter`] for per-request filtering with the `governor` crate.
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroU32;
-
 use anyhow::{Context, Result};
-use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
+use governor::{DefaultDirectRateLimiter, DefaultKeyedRateLimiter, Quota, RateLimiter};
 use irpc::{
     channel::oneshot,
-    rpc::{ConnectionFilter, Listener, RemoteService},
+    rpc::{ConnectionFilter, ListenerBuilder, RemoteService, RequestFilter},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
     Client, WithChannels,
@@ -20,40 +21,53 @@ struct Ping {
     payload: Vec<u8>,
 }
 
-#[rpc_requests(message = PingMessage)]
+#[derive(Debug, Serialize, Deserialize)]
+struct Info;
+
+#[rpc_requests(message = AppMessage)]
 #[derive(Serialize, Deserialize, Debug)]
-enum PingProtocol {
+enum AppProtocol {
     #[rpc(tx = oneshot::Sender<Vec<u8>>)]
     Ping(Ping),
+    #[rpc(tx = oneshot::Sender<String>)]
+    Info(Info),
 }
 
-struct PingActor {
-    recv: tokio::sync::mpsc::Receiver<PingMessage>,
+struct AppActor {
+    recv: tokio::sync::mpsc::Receiver<AppMessage>,
 }
 
-impl PingActor {
-    pub fn spawn() -> PingApi {
+impl AppActor {
+    pub fn spawn() -> AppApi {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         n0_future::task::spawn(Self { recv: rx }.run());
-        PingApi {
+        AppApi {
             inner: Client::local(tx),
         }
     }
 
     async fn run(mut self) {
-        while let Some(PingMessage::Ping(ping)) = self.recv.recv().await {
-            let WithChannels { tx, inner, .. } = ping;
-            tx.send(inner.payload).await.ok();
+        while let Some(msg) = self.recv.recv().await {
+            match msg {
+                AppMessage::Ping(ping) => {
+                    let WithChannels { tx, inner, .. } = ping;
+                    tx.send(inner.payload).await.ok();
+                }
+                AppMessage::Info(info) => {
+                    let WithChannels { tx, .. } = info;
+                    tx.send("irpc rate-limit example".to_string()).await.ok();
+                }
+            }
         }
     }
 }
 
-/// A [`ConnectionFilter`] backed by a governor keyed rate limiter.
-struct GovernorFilter {
+/// Per-connection rate limiter using governor, keyed by remote address.
+struct GovernorConnectionFilter {
     limiter: DefaultKeyedRateLimiter<SocketAddr>,
 }
 
-impl GovernorFilter {
+impl GovernorConnectionFilter {
     fn new(per_second: u32) -> Self {
         Self {
             limiter: RateLimiter::keyed(
@@ -63,19 +77,43 @@ impl GovernorFilter {
     }
 }
 
-impl ConnectionFilter for GovernorFilter {
+impl ConnectionFilter for GovernorConnectionFilter {
     fn accept(&self, addr: &SocketAddr) -> bool {
         self.limiter.check_key(addr).is_ok()
     }
 }
 
-struct PingApi {
-    inner: Client<PingProtocol>,
+/// Per-request rate limiter: rate-limits Ping requests, always allows Info.
+struct PingRateLimiter {
+    limiter: DefaultDirectRateLimiter,
 }
 
-impl PingApi {
-    pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> Result<PingApi> {
-        Ok(PingApi {
+impl PingRateLimiter {
+    fn new(per_second: u32) -> Self {
+        Self {
+            limiter: RateLimiter::direct(
+                Quota::per_second(NonZeroU32::new(per_second).expect("per_second must be > 0")),
+            ),
+        }
+    }
+}
+
+impl RequestFilter<AppProtocol> for PingRateLimiter {
+    fn accept(&self, req: &AppProtocol) -> bool {
+        match req {
+            AppProtocol::Ping(_) => self.limiter.check().is_ok(),
+            _ => true,
+        }
+    }
+}
+
+struct AppApi {
+    inner: Client<AppProtocol>,
+}
+
+impl AppApi {
+    pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> Result<AppApi> {
+        Ok(AppApi {
             inner: Client::quinn(endpoint, addr),
         })
     }
@@ -85,15 +123,19 @@ impl PingApi {
             .inner
             .as_local()
             .context("cannot listen on remote API")?;
-        let handler = PingProtocol::remote_handler(local);
-        // Rate limit: allow 2 new connections per second per IP
-        let filter = GovernorFilter::new(2);
-        let listener = Listener::new(endpoint, handler, filter);
+        let handler = AppProtocol::remote_handler(local);
+        let listener = ListenerBuilder::new(endpoint, handler)
+            .request_filter(PingRateLimiter::new(2))
+            .connection_filter(GovernorConnectionFilter::new(10));
         Ok(AbortOnDropHandle::new(task::spawn(listener.listen())))
     }
 
     pub async fn ping(&self, payload: Vec<u8>) -> irpc::Result<Vec<u8>> {
         self.inner.rpc(Ping { payload }).await
+    }
+
+    pub async fn info(&self) -> irpc::Result<String> {
+        self.inner.rpc(Info).await
     }
 }
 
@@ -105,7 +147,7 @@ async fn main() -> Result<()> {
 
     let (server_handle, cert) = {
         let (endpoint, cert) = make_server_endpoint(addr)?;
-        let api = PingActor::spawn();
+        let api = AppActor::spawn();
         let handle = api.listen(endpoint)?;
         (handle, cert)
     };
@@ -113,19 +155,20 @@ async fn main() -> Result<()> {
     let endpoint =
         make_client_endpoint(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into(), &[&cert])?;
 
-    // Fire 10 pings at 300ms intervals — with a limit of 2/sec (one token
-    // every 500ms), roughly every other request gets through.
+    // Fire bursts of Ping with interspersed Info requests.
+    // Ping is rate-limited to 2/sec, Info always gets through.
     for i in 0..10 {
-        let api = PingApi::connect(endpoint.clone(), addr)?;
+        let api = AppApi::connect(endpoint.clone(), addr)?;
         match api.ping(b"hello".to_vec()).await {
-            Ok(response) => {
-                println!("{i}: {}", String::from_utf8_lossy(&response));
-            }
-            Err(e) => {
-                println!("{i}: rejected: {e}");
-            }
+            Ok(response) => println!("{i}: ping = {}", String::from_utf8_lossy(&response)),
+            Err(e) => println!("{i}: ping rejected: {e}"),
         }
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let api = AppApi::connect(endpoint.clone(), addr)?;
+        match api.info().await {
+            Ok(response) => println!("{i}: info = {response}"),
+            Err(e) => println!("{i}: info rejected: {e}"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
     drop(server_handle);
