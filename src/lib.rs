@@ -2404,23 +2404,57 @@ pub mod rpc {
         endpoint: quinn::Endpoint,
         handler: Handler<R>,
     ) {
-        Listener::new(endpoint, handler).run().await
+        Listener::new(endpoint, handler, AcceptAll).listen().await
     }
+
+    /// Filter for incoming connections, called before accepting.
+    ///
+    /// Implement this trait to add rate limiting or other connection filtering.
+    ///
+    /// The [`Self::accept`] method is guaranteed to be called at least once with
+    /// `validated = true` before the connection is handed to the request handler.
+    pub trait ConnectionFilter: Send + Sync + 'static {
+        /// Check whether to accept a connection from the given address.
+        ///
+        /// `validated` indicates whether the address has been verified by QUIC
+        /// source address validation. When `false`, the address may be spoofed —
+        /// use only for coarse, high-threshold flood protection.
+        ///
+        /// Returns `true` to accept, `false` to refuse.
+        fn accept(&self, _addr: &std::net::SocketAddr, _validated: bool) -> bool {
+            true
+        }
+    }
+
+    /// A [`ConnectionFilter`] that accepts all connections.
+    #[derive(Debug, Clone, Default)]
+    pub struct AcceptAll;
+
+    impl ConnectionFilter for AcceptAll {}
 
     /// A listener that accepts incoming connections and handles them with the provided handler.
     pub struct Listener<R> {
         endpoint: quinn::Endpoint,
         handler: Handler<R>,
+        filter: Arc<dyn ConnectionFilter>,
     }
 
     impl<R: DeserializeOwned + 'static> Listener<R> {
-        /// Creates a new listener.
-        pub fn new(endpoint: quinn::Endpoint, handler: Handler<R>) -> Self {
-            Self { endpoint, handler }
+        /// Creates a new listener with the given connection filter.
+        pub fn new(
+            endpoint: quinn::Endpoint,
+            handler: Handler<R>,
+            filter: impl ConnectionFilter,
+        ) -> Self {
+            Self {
+                endpoint,
+                handler,
+                filter: Arc::new(filter),
+            }
         }
 
         /// Runs the listener, accepting connections until the endpoint is closed.
-        pub async fn run(self) {
+        pub async fn listen(self) {
             let mut request_id = 0u64;
             let mut tasks = JoinSet::new();
             loop {
@@ -2436,13 +2470,27 @@ pub mod rpc {
                         }
                     }
                 };
+                let validated = incoming.remote_address_validated();
+                if !self.filter.accept(&incoming.remote_address(), validated) {
+                    incoming.refuse();
+                    continue;
+                }
                 let handler = self.handler.clone();
+                let filter = self.filter.clone();
                 let fut = async move {
                     match incoming.await {
-                        Ok(connection) => match handle_connection(connection, handler).await {
-                            Err(err) => warn!("connection closed with error: {err:?}"),
-                            Ok(()) => debug!("connection closed"),
-                        },
+                        Ok(connection) => {
+                            if !validated
+                                && !filter.accept(&connection.remote_address(), true)
+                            {
+                                connection.close(0u32.into(), b"rate limited");
+                                return;
+                            }
+                            match handle_connection(connection, handler).await {
+                                Err(err) => warn!("connection closed with error: {err:?}"),
+                                Ok(()) => debug!("connection closed"),
+                            }
+                        }
                         Err(cause) => {
                             warn!("failed to accept connection: {cause:?}");
                         }
