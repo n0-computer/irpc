@@ -62,7 +62,7 @@ testresult = "0.4.1"
 # used in examples
 anyhow = { workspace = true }
 # used in rate_limit example
-governor = "0.10"
+governor = { workspace = true }
 
 [features]
 # enable the remote transport
@@ -119,3 +119,4 @@ iroh = { version = "0.96" }
 iroh-base = { version = "0.96" }
 quinn = { package = "iroh-quinn", version = "0.16.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
+governor = { version = "0.10" }

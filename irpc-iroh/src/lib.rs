@@ -17,8 +17,8 @@ use iroh::{
 use irpc::{
     channel::oneshot,
     rpc::{
-        Handler, RemoteConnection, RemoteService, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
-        MAX_MESSAGE_SIZE,
+        Handler, RemoteConnection, RemoteService, RequestFilter,
+        ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, ERROR_CODE_REQUEST_LIMITED, MAX_MESSAGE_SIZE,
     },
     util::AsyncReadVarintExt,
     LocalSender, RequestError,
@@ -400,37 +400,184 @@ pub async fn read_request_raw<R: DeserializeOwned + 'static>(
     Ok(Some((msg, rx, tx)))
 }
 
-/// Utility function to listen for incoming connections and handle them with the provided handler
-pub async fn listen<R: DeserializeOwned + 'static>(endpoint: iroh::Endpoint, handler: Handler<R>) {
-    let mut request_id = 0u64;
-    let mut tasks = n0_future::task::JoinSet::new();
-    loop {
-        let incoming = tokio::select! {
-            Some(res) = tasks.join_next(), if !tasks.is_empty() => {
-                res.expect("irpc connection task panicked");
-                continue;
-            }
-            incoming = endpoint.accept() => {
-                match incoming {
-                    None => break,
-                    Some(incoming) => incoming
+/// Filter for incoming iroh connections.
+///
+/// Like [`irpc::rpc::ConnectionFilter`], but additionally allows filtering by
+/// [`EndpointId`] — the remote node's cryptographic identity, available after
+/// the QUIC handshake completes.
+///
+/// Most implementations only need [`Self::accept`] and/or [`Self::accept_endpoint_id`].
+/// Override [`Self::accept_unvalidated`] for coarse pre-handshake flood protection.
+pub trait IrohConnectionFilter: Send + Sync + 'static {
+    /// Check whether to accept a connection from the given validated address.
+    ///
+    /// Returns `true` to accept, `false` to refuse.
+    fn accept(&self, _addr: &std::net::SocketAddr) -> bool {
+        true
+    }
+
+    /// Check whether to accept a connection before address validation.
+    ///
+    /// The address may be spoofed at this stage — use only for coarse,
+    /// high-threshold flood protection (e.g. blocking known-bad IPs).
+    ///
+    /// Returns `true` to accept, `false` to refuse. Defaults to `true`.
+    fn accept_unvalidated(&self, _addr: &std::net::SocketAddr) -> bool {
+        true
+    }
+
+    /// Check whether to accept a connection from the given endpoint ID.
+    ///
+    /// Called after the QUIC handshake, when the remote node's identity is known.
+    ///
+    /// Returns `true` to accept, `false` to refuse.
+    fn accept_endpoint_id(&self, _id: &EndpointId) -> bool {
+        true
+    }
+}
+
+/// An [`IrohConnectionFilter`] that accepts all connections.
+#[derive(Debug, Clone, Default)]
+pub struct AcceptAll;
+
+impl IrohConnectionFilter for AcceptAll {}
+
+fn wrap_request_filter<R: Send + 'static>(
+    handler: Handler<R>,
+    filter: Arc<dyn RequestFilter<R>>,
+) -> Handler<R> {
+    Arc::new(move |r, rx, mut tx| {
+        if filter.accept(&r) {
+            handler(r, rx, tx)
+        } else {
+            tx.reset(ERROR_CODE_REQUEST_LIMITED.into()).ok();
+            drop(rx);
+            Box::pin(async { Ok(()) })
+        }
+    })
+}
+
+/// Builder for configuring and running an iroh listener with optional filters.
+pub struct IrohListenerBuilder<R> {
+    endpoint: iroh::Endpoint,
+    handler: Handler<R>,
+    connection_filter: Arc<dyn IrohConnectionFilter>,
+}
+
+impl<R: DeserializeOwned + Send + 'static> IrohListenerBuilder<R> {
+    /// Creates a new listener builder.
+    pub fn new(endpoint: iroh::Endpoint, handler: Handler<R>) -> Self {
+        Self {
+            endpoint,
+            handler,
+            connection_filter: Arc::new(AcceptAll),
+        }
+    }
+
+    /// Sets a connection filter for per-IP and per-endpoint-ID rate limiting.
+    pub fn connection_filter(mut self, filter: impl IrohConnectionFilter) -> Self {
+        self.connection_filter = Arc::new(filter);
+        self
+    }
+
+    /// Sets a per-request filter.
+    ///
+    /// The filter is called with `&R` (the deserialized protocol enum)
+    /// before the handler. If it returns `false`, the request is dropped.
+    pub fn request_filter(mut self, filter: impl RequestFilter<R>) -> Self {
+        self.handler = wrap_request_filter(self.handler, Arc::new(filter));
+        self
+    }
+
+    /// Runs the listener, accepting connections until the endpoint is closed.
+    pub async fn listen(self) {
+        IrohListener {
+            endpoint: self.endpoint,
+            handler: self.handler,
+            filter: self.connection_filter,
+        }
+        .run()
+        .await
+    }
+}
+
+struct IrohListener<R> {
+    endpoint: iroh::Endpoint,
+    handler: Handler<R>,
+    filter: Arc<dyn IrohConnectionFilter>,
+}
+
+impl<R: DeserializeOwned + 'static> IrohListener<R> {
+    async fn run(self) {
+        let mut request_id = 0u64;
+        let mut tasks = n0_future::task::JoinSet::new();
+        loop {
+            let incoming = tokio::select! {
+                Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                    res.expect("irpc connection task panicked");
+                    continue;
                 }
-            }
-        };
-        let handler = handler.clone();
-        let fut = async move {
-            match incoming.await {
-                Ok(connection) => match handle_connection(&connection, handler).await {
-                    Err(err) => warn!("connection closed with error: {err:?}"),
-                    Ok(()) => debug!("connection closed"),
-                },
-                Err(cause) => {
-                    warn!("failed to accept connection: {cause:?}");
+                incoming = self.endpoint.accept() => {
+                    match incoming {
+                        None => break,
+                        Some(incoming) => incoming
+                    }
                 }
             };
-        };
-        let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
-        tasks.spawn(fut.instrument(span));
-        request_id += 1;
+            let addr = incoming.remote_address();
+            let validated = incoming.remote_address_validated();
+            let refused = if validated {
+                !self.filter.accept(&addr)
+            } else {
+                !self.filter.accept_unvalidated(&addr)
+            };
+            if refused {
+                incoming.refuse();
+                continue;
+            }
+            let handler = self.handler.clone();
+            let filter = self.filter.clone();
+            let fut = async move {
+                let accepting = match incoming.accept() {
+                    Ok(accepting) => accepting,
+                    Err(cause) => {
+                        warn!("failed to accept connection: {cause:?}");
+                        return;
+                    }
+                };
+                match accepting.await {
+                    Ok(connection) => {
+                        // Deferred validated-address check for initially-unvalidated connections
+                        if !validated && !filter.accept(&addr) {
+                            connection.close(ERROR_CODE_REQUEST_LIMITED.into(), b"rate limited");
+                            return;
+                        }
+                        // Endpoint ID check (only available after handshake)
+                        if !filter.accept_endpoint_id(&connection.remote_id()) {
+                            connection.close(ERROR_CODE_REQUEST_LIMITED.into(), b"rate limited");
+                            return;
+                        }
+                        match handle_connection(&connection, handler).await {
+                            Err(err) => warn!("connection closed with error: {err:?}"),
+                            Ok(()) => debug!("connection closed"),
+                        }
+                    }
+                    Err(cause) => {
+                        warn!("failed to accept connection: {cause:?}");
+                    }
+                };
+            };
+            let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
+            tasks.spawn(fut.instrument(span));
+            request_id += 1;
+        }
     }
+}
+
+/// Utility function to listen for incoming connections and handle them with the provided handler
+pub async fn listen<R: DeserializeOwned + Send + 'static>(
+    endpoint: iroh::Endpoint,
+    handler: Handler<R>,
+) {
+    IrohListenerBuilder::new(endpoint, handler).listen().await
 }
