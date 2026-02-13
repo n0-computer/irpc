@@ -75,9 +75,9 @@ struct GovernorConnectionFilter {
 impl GovernorConnectionFilter {
     fn new(per_second: u32) -> Self {
         Self {
-            limiter: RateLimiter::keyed(
-                Quota::per_second(NonZeroU32::new(per_second).expect("per_second must be > 0")),
-            ),
+            limiter: RateLimiter::keyed(Quota::per_second(
+                NonZeroU32::new(per_second).expect("per_second must be > 0"),
+            )),
         }
     }
 }
@@ -96,9 +96,9 @@ struct PingRateLimiter {
 impl PingRateLimiter {
     fn new(per_second: u32) -> Self {
         Self {
-            limiter: RateLimiter::direct(
-                Quota::per_second(NonZeroU32::new(per_second).expect("per_second must be > 0")),
-            ),
+            limiter: RateLimiter::direct(Quota::per_second(
+                NonZeroU32::new(per_second).expect("per_second must be > 0"),
+            )),
         }
     }
 }

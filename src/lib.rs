@@ -2454,7 +2454,11 @@ pub mod rpc {
 
         /// Check whether to accept a connection before address validation.
         ///
-        /// The address may be spoofed at this stage — use only for coarse,
+        /// # Security
+        ///
+        /// The address has **not** been validated at this stage and can be
+        /// freely spoofed by an attacker. It usually should not be used for
+        /// access-control decisions. It is mainly useful for coarse,
         /// high-threshold flood protection (e.g. blocking known-bad IPs).
         ///
         /// Returns `true` to accept, `false` to refuse. Defaults to `true`.
@@ -2557,10 +2561,9 @@ pub mod rpc {
                 let fut = async move {
                     match incoming.await {
                         Ok(connection) => {
-                            if !validated
-                                && !filter.accept(&connection.remote_address())
-                            {
-                                connection.close(ERROR_CODE_REQUEST_LIMITED.into(), b"rate limited");
+                            if !validated && !filter.accept(&connection.remote_address()) {
+                                connection
+                                    .close(ERROR_CODE_REQUEST_LIMITED.into(), b"rate limited");
                                 return;
                             }
                             match handle_connection(connection, handler).await {

@@ -2,8 +2,6 @@
 //!
 //! Uses [`irpc::rpc::ConnectionFilter`] for per-IP connection filtering and
 //! [`irpc::rpc::map_filter`] for per-request filtering with the `governor` crate.
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::num::NonZeroU32;
 use anyhow::{Context, Result};
 use governor::{DefaultDirectRateLimiter, DefaultKeyedRateLimiter, Quota, RateLimiter};
 use irpc::{
@@ -15,6 +13,8 @@ use irpc::{
 };
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::num::NonZeroU32;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Ping {
@@ -70,9 +70,9 @@ struct GovernorConnectionFilter {
 impl GovernorConnectionFilter {
     fn new(per_second: u32) -> Self {
         Self {
-            limiter: RateLimiter::keyed(
-                Quota::per_second(NonZeroU32::new(per_second).expect("per_second must be > 0")),
-            ),
+            limiter: RateLimiter::keyed(Quota::per_second(
+                NonZeroU32::new(per_second).expect("per_second must be > 0"),
+            )),
         }
     }
 }
@@ -91,9 +91,9 @@ struct PingRateLimiter {
 impl PingRateLimiter {
     fn new(per_second: u32) -> Self {
         Self {
-            limiter: RateLimiter::direct(
-                Quota::per_second(NonZeroU32::new(per_second).expect("per_second must be > 0")),
-            ),
+            limiter: RateLimiter::direct(Quota::per_second(
+                NonZeroU32::new(per_second).expect("per_second must be > 0"),
+            )),
         }
     }
 }
