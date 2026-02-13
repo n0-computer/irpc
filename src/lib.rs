@@ -1864,6 +1864,9 @@ pub mod rpc {
     /// Error code on streams if the sender tried to send an message that could not be postcard serialized.
     pub const ERROR_CODE_INVALID_POSTCARD: u32 = 2;
 
+    /// Error code on connections/streams if the request was rate limited.
+    pub const ERROR_CODE_REQUEST_LIMITED: u32 = 3;
+
     /// Error that can occur when writing the initial message when doing a
     /// cross-process RPC.
     #[stack_error(derive, add_meta, from_sources)]
@@ -2377,6 +2380,31 @@ pub mod rpc {
             + 'static,
     >;
 
+    /// Per-request filter, called after deserialization but before the handler.
+    ///
+    /// Implement this trait to add per-request rate limiting or access control.
+    pub trait RequestFilter<R>: Send + Sync + 'static {
+        /// Check whether to accept the request.
+        ///
+        /// Returns `true` to accept, `false` to drop the request.
+        fn accept(&self, request: &R) -> bool;
+    }
+
+    fn wrap_request_filter<R: Send + 'static>(
+        handler: Handler<R>,
+        filter: Arc<dyn RequestFilter<R>>,
+    ) -> Handler<R> {
+        Arc::new(move |r, rx, mut tx| {
+            if filter.accept(&r) {
+                handler(r, rx, tx)
+            } else {
+                tx.reset(ERROR_CODE_REQUEST_LIMITED.into()).ok();
+                drop(rx);
+                Box::pin(async { Ok(()) })
+            }
+        })
+    }
+
     /// Extension trait to [`Service`] to create a [`Service::Message`] from a [`Service`]
     /// and a pair of QUIC streams.
     ///
@@ -2400,40 +2428,158 @@ pub mod rpc {
     }
 
     /// Utility function to listen for incoming connections and handle them with the provided handler
-    pub async fn listen<R: DeserializeOwned + 'static>(
+    pub async fn listen<R: DeserializeOwned + Send + 'static>(
         endpoint: quinn::Endpoint,
         handler: Handler<R>,
     ) {
-        let mut request_id = 0u64;
-        let mut tasks = JoinSet::new();
-        loop {
-            let incoming = tokio::select! {
-                Some(res) = tasks.join_next(), if !tasks.is_empty() => {
-                    res.expect("irpc connection task panicked");
-                    continue;
-                }
-                incoming = endpoint.accept() => {
-                    match incoming {
-                        None => break,
-                        Some(incoming) => incoming
+        ListenerBuilder::new(endpoint, handler).listen().await
+    }
+
+    /// Filter for incoming connections, called before accepting.
+    ///
+    /// Implement this trait to add rate limiting or other connection filtering.
+    ///
+    /// Most implementations only need [`Self::accept`], which is called with
+    /// a validated (non-spoofable) remote address. Override
+    /// [`Self::accept_unvalidated`] for coarse pre-handshake flood protection.
+    pub trait ConnectionFilter: Send + Sync + 'static {
+        /// Check whether to accept a connection from the given validated address.
+        ///
+        /// The address has been verified by QUIC source address validation.
+        ///
+        /// Returns `true` to accept, `false` to refuse.
+        fn accept(&self, _addr: &std::net::SocketAddr) -> bool {
+            true
+        }
+
+        /// Check whether to accept a connection before address validation.
+        ///
+        /// # Security
+        ///
+        /// The address has **not** been validated at this stage and can be
+        /// freely spoofed by an attacker. It usually should not be used for
+        /// access-control decisions. It is mainly useful for coarse,
+        /// high-threshold flood protection (e.g. blocking known-bad IPs).
+        ///
+        /// Returns `true` to accept, `false` to refuse. Defaults to `true`.
+        fn accept_unvalidated(&self, _addr: &std::net::SocketAddr) -> bool {
+            true
+        }
+    }
+
+    /// A [`ConnectionFilter`] that accepts all connections.
+    #[derive(Debug, Clone, Default)]
+    pub struct AcceptAll;
+
+    impl ConnectionFilter for AcceptAll {}
+
+    /// Builder for configuring and running a listener with optional filters.
+    ///
+    /// Created via [`ListenerBuilder::new`].
+    pub struct ListenerBuilder<R> {
+        endpoint: quinn::Endpoint,
+        handler: Handler<R>,
+        connection_filter: Arc<dyn ConnectionFilter>,
+    }
+
+    impl<R: DeserializeOwned + Send + 'static> ListenerBuilder<R> {
+        /// Creates a new listener builder.
+        pub fn new(endpoint: quinn::Endpoint, handler: Handler<R>) -> Self {
+            Self {
+                endpoint,
+                handler,
+                connection_filter: Arc::new(AcceptAll),
+            }
+        }
+
+        /// Sets a connection filter for per-IP rate limiting.
+        ///
+        /// The filter is called with validated remote addresses before
+        /// accepting connections. See [`ConnectionFilter`] for details.
+        pub fn connection_filter(mut self, filter: impl ConnectionFilter) -> Self {
+            self.connection_filter = Arc::new(filter);
+            self
+        }
+
+        /// Sets a per-request filter.
+        ///
+        /// The filter is called with `&R` (the deserialized protocol enum)
+        /// before the handler. If it returns `false`, the request is dropped.
+        pub fn request_filter(mut self, filter: impl RequestFilter<R>) -> Self {
+            self.handler = wrap_request_filter(self.handler, Arc::new(filter));
+            self
+        }
+
+        /// Runs the listener, accepting connections until the endpoint is closed.
+        pub async fn listen(self) {
+            Listener {
+                endpoint: self.endpoint,
+                handler: self.handler,
+                filter: self.connection_filter,
+            }
+            .run()
+            .await
+        }
+    }
+
+    struct Listener<R> {
+        endpoint: quinn::Endpoint,
+        handler: Handler<R>,
+        filter: Arc<dyn ConnectionFilter>,
+    }
+
+    impl<R: DeserializeOwned + 'static> Listener<R> {
+        async fn run(self) {
+            let mut request_id = 0u64;
+            let mut tasks = JoinSet::new();
+            loop {
+                let incoming = tokio::select! {
+                    Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                        res.expect("irpc connection task panicked");
+                        continue;
                     }
-                }
-            };
-            let handler = handler.clone();
-            let fut = async move {
-                match incoming.await {
-                    Ok(connection) => match handle_connection(connection, handler).await {
-                        Err(err) => warn!("connection closed with error: {err:?}"),
-                        Ok(()) => debug!("connection closed"),
-                    },
-                    Err(cause) => {
-                        warn!("failed to accept connection: {cause:?}");
+                    incoming = self.endpoint.accept() => {
+                        match incoming {
+                            None => break,
+                            Some(incoming) => incoming
+                        }
                     }
                 };
-            };
-            let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
-            tasks.spawn(fut.instrument(span));
-            request_id += 1;
+                let addr = incoming.remote_address();
+                let validated = incoming.remote_address_validated();
+                let refused = if validated {
+                    !self.filter.accept(&addr)
+                } else {
+                    !self.filter.accept_unvalidated(&addr)
+                };
+                if refused {
+                    incoming.refuse();
+                    continue;
+                }
+                let handler = self.handler.clone();
+                let filter = self.filter.clone();
+                let fut = async move {
+                    match incoming.await {
+                        Ok(connection) => {
+                            if !validated && !filter.accept(&connection.remote_address()) {
+                                connection
+                                    .close(ERROR_CODE_REQUEST_LIMITED.into(), b"rate limited");
+                                return;
+                            }
+                            match handle_connection(connection, handler).await {
+                                Err(err) => warn!("connection closed with error: {err:?}"),
+                                Ok(()) => debug!("connection closed"),
+                            }
+                        }
+                        Err(cause) => {
+                            warn!("failed to accept connection: {cause:?}");
+                        }
+                    };
+                };
+                let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
+                tasks.spawn(fut.instrument(span));
+                request_id += 1;
+            }
         }
     }
 

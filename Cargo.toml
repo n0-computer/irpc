@@ -61,6 +61,8 @@ trybuild = "1.0.104"
 testresult = "0.4.1"
 # used in examples
 anyhow = { workspace = true }
+# used in rate_limit example
+governor = { workspace = true }
 
 [features]
 # enable the remote transport
@@ -90,6 +92,10 @@ required-features = ["derive"]
 name = "storage"
 required-features = ["rpc", "quinn_endpoint_setup"]
 
+[[example]]
+name = "rate_limit"
+required-features = ["rpc", "derive", "quinn_endpoint_setup"]
+
 [workspace]
 members = ["irpc-derive", "irpc-iroh"]
 
@@ -113,3 +119,4 @@ iroh = { version = "0.96" }
 iroh-base = { version = "0.96" }
 quinn = { package = "iroh-quinn", version = "0.16.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
+governor = { version = "0.10" }
