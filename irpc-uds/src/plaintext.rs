@@ -12,9 +12,8 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use quinn_proto::{
     crypto::{self, CryptoError, HeaderKey},
-    ConnectionId,
     transport_parameters::TransportParameters,
-    ConnectError, PathId, Side, TransportError, TransportErrorCode,
+    ConnectError, ConnectionId, PathId, Side, TransportError, TransportErrorCode,
 };
 use tracing::trace;
 
@@ -115,12 +114,7 @@ impl crypto::ServerConfig for PlaintextServerConfig {
         Ok(crypto_keys(Side::Server))
     }
 
-    fn retry_tag(
-        &self,
-        _version: u32,
-        _orig_dst_cid: ConnectionId,
-        _packet: &[u8],
-    ) -> [u8; 16] {
+    fn retry_tag(&self, _version: u32, _orig_dst_cid: ConnectionId, _packet: &[u8]) -> [u8; 16] {
         [0u8; 16]
     }
 
@@ -185,13 +179,13 @@ impl crypto::Session for PlaintextSession {
 
     fn read_handshake(&mut self, mut buf: &[u8]) -> Result<bool, TransportError> {
         if self.peer_params.is_none() {
-            self.peer_params = Some(
-                TransportParameters::read(self.side, &mut buf)
-                    .map_err(|e| TransportError::new(
+            self.peer_params =
+                Some(TransportParameters::read(self.side, &mut buf).map_err(|e| {
+                    TransportError::new(
                         TransportErrorCode::TRANSPORT_PARAMETER_ERROR,
                         format!("failed to read transport parameters: {e}"),
-                    ))?,
-            );
+                    )
+                })?);
         }
         Ok(true)
     }
@@ -207,12 +201,11 @@ impl crypto::Session for PlaintextSession {
         }
 
         self.initial_keys.take().or_else(|| {
-            self.handshake_keys.take().map(|k| {
+            self.handshake_keys.take().inspect(|_| {
                 if self.side.is_server() && !self.wrote_transport_params {
                     self.params.write(buf);
                     self.wrote_transport_params = true;
                 }
-                k
             })
         })
     }
@@ -221,12 +214,7 @@ impl crypto::Session for PlaintextSession {
         Some(crypto_packet_keypair(self.side))
     }
 
-    fn is_valid_retry(
-        &self,
-        _orig_dst_cid: ConnectionId,
-        _header: &[u8],
-        _payload: &[u8],
-    ) -> bool {
+    fn is_valid_retry(&self, _orig_dst_cid: ConnectionId, _header: &[u8], _payload: &[u8]) -> bool {
         true
     }
 

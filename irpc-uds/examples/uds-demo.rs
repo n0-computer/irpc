@@ -1,10 +1,17 @@
 //! Demonstrates the typical server-actor pattern over Unix domain sockets.
 
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("This example only runs on Unix.");
+}
+
+#[cfg(unix)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     cli::run().await
 }
 
+#[cfg(unix)]
 mod proto {
     use std::collections::HashMap;
 
@@ -66,6 +73,7 @@ mod proto {
     }
 }
 
+#[cfg(unix)]
 mod cli {
     use anyhow::Result;
     use clap::Parser;

@@ -1,4 +1,6 @@
 //! Benchmark comparing irpc transports: local, quinn, iroh, and UDS.
+//!
+//! Ported from examples/compute.rs to cover all four transports.
 
 use std::{
     io::{self, Write},
@@ -7,14 +9,14 @@ use std::{
 
 use anyhow::Result;
 use futures_buffered::BufferedStreamExt;
+use iroh::{protocol::Router, Endpoint};
 use irpc::{
-    channel::oneshot,
+    channel::{mpsc, oneshot},
     rpc::{listen, RemoteService},
     rpc_requests,
     util::{make_client_endpoint, make_server_endpoint},
     Client, WithChannels,
 };
-use iroh::{protocol::Router, Endpoint};
 use irpc_iroh::IrohProtocol;
 use n0_future::{
     stream::StreamExt,
@@ -31,8 +33,9 @@ enum BenchProtocol {
     #[rpc(tx = oneshot::Sender<u128>)]
     Sqr(u64),
 
-    #[rpc(tx = oneshot::Sender<Vec<u8>>)]
-    Echo(Vec<u8>),
+    #[rpc(rx = mpsc::Receiver<u64>, tx = mpsc::Sender<u64>)]
+    #[wrap(MultiplyRequest)]
+    Multiply { initial: u64 },
 }
 
 // --- Actor ---
@@ -45,9 +48,19 @@ async fn actor(mut rx: tokio::sync::mpsc::Receiver<BenchMessage>) {
                 let result = (inner as u128) * (inner as u128);
                 tx.send(result).await.ok();
             }
-            BenchMessage::Echo(msg) => {
-                let WithChannels { inner, tx, .. } = msg;
-                tx.send(inner).await.ok();
+            BenchMessage::Multiply(msg) => {
+                let WithChannels {
+                    inner, tx, mut rx, ..
+                } = msg;
+                let MultiplyRequest { initial } = inner;
+                // Spawn so the actor loop stays free for other messages
+                tokio::task::spawn(async move {
+                    while let Ok(Some(num)) = rx.recv().await {
+                        if tx.send(initial * num).await.is_err() {
+                            break;
+                        }
+                    }
+                });
             }
         }
     }
@@ -98,6 +111,7 @@ async fn setup_iroh() -> Result<(Client<BenchProtocol>, Router)> {
     Ok((client, router))
 }
 
+#[cfg(unix)]
 async fn setup_uds() -> Result<(Client<BenchProtocol>, std::path::PathBuf)> {
     let path = std::env::temp_dir().join(format!("irpc-bench-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
@@ -124,12 +138,12 @@ fn clear_line() -> io::Result<()> {
     io::stdout().flush()
 }
 
-async fn bench_seq_small(name: &str, client: &Client<BenchProtocol>, n: u64) -> Result<()> {
+async fn bench_seq(name: &str, client: &Client<BenchProtocol>, n: u64) -> Result<()> {
     let mut sum = 0u128;
     let t0 = std::time::Instant::now();
     for i in 0..n {
         sum += client.rpc(i).await?;
-        if i % 1000 == 0 {
+        if i.is_multiple_of(10000) {
             print!(".");
             io::stdout().flush()?;
         }
@@ -138,16 +152,14 @@ async fn bench_seq_small(name: &str, client: &Client<BenchProtocol>, n: u64) -> 
     let rps = ((n as f64) / elapsed.as_secs_f64()).round() as u64;
     assert_eq!(sum, sum_of_squares(n));
     clear_line()?;
-    println!("  {name:<8} {rps:>10} rps", rps = rps.separate_with_underscores());
+    println!(
+        "  {name:<8} {rps:>10} rps",
+        rps = rps.separate_with_underscores()
+    );
     Ok(())
 }
 
-async fn bench_par_small(
-    name: &str,
-    client: &Client<BenchProtocol>,
-    n: u64,
-    par: usize,
-) -> Result<()> {
+async fn bench_par(name: &str, client: &Client<BenchProtocol>, n: u64, par: usize) -> Result<()> {
     let t0 = std::time::Instant::now();
     let client = client.clone();
     let reqs = n0_future::stream::iter((0..n).map(move |i| {
@@ -160,31 +172,43 @@ async fn bench_par_small(
     let rps = ((n as f64) / elapsed.as_secs_f64()).round() as u64;
     assert_eq!(sum, sum_of_squares(n));
     clear_line()?;
-    println!("  {name:<8} {rps:>10} rps", rps = rps.separate_with_underscores());
+    println!(
+        "  {name:<8} {rps:>10} rps",
+        rps = rps.separate_with_underscores()
+    );
     Ok(())
 }
 
-async fn bench_large_seq(
-    name: &str,
-    client: &Client<BenchProtocol>,
-    n: u64,
-    payload_size: usize,
-) -> Result<()> {
-    let payload = vec![42u8; payload_size];
+async fn bench_bidi(name: &str, client: &Client<BenchProtocol>, n: u64) -> Result<()> {
     let t0 = std::time::Instant::now();
-    for _ in 0..n {
-        let resp = client.rpc(payload.clone()).await?;
-        assert_eq!(resp.len(), payload_size);
+    let (send, mut recv) = client
+        .bidi_streaming(MultiplyRequest { initial: 2 }, 128, 128)
+        .await?;
+    let handle = tokio::task::spawn(async move {
+        for i in 0..n {
+            send.send(i).await?;
+        }
+        Ok::<(), io::Error>(())
+    });
+    let mut sum = 0u64;
+    let mut i = 0u64;
+    while let Some(res) = recv.recv().await? {
+        sum += res;
+        if i.is_multiple_of(10000) {
+            print!(".");
+            io::stdout().flush()?;
+        }
+        i += 1;
     }
     let elapsed = t0.elapsed();
     let rps = ((n as f64) / elapsed.as_secs_f64()).round() as u64;
-    let throughput = (n as f64 * payload_size as f64) / elapsed.as_secs_f64();
-    let throughput_gb = throughput / (1024.0 * 1024.0 * 1024.0);
+    assert_eq!(sum, (0..n).map(|x| x * 2).sum::<u64>());
     clear_line()?;
     println!(
-        "  {name:<8} {rps:>10} rps  ({throughput_gb:.1} GB/s)",
-        rps = rps.separate_with_underscores(),
+        "  {name:<8} {rps:>10} rps",
+        rps = rps.separate_with_underscores()
     );
+    handle.await??;
     Ok(())
 }
 
@@ -192,65 +216,52 @@ async fn bench_large_seq(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Only enable tracing if RUST_LOG is set
     if std::env::var("RUST_LOG").is_ok() {
         tracing_subscriber::fmt::init();
     }
 
-    let n_small: u64 = std::env::var("N_SMALL")
+    let n: u64 = std::env::var("N")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(10_000);
-    let n_large: u64 = std::env::var("N_LARGE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
+        .unwrap_or(100_000);
     let par: usize = std::env::var("PAR")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(32);
-    let payload_mb: usize = std::env::var("PAYLOAD_MB")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let payload_size = payload_mb * 1024 * 1024;
 
     // Setup all transports
     let local = setup_local();
     let (quinn_client, _quinn_handle) = setup_quinn()?;
     let (iroh_client, _iroh_router) = setup_iroh().await?;
-    let (uds_client, uds_path) = setup_uds().await?;
+    #[cfg(unix)]
+    let (uds_client, _uds_path) = setup_uds().await?;
 
-    // --- Sequential small RPCs ---
-    println!("=== Sequential small RPCs (n={}) ===", n_small.separate_with_underscores());
-    bench_seq_small("local", &local, n_small).await?;
-    bench_seq_small("quinn", &quinn_client, n_small).await?;
-    bench_seq_small("iroh", &iroh_client, n_small).await?;
-    bench_seq_small("uds", &uds_client, n_small).await?;
+    // --- Sequential RPCs ---
+    println!("=== RPC seq (n={}) ===", n.separate_with_underscores());
+    bench_seq("local", &local, n).await?;
+    bench_seq("quinn", &quinn_client, n).await?;
+    bench_seq("iroh", &iroh_client, n).await?;
+    #[cfg(unix)]
+    bench_seq("uds", &uds_client, n).await?;
 
-    // --- Concurrent small RPCs ---
+    // --- Parallel RPCs ---
     println!(
-        "\n=== Concurrent small RPCs (n={}, parallelism={par}) ===",
-        n_small.separate_with_underscores()
+        "\n=== RPC par (n={}, parallelism={par}) ===",
+        n.separate_with_underscores()
     );
-    bench_par_small("local", &local, n_small, par).await?;
-    bench_par_small("quinn", &quinn_client, n_small, par).await?;
-    bench_par_small("iroh", &iroh_client, n_small, par).await?;
-    bench_par_small("uds", &uds_client, n_small, par).await?;
+    bench_par("local", &local, n, par).await?;
+    bench_par("quinn", &quinn_client, n, par).await?;
+    bench_par("iroh", &iroh_client, n, par).await?;
+    #[cfg(unix)]
+    bench_par("uds", &uds_client, n, par).await?;
 
-    // --- Large sequential RPCs ---
-    println!(
-        "\n=== Large sequential RPCs (n={}, {}MB payload) ===",
-        n_large.separate_with_underscores(),
-        payload_mb,
-    );
-    bench_large_seq("local", &local, n_large, payload_size).await?;
-    bench_large_seq("quinn", &quinn_client, n_large, payload_size).await?;
-    bench_large_seq("iroh", &iroh_client, n_large, payload_size).await?;
-    bench_large_seq("uds", &uds_client, n_large, payload_size).await?;
-
-    // uds_path cleanup happens automatically via UdsSocket::drop
-    drop(uds_path);
+    // --- Bidirectional streaming ---
+    println!("\n=== Bidi seq (n={}) ===", n.separate_with_underscores());
+    bench_bidi("local", &local, n).await?;
+    bench_bidi("quinn", &quinn_client, n).await?;
+    bench_bidi("iroh", &iroh_client, n).await?;
+    #[cfg(unix)]
+    bench_bidi("uds", &uds_client, n).await?;
 
     Ok(())
 }

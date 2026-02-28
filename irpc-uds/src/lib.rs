@@ -3,22 +3,31 @@
 //! Uses QUIC over Unix datagram sockets with plaintext crypto.
 //! This gives you multiplexed bidirectional streams with flow control,
 //! without TLS overhead, over a local Unix socket.
+//!
+//! This crate only provides functionality on Unix platforms.
 
+#[cfg(unix)]
 use std::{io, path::Path, sync::Arc, time::Duration};
 
+#[cfg(unix)]
 use quinn::{Endpoint, EndpointConfig, TransportConfig, VarInt};
 
+#[cfg(unix)]
 mod plaintext;
+#[cfg(unix)]
 mod socket;
 
+#[cfg(unix)]
 pub use socket::UdsSocket;
 
 /// Max UDP payload for Unix datagram sockets.
 ///
 /// UDS can handle much larger datagrams than internet UDP.
 /// Quinn hangs above ~12000 for unknown reasons, so we use 8K as a safe max.
+#[cfg(unix)]
 const UDS_MTU: u16 = 8_192;
 
+#[cfg(unix)]
 fn local_endpoint_config() -> EndpointConfig {
     let mut config = EndpointConfig::default();
     config.max_udp_payload_size(UDS_MTU).unwrap();
@@ -34,6 +43,7 @@ fn local_endpoint_config() -> EndpointConfig {
 /// - Receive window: max — no memory concern for local IPC
 /// - No MTU discovery — not needed for UDS
 /// - No keep-alive — local sockets don't have NAT timeouts
+#[cfg(unix)]
 fn local_transport_config() -> TransportConfig {
     let mut config = TransportConfig::default();
     config.initial_mtu(UDS_MTU);
@@ -57,6 +67,7 @@ fn local_transport_config() -> TransportConfig {
 /// let handler = FooProtocol::remote_handler(local_sender);
 /// irpc::rpc::listen(endpoint, handler).await;
 /// ```
+#[cfg(unix)]
 pub fn server_endpoint(path: impl AsRef<Path>) -> io::Result<Endpoint> {
     let socket = UdsSocket::bind(path)?;
     let mut server_config = plaintext::server_config();
@@ -79,9 +90,8 @@ pub fn server_endpoint(path: impl AsRef<Path>) -> io::Result<Endpoint> {
 /// let client = irpc::Client::<FooProtocol>::boxed(conn);
 /// let value = client.rpc(GetRequest("key".into())).await?;
 /// ```
-pub async fn connect(
-    server_path: impl AsRef<Path>,
-) -> io::Result<quinn::Connection> {
+#[cfg(unix)]
+pub async fn connect(server_path: impl AsRef<Path>) -> io::Result<quinn::Connection> {
     let (socket, server_addr) = UdsSocket::connect(server_path)?;
     let mut client_config = plaintext::client_config();
     client_config.transport_config(Arc::new(local_transport_config()));
@@ -95,9 +105,9 @@ pub async fn connect(
     endpoint.set_default_client_config(client_config);
     let conn = endpoint
         .connect(server_addr, "localhost")
-        .map_err(|e| io::Error::other(e))?
+        .map_err(io::Error::other)?
         .await
-        .map_err(|e| io::Error::other(e))?;
+        .map_err(io::Error::other)?;
     Ok(conn)
 }
 
@@ -107,6 +117,7 @@ pub async fn connect(
 /// let client: irpc::Client<FooProtocol> = irpc_uds::client("/tmp/my.sock").await?;
 /// let value = client.rpc(GetRequest("key".into())).await?;
 /// ```
+#[cfg(unix)]
 pub async fn client<S: irpc::Service>(
     server_path: impl AsRef<Path>,
 ) -> io::Result<irpc::Client<S>> {

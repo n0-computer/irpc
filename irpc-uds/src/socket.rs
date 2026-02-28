@@ -22,8 +22,8 @@ use std::{
     task::{ready, Context, Poll},
 };
 
-use quinn::AsyncUdpSocket;
 use quinn::udp::{RecvMeta, Transmit};
+use quinn::AsyncUdpSocket;
 use tokio::net::UnixDatagram;
 
 /// The fake IP used for all addresses in the UDS transport.

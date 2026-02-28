@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Integration tests for irpc-uds: RPC over Unix domain sockets.
 
 use std::{collections::HashMap, path::PathBuf};
