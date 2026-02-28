@@ -9,16 +9,15 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
+    os::unix::net::UnixDatagram as StdUnixDatagram,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
         atomic::{AtomicU16, Ordering},
         Arc, Mutex,
     },
-    task::{Context, Poll},
+    task::{ready, Context, Poll},
 };
-
-use std::task::ready;
 
 use quinn::AsyncUdpSocket;
 use quinn::udp::{RecvMeta, Transmit};
@@ -33,8 +32,34 @@ static NEXT_FAKE_PORT: AtomicU16 = AtomicU16::new(100);
 /// Counter for unique client socket paths.
 static NEXT_CLIENT_ID: AtomicU16 = AtomicU16::new(0);
 
+/// Desired socket buffer size (2MB). The kernel may cap this lower.
+const SOCKET_BUF_SIZE: usize = 2 * 1024 * 1024;
+
 fn next_fake_addr() -> SocketAddr {
     SocketAddr::new(FAKE_IP, NEXT_FAKE_PORT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Try to increase socket send/receive buffers for better throughput.
+fn set_socket_buffers(sock: &StdUnixDatagram) {
+    use std::os::fd::AsRawFd;
+    let fd = sock.as_raw_fd();
+    let size = SOCKET_BUF_SIZE as libc::c_int;
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &size as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &size as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
 }
 
 /// Bidirectional mapping between Unix socket paths and fake `SocketAddr`s.
@@ -85,8 +110,9 @@ impl UdsSocket {
         let path = path.as_ref();
         // Remove stale socket file if it exists
         let _ = std::fs::remove_file(path);
-        let std_sock = std::os::unix::net::UnixDatagram::bind(path)?;
+        let std_sock = StdUnixDatagram::bind(path)?;
         std_sock.set_nonblocking(true)?;
+        set_socket_buffers(&std_sock);
         let io = UnixDatagram::from_std(std_sock)?;
         let local_addr = next_fake_addr();
         let mut addr_map = AddrMap::default();
@@ -117,8 +143,9 @@ impl UdsSocket {
         ));
         let _ = std::fs::remove_file(&client_path);
 
-        let std_sock = std::os::unix::net::UnixDatagram::bind(&client_path)?;
+        let std_sock = StdUnixDatagram::bind(&client_path)?;
         std_sock.set_nonblocking(true)?;
+        set_socket_buffers(&std_sock);
         let io = UnixDatagram::from_std(std_sock)?;
 
         let local_addr = next_fake_addr();
@@ -165,7 +192,7 @@ fn dup_datagram(io: &UnixDatagram) -> io::Result<UnixDatagram> {
     if duped < 0 {
         return Err(io::Error::last_os_error());
     }
-    let std_sock = unsafe { std::os::unix::net::UnixDatagram::from_raw_fd(duped) };
+    let std_sock = unsafe { StdUnixDatagram::from_raw_fd(duped) };
     std_sock.set_nonblocking(true)?;
     UnixDatagram::from_std(std_sock)
 }

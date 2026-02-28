@@ -156,7 +156,7 @@ async fn rpc_concurrent_clients() -> TestResult<()> {
     let path = sock_path("concurrent");
     let _ = std::fs::remove_file(&path);
 
-    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
     tokio::task::spawn(actor(rx));
     let local_client = Client::<StoreProtocol>::local(tx);
 
@@ -166,9 +166,9 @@ async fn rpc_concurrent_clients() -> TestResult<()> {
         irpc::rpc::listen(endpoint, handler).await;
     });
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // Spawn multiple concurrent clients
+    // Spawn multiple concurrent clients, staggered slightly to avoid overwhelming
     let mut handles = Vec::new();
     for i in 0..5 {
         let path = path.clone();

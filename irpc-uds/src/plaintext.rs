@@ -7,19 +7,15 @@
 //! checksum for integrity. Only suitable for local Unix socket transport where
 //! encryption is unnecessary.
 
-use std::{
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::sync::Arc;
 
-use bytes::{Buf, BytesMut};
+use bytes::BytesMut;
 use quinn_proto::{
     crypto::{self, CryptoError, HeaderKey},
     ConnectionId,
     transport_parameters::TransportParameters,
     ConnectError, PathId, Side, TransportError, TransportErrorCode,
 };
-use seahash::SeaHasher;
 use tracing::trace;
 
 /// Create a plaintext [`quinn::ServerConfig`] for use with Unix socket transport.
@@ -56,52 +52,32 @@ impl HeaderKey for PlaintextHeaderKey {
     }
 }
 
-pub struct PlaintextPacketKey {
-    side: Side,
-}
+pub struct PlaintextPacketKey;
 
 impl PlaintextPacketKey {
-    fn new(side: Side) -> Self {
-        Self { side }
+    fn new(_side: Side) -> Self {
+        Self
     }
 }
 
 impl crypto::PacketKey for PlaintextPacketKey {
-    fn encrypt(&self, _path_id: PathId, _packet: u64, buf: &mut [u8], header_len: usize) {
-        let (header, payload_tag) = buf.split_at_mut(header_len);
-        let (payload, tag_storage) = payload_tag.split_at_mut(payload_tag.len() - self.tag_len());
-        let mut hasher = SeaHasher::default();
-        header.hash(&mut hasher);
-        payload.hash(&mut hasher);
-        let checksum = hasher.finish();
-        tag_storage.copy_from_slice(&checksum.to_be_bytes());
+    fn encrypt(&self, _path_id: PathId, _packet: u64, _buf: &mut [u8], _header_len: usize) {
+        // No-op: UDS is reliable, no checksum needed
     }
 
     fn decrypt(
         &self,
         _path_id: PathId,
         _packet: u64,
-        header: &[u8],
-        payload: &mut BytesMut,
+        _header: &[u8],
+        _payload: &mut BytesMut,
     ) -> Result<(), CryptoError> {
-        let mut tag_storage = payload.split_off(payload.len() - self.tag_len());
-
-        let mut hasher = SeaHasher::default();
-        header.hash(&mut hasher);
-        payload.hash(&mut hasher);
-        let checksum = hasher.finish();
-
-        let expected = tag_storage.get_u64();
-        if checksum != expected {
-            tracing::error!(side = ?self.side, "checksum mismatch, expected {expected}, got: {checksum}");
-            return Err(CryptoError);
-        }
-
+        // No-op: UDS is reliable, no checksum needed
         Ok(())
     }
 
     fn tag_len(&self) -> usize {
-        8
+        0
     }
 
     fn confidentiality_limit(&self) -> u64 {

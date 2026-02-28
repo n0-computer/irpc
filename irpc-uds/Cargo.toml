@@ -16,7 +16,6 @@ quinn-proto = { package = "iroh-quinn-proto", version = "0.15.0" }
 tokio = { workspace = true, features = ["net", "sync", "rt", "macros", "io-util"] }
 libc = "0.2"
 bytes = "1"
-seahash = "4"
 tracing = { workspace = true }
 
 [dev-dependencies]

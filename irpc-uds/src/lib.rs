@@ -4,14 +4,33 @@
 //! This gives you multiplexed bidirectional streams with flow control,
 //! without TLS overhead, over a local Unix socket.
 
-use std::{io, path::Path, sync::Arc};
+use std::{io, path::Path, sync::Arc, time::Duration};
 
-use quinn::{Endpoint, EndpointConfig};
+use quinn::{Endpoint, EndpointConfig, TransportConfig, VarInt};
 
 mod plaintext;
 mod socket;
 
 pub use socket::UdsSocket;
+
+/// Create a [`TransportConfig`] optimized for local Unix socket IPC.
+///
+/// Compared to defaults (tuned for 100ms RTT internet):
+/// - Initial RTT: 1ms (vs 333ms) — local IPC is sub-microsecond
+/// - Stream receive window: 16MB (vs ~1.25MB) — no bandwidth-delay product concern
+/// - Receive window: max — no memory concern for local IPC
+/// - No MTU discovery — not needed for UDS
+/// - No keep-alive — local sockets don't have NAT timeouts
+fn local_transport_config() -> TransportConfig {
+    let mut config = TransportConfig::default();
+    config.mtu_discovery_config(None);
+    config.initial_rtt(Duration::from_millis(1));
+    config.stream_receive_window(VarInt::from_u32(16 * 1024 * 1024));
+    config.receive_window(VarInt::MAX);
+    config.send_window(64 * 1024 * 1024);
+    config.max_concurrent_bidi_streams(VarInt::from_u32(1024));
+    config
+}
 
 /// Create a server [`Endpoint`] bound to the given Unix socket path.
 ///
@@ -25,7 +44,8 @@ pub use socket::UdsSocket;
 /// ```
 pub fn server_endpoint(path: impl AsRef<Path>) -> io::Result<Endpoint> {
     let socket = UdsSocket::bind(path)?;
-    let server_config = plaintext::server_config();
+    let mut server_config = plaintext::server_config();
+    server_config.transport_config(Arc::new(local_transport_config()));
     let runtime = Arc::new(quinn::TokioRuntime);
     Endpoint::new_with_abstract_socket(
         EndpointConfig::default(),
@@ -48,7 +68,8 @@ pub async fn connect(
     server_path: impl AsRef<Path>,
 ) -> io::Result<quinn::Connection> {
     let (socket, server_addr) = UdsSocket::connect(server_path)?;
-    let client_config = plaintext::client_config();
+    let mut client_config = plaintext::client_config();
+    client_config.transport_config(Arc::new(local_transport_config()));
     let runtime = Arc::new(quinn::TokioRuntime);
     let endpoint = Endpoint::new_with_abstract_socket(
         EndpointConfig::default(),
