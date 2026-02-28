@@ -1,0 +1,32 @@
+[package]
+name = "irpc-uds"
+version = "0.1.0"
+edition = "2021"
+authors = ["n0 team"]
+keywords = ["api", "protocol", "rpc", "unix-socket"]
+categories = ["network-programming"]
+license = "Apache-2.0/MIT"
+repository = "https://github.com/n0-computer/irpc"
+description = "Unix domain socket transport for irpc"
+
+[dependencies]
+irpc = { version = "0.12.0", path = ".." }
+quinn = { workspace = true, features = ["runtime-tokio"] }
+quinn-proto = { package = "iroh-quinn-proto", version = "0.15.0" }
+tokio = { workspace = true, features = ["net", "sync", "rt", "macros", "io-util"] }
+libc = "0.2"
+bytes = "1"
+seahash = "4"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+irpc = { version = "0.12.0", path = "..", features = ["rpc", "derive"] }
+clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+anyhow = { workspace = true }
+testresult = "0.4.1"
+
+[[example]]
+name = "server-actor"
+required-features = []

@@ -91,7 +91,7 @@ name = "storage"
 required-features = ["rpc", "quinn_endpoint_setup"]
 
 [workspace]
-members = ["irpc-derive", "irpc-iroh"]
+members = ["irpc-derive", "irpc-iroh", "irpc-uds", "irpc-bench"]
 
 [package.metadata.docs.rs]
 all-features = true
