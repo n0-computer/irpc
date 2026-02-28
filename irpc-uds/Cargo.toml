@@ -27,5 +27,5 @@ anyhow = { workspace = true }
 testresult = "0.4.1"
 
 [[example]]
-name = "server-actor"
+name = "uds-demo"
 required-features = []
