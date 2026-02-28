@@ -13,9 +13,22 @@ mod socket;
 
 pub use socket::UdsSocket;
 
+/// Max UDP payload for Unix datagram sockets.
+///
+/// UDS can handle much larger datagrams than internet UDP.
+/// Quinn hangs above ~12000 for unknown reasons, so we use 8K as a safe max.
+const UDS_MTU: u16 = 8_192;
+
+fn local_endpoint_config() -> EndpointConfig {
+    let mut config = EndpointConfig::default();
+    config.max_udp_payload_size(UDS_MTU).unwrap();
+    config
+}
+
 /// Create a [`TransportConfig`] optimized for local Unix socket IPC.
 ///
 /// Compared to defaults (tuned for 100ms RTT internet):
+/// - MTU: 8192 (vs 1200) — UDS doesn't fragment
 /// - Initial RTT: 1ms (vs 333ms) — local IPC is sub-microsecond
 /// - Stream receive window: 16MB (vs ~1.25MB) — no bandwidth-delay product concern
 /// - Receive window: max — no memory concern for local IPC
@@ -23,6 +36,8 @@ pub use socket::UdsSocket;
 /// - No keep-alive — local sockets don't have NAT timeouts
 fn local_transport_config() -> TransportConfig {
     let mut config = TransportConfig::default();
+    config.initial_mtu(UDS_MTU);
+    config.min_mtu(UDS_MTU);
     config.mtu_discovery_config(None);
     config.initial_rtt(Duration::from_millis(1));
     config.stream_receive_window(VarInt::from_u32(16 * 1024 * 1024));
@@ -48,7 +63,7 @@ pub fn server_endpoint(path: impl AsRef<Path>) -> io::Result<Endpoint> {
     server_config.transport_config(Arc::new(local_transport_config()));
     let runtime = Arc::new(quinn::TokioRuntime);
     Endpoint::new_with_abstract_socket(
-        EndpointConfig::default(),
+        local_endpoint_config(),
         Some(server_config),
         Box::new(socket),
         runtime,
@@ -72,7 +87,7 @@ pub async fn connect(
     client_config.transport_config(Arc::new(local_transport_config()));
     let runtime = Arc::new(quinn::TokioRuntime);
     let endpoint = Endpoint::new_with_abstract_socket(
-        EndpointConfig::default(),
+        local_endpoint_config(),
         None,
         Box::new(socket),
         runtime,

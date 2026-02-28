@@ -2,6 +2,9 @@
 //!
 //! Maps Unix socket paths to fake `SocketAddr` values so quinn can route
 //! QUIC packets as if they were UDP.
+//!
+//! Implements pseudo-GSO (splitting batched transmits into individual datagrams)
+//! and pseudo-GRO (reporting multiple receives per poll) for better throughput.
 
 use std::{
     collections::HashMap,
@@ -34,6 +37,13 @@ static NEXT_CLIENT_ID: AtomicU16 = AtomicU16::new(0);
 
 /// Desired socket buffer size (2MB). The kernel may cap this lower.
 const SOCKET_BUF_SIZE: usize = 2 * 1024 * 1024;
+
+/// Max number of segments for pseudo-GSO/GRO.
+///
+/// Quinn batches up to this many QUIC packets into a single `Transmit` when
+/// `max_transmit_segments > 1`. We split them back into individual datagrams.
+/// Similarly, we report up to this many receives per `poll_recv` call.
+const MAX_GSO_SEGMENTS: usize = 32;
 
 fn next_fake_addr() -> SocketAddr {
     SocketAddr::new(FAKE_IP, NEXT_FAKE_PORT.fetch_add(1, Ordering::Relaxed))
@@ -213,9 +223,16 @@ impl AsyncUdpSocket for UdsSocket {
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
         debug_assert!(!bufs.is_empty() && !meta.is_empty());
+        let max_msgs = bufs.len().min(meta.len());
+        let mut count = 0;
+
         loop {
-            ready!(self.io.poll_recv_ready(cx))?;
-            let buf = &mut bufs[0];
+            if count == 0 {
+                // First message: block until we have at least one
+                ready!(self.io.poll_recv_ready(cx))?;
+            }
+
+            let buf = &mut bufs[count];
             match self.io.try_recv_from(buf) {
                 Ok((len, src_addr)) => {
                     let fake_addr = if let Some(path) = src_addr.as_pathname() {
@@ -229,10 +246,21 @@ impl AsyncUdpSocket for UdsSocket {
                     recv_meta.stride = len;
                     recv_meta.ecn = None;
                     recv_meta.dst_ip = Some(FAKE_IP);
-                    meta[0] = recv_meta;
-                    return Poll::Ready(Ok(1));
+                    meta[count] = recv_meta;
+                    count += 1;
+
+                    if count >= max_msgs {
+                        return Poll::Ready(Ok(count));
+                    }
+                    // Try to receive more without blocking (GRO-like batching)
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if count > 0 {
+                        return Poll::Ready(Ok(count));
+                    }
+                    // Spurious wake, re-register and wait
+                    continue;
+                }
                 Err(e) => return Poll::Ready(Err(e)),
             }
         }
@@ -281,17 +309,31 @@ impl quinn::UdpSender for UdsSender {
             )));
         };
 
-        loop {
-            ready!(this.io.poll_send_ready(cx))?;
-            match this.io.try_send_to(transmit.contents, &dest_path) {
-                Ok(_) => return Poll::Ready(Ok(())),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => return Poll::Ready(Err(e)),
+        // Handle GSO: if segment_size is set, the transmit contains multiple
+        // datagrams packed contiguously. Split them into individual sends.
+        let segment_size = transmit.segment_size.unwrap_or(transmit.contents.len());
+        let mut offset = 0;
+
+        while offset < transmit.contents.len() {
+            let end = (offset + segment_size).min(transmit.contents.len());
+            let segment = &transmit.contents[offset..end];
+
+            loop {
+                ready!(this.io.poll_send_ready(cx))?;
+                match this.io.try_send_to(segment, &dest_path) {
+                    Ok(_) => break,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                    Err(e) => return Poll::Ready(Err(e)),
+                }
             }
+            offset = end;
         }
+
+        Poll::Ready(Ok(()))
     }
 
     fn max_transmit_segments(&self) -> NonZeroUsize {
-        NonZeroUsize::MIN
+        // Tell quinn we can handle batched transmits — we split them in poll_send
+        NonZeroUsize::new(MAX_GSO_SEGMENTS).unwrap()
     }
 }
