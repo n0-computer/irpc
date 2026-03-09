@@ -1,16 +1,16 @@
 //! Utilities
 //!
 //! This module contains utilities to read and write varints, as well as
-//! functions to set up quinn endpoints for local rpc and testing.
-#[cfg(feature = "quinn_endpoint_setup")]
-#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "quinn_endpoint_setup")))]
-mod quinn_setup_utils {
+//! functions to set up noq endpoints for local rpc and testing.
+#[cfg(feature = "noq_endpoint_setup")]
+#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "noq_endpoint_setup")))]
+mod noq_setup_utils {
     use std::{sync::Arc, time::Duration};
 
     use n0_error::{Result, StdResultExt};
-    use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, ServerConfig};
+    use noq::{crypto::rustls::QuicClientConfig, ClientConfig, ServerConfig};
 
-    /// Create a quinn client config and trusts given certificates.
+    /// Create a noq client config and trusts given certificates.
     ///
     /// ## Args
     ///
@@ -29,17 +29,17 @@ mod quinn_setup_utils {
             .with_root_certificates(certs)
             .with_no_client_auth();
         let quic_client_config =
-            quinn::crypto::rustls::QuicClientConfig::try_from(crypto_client_config)
+            noq::crypto::rustls::QuicClientConfig::try_from(crypto_client_config)
                 .std_context("Error creating QUIC client config")?;
 
-        let mut transport_config = quinn::TransportConfig::default();
+        let mut transport_config = noq::TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(1)));
         let mut client_config = ClientConfig::new(Arc::new(quic_client_config));
         client_config.transport_config(Arc::new(transport_config));
         Ok(client_config)
     }
 
-    /// Create a quinn server config with a self-signed certificate
+    /// Create a noq server config with a self-signed certificate
     ///
     /// Returns the server config and the certificate in DER format
     pub fn configure_server() -> Result<(ServerConfig, Vec<u8>)> {
@@ -59,7 +59,7 @@ mod quinn_setup_utils {
         Ok((server_config, cert_der.to_vec()))
     }
 
-    /// Create a quinn client config and trust all certificates.
+    /// Create a noq client config and trust all certificates.
     pub fn configure_client_insecure() -> Result<ClientConfig> {
         let provider = rustls::crypto::ring::default_provider();
         let crypto = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
@@ -78,7 +78,7 @@ mod quinn_setup_utils {
     mod non_wasm {
         use std::net::SocketAddr;
 
-        use quinn::Endpoint;
+        use noq::Endpoint;
 
         use super::*;
 
@@ -174,9 +174,9 @@ mod quinn_setup_utils {
         }
     }
 }
-#[cfg(feature = "quinn_endpoint_setup")]
-#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "quinn_endpoint_setup")))]
-pub use quinn_setup_utils::*;
+#[cfg(feature = "noq_endpoint_setup")]
+#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "noq_endpoint_setup")))]
+pub use noq_setup_utils::*;
 
 #[cfg(any(feature = "rpc", feature = "varint-util"))]
 #[cfg_attr(

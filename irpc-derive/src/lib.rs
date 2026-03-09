@@ -40,7 +40,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             return error_tokens(
                 input.span(),
                 "The rpc_requests macro can only be applied to enums",
-            )
+            );
         }
     };
 
@@ -71,15 +71,22 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                 Fields::Unnamed(ref mut fields) if fields.unnamed.len() == 1 => {
                     fields.unnamed[0].ty.clone()
                 }
-                _ => return error_tokens(
-                    variant.span(),
-                    "Each variant must either have exactly one unnamed field, or use the `wrap` argument in the `rpc` attribute.",
-                ),
+                _ => {
+                    return error_tokens(
+                        variant.span(),
+                        "Each variant must either have exactly one unnamed field, or use the `wrap` argument in the `rpc` attribute.",
+                    );
+                }
             },
             Some(WrapArgs { ident, derive, vis }) => {
                 let vis = vis.as_ref().unwrap_or(&input.vis).clone();
                 let ty = type_from_ident(&ident);
-                let struc = struct_from_variant_fields(ident, variant.fields.clone(), variant.attrs.clone(), vis);
+                let struc = struct_from_variant_fields(
+                    ident,
+                    variant.fields.clone(),
+                    variant.attrs.clone(),
+                    vis,
+                );
                 wrapper_types.extend(quote! {
                     #[derive(::std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize, #(#derive),* )]
                     #struc
@@ -299,8 +306,8 @@ fn generate_remote_service_impl(
         impl ::irpc::rpc::RemoteService for #proto_enum_name {
             fn with_remote_channels(
                 self,
-                rx: ::irpc::rpc::quinn::RecvStream,
-                tx: ::irpc::rpc::quinn::SendStream
+                rx: ::irpc::rpc::noq::RecvStream,
+                tx: ::irpc::rpc::noq::SendStream
             ) -> Self::Message {
                 match self {
                     #(#variants),*
