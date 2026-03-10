@@ -804,7 +804,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1283,7 +1283,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "tokio",
  "tower-service",
  "tracing",
@@ -1498,7 +1498,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "0.96.1"
-source = "git+https://github.com/n0-computer/iroh?branch=feat-noq#9e6f261df338e7e7449c7faf7dc45464522c2277"
+source = "git+https://github.com/n0-computer/iroh?branch=main#df0777a21ab2c19be86e4b7f0f60331f94a95a3b"
 dependencies = [
  "backon",
  "bytes",
@@ -1551,7 +1551,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.96.1"
-source = "git+https://github.com/n0-computer/iroh?branch=feat-noq#9e6f261df338e7e7449c7faf7dc45464522c2277"
+source = "git+https://github.com/n0-computer/iroh?branch=main#df0777a21ab2c19be86e4b7f0f60331f94a95a3b"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1597,7 +1597,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.96.1"
-source = "git+https://github.com/n0-computer/iroh?branch=feat-noq#9e6f261df338e7e7449c7faf7dc45464522c2277"
+source = "git+https://github.com/n0-computer/iroh?branch=main#df0777a21ab2c19be86e4b7f0f60331f94a95a3b"
 dependencies = [
  "blake3",
  "bytes",
@@ -1973,8 +1973,9 @@ dependencies = [
 
 [[package]]
 name = "netwatch"
-version = "0.14.0"
-source = "git+https://github.com/n0-computer/net-tools?branch=feat-noq#0e240f8f2a0a075dc45b8eb6c3c90d6931fa1694"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b1b27babe89ef9f2237bc6c028bea24fa84163a1b6f8f17ff93573ebd7d861f"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2029,7 +2030,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "thiserror",
  "tokio",
  "tokio-stream",
@@ -2072,7 +2073,7 @@ checksum = "bb9be4fedd6b98f3ba82ccd3506f4d0219fb723c3f97c67e12fe1494aa020e44"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -2424,9 +2425,9 @@ checksum = "f89776e4d69bb58bc6993e99ffa1d11f228b839984854c7daeb5d37f87cbe950"
 
 [[package]]
 name = "portmapper"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d2a8825353ace3285138da3378b1e21860d60351942f7aa3b99b13b41f80318"
+checksum = "74748bc706fa6b6aebac6bbe0bbe0de806b384cb5c557ea974f771360a4e3858"
 dependencies = [
  "base64",
  "bytes",
@@ -2541,7 +2542,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "thiserror",
  "tokio",
  "tracing",
@@ -2578,9 +2579,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2819,7 +2820,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3796,7 +3797,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
