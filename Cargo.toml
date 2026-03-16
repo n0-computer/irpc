@@ -109,12 +109,7 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.3", default-features = false }
 n0-error = { version = "0.1" }
 tracing-subscriber = { version = "0.3.20" }
-iroh = { version = "0.96" }
-iroh-base = { version = "0.96" }
+iroh = { version = "0.97" }
+iroh-base = { version = "0.97" }
 noq = { version = "0.17.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
-
-
-[patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "main" }
-iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "main" }
