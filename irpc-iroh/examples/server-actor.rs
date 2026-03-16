@@ -10,7 +10,7 @@ mod proto {
     use std::collections::HashMap;
 
     use anyhow::Result;
-    use iroh::{protocol::Router, Endpoint, EndpointId};
+    use iroh::{endpoint::presets, protocol::Router, Endpoint, EndpointId};
     use irpc::{channel::oneshot, rpc_requests, Client, WithChannels};
     use irpc_iroh::IrohProtocol;
     use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ mod proto {
         tokio::task::spawn(actor(rx));
         let client = Client::<FooProtocol>::local(tx);
 
-        let endpoint = Endpoint::bind().await?;
+        let endpoint = Endpoint::bind(presets::N0).await?;
         let protocol = IrohProtocol::with_sender(client.as_local().unwrap());
         let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
         println!("endpoint id: {}", router.endpoint().id());
@@ -79,7 +79,7 @@ mod proto {
 
     pub async fn connect(endpoint_id: EndpointId) -> Result<Client<FooProtocol>> {
         println!("connecting to {endpoint_id}");
-        let endpoint = Endpoint::bind().await?;
+        let endpoint = Endpoint::bind(presets::N0).await?;
         let client = irpc_iroh::client(endpoint, endpoint_id, ALPN);
         Ok(client)
     }

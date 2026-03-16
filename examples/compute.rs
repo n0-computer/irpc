@@ -144,13 +144,13 @@ struct ComputeApi {
 }
 
 impl ComputeApi {
-    pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> anyhow::Result<ComputeApi> {
+    pub fn connect(endpoint: noq::Endpoint, addr: SocketAddr) -> anyhow::Result<ComputeApi> {
         Ok(ComputeApi {
-            inner: Client::quinn(endpoint, addr),
+            inner: Client::noq(endpoint, addr),
         })
     }
 
-    pub fn listen(&self, endpoint: quinn::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
+    pub fn listen(&self, endpoint: noq::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
         let Some(local) = self.inner.as_local() else {
             bail!("cannot listen on a remote service");
         };

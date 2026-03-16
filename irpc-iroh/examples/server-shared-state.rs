@@ -2,7 +2,7 @@
 //! on the server side instead of with an actor loop.
 
 use anyhow::Result;
-use iroh::{protocol::Router, Endpoint};
+use iroh::{endpoint::presets, protocol::Router, Endpoint};
 
 use self::storage::{StorageClient, StorageServer};
 
@@ -12,7 +12,7 @@ async fn main() -> Result<()> {
 
     // Start the server.
     let (server_router, server_addr) = {
-        let endpoint = Endpoint::bind().await?;
+        let endpoint = Endpoint::bind(presets::N0).await?;
         let storage = StorageServer::default();
         let router = Router::builder(endpoint)
             .accept(storage::ALPN, storage)
@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     };
 
     // Connect by passing an endpoint, which allows automatic reconnection.
-    let client_endpoint = Endpoint::bind().await?;
+    let client_endpoint = Endpoint::bind(presets::N0).await?;
     let api = StorageClient::connect(client_endpoint, server_addr.clone());
     api.set("hello", "world").await?;
     api.set("goodbye", "see you soon").await?;
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     }
 
     // Or create a client from a connection directly.
-    let client2 = Endpoint::bind().await?;
+    let client2 = Endpoint::bind(presets::N0).await?;
     let conn = client2.connect(server_addr, storage::ALPN).await?;
     let api = StorageClient::from_connection(conn);
     let value = api.get("goodbye").await?;

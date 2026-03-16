@@ -35,14 +35,14 @@
 //! ## Transports
 //!
 //! We don't abstract over the send and receive stream. These must always be
-//! quinn streams, specifically streams from the [iroh quinn fork].
+//! noq streams, specifically streams from the [noq].
 //!
-//! This restricts the possible rpc transports to quinn (QUIC with dial by
+//! This restricts the possible rpc transports to noq (QUIC with dial by
 //! socket address) and iroh (QUIC with dial by endpoint id).
 //!
-//! An upside of this is that the quinn streams can be tuned for each rpc
+//! An upside of this is that the noq streams can be tuned for each rpc
 //! request, e.g. by setting the stream priority or by directly using more
-//! advanced part of the quinn SendStream and RecvStream APIs such as out of
+//! advanced part of the noq SendStream and RecvStream APIs such as out of
 //! order receiving.
 //!
 //! ## Serialization
@@ -67,7 +67,7 @@
 //!   This is useful even without rpc, to not lose tracing context when message
 //!   passing. This is frequently done manually. This obviously requires
 //!   a dependency on tracing.
-//! - `quinn_endpoint_setup`: Easy way to create quinn endpoints. This is useful
+//! - `noq_endpoint_setup`: Easy way to create noq endpoints. This is useful
 //!   both for testing and for rpc on localhost. Enabled by default.
 //!
 //! # Example
@@ -149,7 +149,7 @@
 //! This crate evolved out of the [quic-rpc](https://docs.rs/quic-rpc/latest/quic-rpc/index.html) crate, which is a generic RPC
 //! framework for any transport with cheap streams such as QUIC. Compared to
 //! quic-rpc, this crate does not abstract over the stream type and is focused
-//! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [iroh quinn fork](https://docs.rs/iroh-quinn/latest/iroh-quinn/index.html).
+//! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [noq](https://docs.rs/noq/latest/noq/index.html).
 #![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, result};
 
@@ -321,10 +321,10 @@ mod sealed {
 /// Requirements for a RPC message
 ///
 /// Even when just using the mem transport, we require messages to be Serializable and Deserializable.
-/// Likewise, even when using the quinn transport, we require messages to be Send.
+/// Likewise, even when using the noq transport, we require messages to be Send.
 ///
 /// This does not seem like a big restriction. If you want a pure memory channel without the possibility
-/// to also use the quinn transport, you might want to use a mpsc channel directly.
+/// to also use the noq transport, you might want to use a mpsc channel directly.
 pub trait RpcMessage: Debug + Serialize + DeserializeOwned + Send + Sync + Unpin + 'static {}
 
 impl<T> RpcMessage for T where
@@ -1303,15 +1303,15 @@ impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for Client<S> {
 }
 
 impl<S: Service> Client<S> {
-    /// Create a new client to a remote service using the given quinn `endpoint`
+    /// Create a new client to a remote service using the given noq `endpoint`
     /// and a socket `addr` of the remote service.
     #[cfg(feature = "rpc")]
-    pub fn quinn(endpoint: quinn::Endpoint, addr: std::net::SocketAddr) -> Self {
-        Self::boxed(rpc::QuinnLazyRemoteConnection::new(endpoint, addr))
+    pub fn noq(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
+        Self::boxed(rpc::NoqLazyRemoteConnection::new(endpoint, addr))
     }
 
     /// Create a new client from a `rpc::RemoteConnection` trait object.
-    /// This is used from crates that want to provide other transports than quinn,
+    /// This is used from crates that want to provide other transports than noq,
     /// such as the iroh transport.
     #[cfg(feature = "rpc")]
     pub fn boxed(remote: impl rpc::RemoteConnection) -> Self {
@@ -1341,7 +1341,7 @@ impl<S: Service> Client<S> {
     ///
     /// In the remote case, this involves lazily creating a connection to the
     /// remote side and then creating a new stream on the underlying
-    /// [`quinn`] or iroh connection.
+    /// [`noq`] or iroh connection.
     ///
     /// In both cases, the returned sender is fully self contained.
     #[allow(clippy::type_complexity)]
@@ -1719,23 +1719,23 @@ impl<M> ClientInner<M> {
 /// an empty enum since local requests can not fail.
 #[stack_error(derive, add_meta, from_sources)]
 pub enum RequestError {
-    /// Error in quinn during connect
+    /// Error in noq during connect
     #[cfg(feature = "rpc")]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     #[error("Error establishing connection")]
     Connect {
         #[error(std_err)]
-        source: quinn::ConnectError,
+        source: noq::ConnectError,
     },
-    /// Error in quinn when the connection already exists, when opening a stream pair
+    /// Error in noq when the connection already exists, when opening a stream pair
     #[cfg(feature = "rpc")]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     #[error("Error opening stream")]
     Connection {
         #[error(std_err)]
-        source: quinn::ConnectionError,
+        source: noq::ConnectionError,
     },
-    /// Generic error for non-quinn transports
+    /// Generic error for non-noq transports
     #[cfg(feature = "rpc")]
     #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     #[error("Error opening stream")]
@@ -1828,19 +1828,19 @@ pub mod rpc {
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod rpc {
-    //! Module for cross-process RPC using [`quinn`].
+    //! Module for cross-process RPC using [`noq`].
     use std::{
         fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
     };
 
     use n0_error::{e, stack_error};
     use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
-    /// This is used by irpc-derive to refer to quinn types (SendStream and RecvStream)
-    /// to make generated code work for users without having to depend on quinn directly
+    /// This is used by irpc-derive to refer to noq types (SendStream and RecvStream)
+    /// to make generated code work for users without having to depend on noq directly
     /// (i.e. when using iroh).
     #[doc(hidden)]
-    pub use quinn;
-    use quinn::ConnectionError;
+    pub use noq;
+    use noq::ConnectionError;
     use serde::de::DeserializeOwned;
     use smallvec::SmallVec;
     use tracing::{debug, error_span, trace, warn, Instrument};
@@ -1868,11 +1868,11 @@ pub mod rpc {
     /// cross-process RPC.
     #[stack_error(derive, add_meta, from_sources)]
     pub enum WriteError {
-        /// Error writing to the stream with quinn
+        /// Error writing to the stream with noq
         #[error("Error writing to stream")]
-        Quinn {
+        Noq {
             #[error(std_err)]
-            source: quinn::WriteError,
+            source: noq::WriteError,
         },
         /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
         #[error("Maximum message size exceeded")]
@@ -1905,15 +1905,15 @@ pub mod rpc {
                 WriteError::MaxMessageSizeExceeded { .. } => {
                     io::Error::new(io::ErrorKind::InvalidData, e)
                 }
-                WriteError::Quinn { source, .. } => source.into(),
+                WriteError::Noq { source, .. } => source.into(),
             }
         }
     }
 
-    impl From<quinn::WriteError> for SendError {
-        fn from(err: quinn::WriteError) -> Self {
+    impl From<noq::WriteError> for SendError {
+        fn from(err: noq::WriteError) -> Self {
             match err {
-                quinn::WriteError::Stopped(code)
+                noq::WriteError::Stopped(code)
                     if code == ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into() =>
                 {
                     e!(SendError::MaxMessageSizeExceeded)
@@ -1926,9 +1926,9 @@ pub mod rpc {
     /// Trait to abstract over a client connection to a remote service.
     ///
     /// This isn't really that much abstracted, since the result of open_bi must
-    /// still be a quinn::SendStream and quinn::RecvStream. This is just so we
-    /// can have different connection implementations for normal quinn connections,
-    /// iroh connections, and possibly quinn connections with disabled encryption
+    /// still be a noq::SendStream and noq::RecvStream. This is just so we
+    /// can have different connection implementations for normal noq connections,
+    /// iroh connections, and possibly noq connections with disabled encryption
     /// for performance.
     ///
     /// This is done as a trait instead of an enum, so we don't need an iroh
@@ -1940,7 +1940,7 @@ pub mod rpc {
         /// Open a bidirectional stream to the remote service.
         fn open_bi(
             &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>;
+        ) -> BoxFuture<std::result::Result<(noq::SendStream, noq::RecvStream), RequestError>>;
 
         /// Returns whether 0-RTT data was accepted by the server.
         ///
@@ -1953,23 +1953,23 @@ pub mod rpc {
     /// Initially this does just have the endpoint and the address. Once a
     /// connection is established, it will be stored.
     #[derive(Debug, Clone)]
-    pub(crate) struct QuinnLazyRemoteConnection(Arc<QuinnLazyRemoteConnectionInner>);
+    pub(crate) struct NoqLazyRemoteConnection(Arc<NoqLazyRemoteConnectionInner>);
 
     #[derive(Debug)]
-    struct QuinnLazyRemoteConnectionInner {
-        pub endpoint: quinn::Endpoint,
+    struct NoqLazyRemoteConnectionInner {
+        pub endpoint: noq::Endpoint,
         pub addr: std::net::SocketAddr,
-        pub connection: tokio::sync::Mutex<Option<quinn::Connection>>,
+        pub connection: tokio::sync::Mutex<Option<noq::Connection>>,
     }
 
-    impl RemoteConnection for quinn::Connection {
+    impl RemoteConnection for noq::Connection {
         fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
             Box::new(self.clone())
         }
 
         fn open_bi(
             &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
+        ) -> BoxFuture<std::result::Result<(noq::SendStream, noq::RecvStream), RequestError>>
         {
             let conn = self.clone();
             Box::pin(async move {
@@ -1983,9 +1983,9 @@ pub mod rpc {
         }
     }
 
-    impl QuinnLazyRemoteConnection {
-        pub fn new(endpoint: quinn::Endpoint, addr: std::net::SocketAddr) -> Self {
-            Self(Arc::new(QuinnLazyRemoteConnectionInner {
+    impl NoqLazyRemoteConnection {
+        pub fn new(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
+            Self(Arc::new(NoqLazyRemoteConnectionInner {
                 endpoint,
                 addr,
                 connection: Default::default(),
@@ -1993,14 +1993,14 @@ pub mod rpc {
         }
     }
 
-    impl RemoteConnection for QuinnLazyRemoteConnection {
+    impl RemoteConnection for NoqLazyRemoteConnection {
         fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
             Box::new(self.clone())
         }
 
         fn open_bi(
             &self,
-        ) -> BoxFuture<std::result::Result<(quinn::SendStream, quinn::RecvStream), RequestError>>
+        ) -> BoxFuture<std::result::Result<(noq::SendStream, noq::RecvStream), RequestError>>
         {
             let this = self.0.clone();
             Box::pin(async move {
@@ -2029,10 +2029,10 @@ pub mod rpc {
     }
 
     async fn connect_and_open_bi(
-        endpoint: &quinn::Endpoint,
+        endpoint: &noq::Endpoint,
         addr: &std::net::SocketAddr,
-        mut guard: tokio::sync::MutexGuard<'_, Option<quinn::Connection>>,
-    ) -> Result<(quinn::SendStream, quinn::RecvStream), RequestError> {
+        mut guard: tokio::sync::MutexGuard<'_, Option<noq::Connection>>,
+    ) -> Result<(noq::SendStream, noq::RecvStream), RequestError> {
         let conn = endpoint.connect(*addr, "localhost")?.await?;
         let (send, recv) = conn.open_bi().await?;
         *guard = Some(conn);
@@ -2042,8 +2042,8 @@ pub mod rpc {
     /// A connection to a remote service that can be used to send the initial message.
     #[derive(Debug)]
     pub struct RemoteSender<S>(
-        quinn::SendStream,
-        quinn::RecvStream,
+        noq::SendStream,
+        noq::RecvStream,
         std::marker::PhantomData<S>,
     );
 
@@ -2060,14 +2060,14 @@ pub mod rpc {
     }
 
     impl<S: Service> RemoteSender<S> {
-        pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
+        pub fn new(send: noq::SendStream, recv: noq::RecvStream) -> Self {
             Self(send, recv, PhantomData)
         }
 
         pub async fn write(
             self,
             msg: impl Into<S>,
-        ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
+        ) -> std::result::Result<(noq::SendStream, noq::RecvStream), WriteError> {
             let buf = prepare_write(msg)?;
             self.write_raw(&buf).await
         }
@@ -2075,15 +2075,15 @@ pub mod rpc {
         pub(crate) async fn write_raw(
             self,
             buf: &[u8],
-        ) -> std::result::Result<(quinn::SendStream, quinn::RecvStream), WriteError> {
+        ) -> std::result::Result<(noq::SendStream, noq::RecvStream), WriteError> {
             let RemoteSender(mut send, recv, _) = self;
             send.write_all(buf).await?;
             Ok((send, recv))
         }
     }
 
-    impl<T: DeserializeOwned> From<quinn::RecvStream> for oneshot::Receiver<T> {
-        fn from(mut read: quinn::RecvStream) -> Self {
+    impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
+        fn from(mut read: noq::RecvStream) -> Self {
             let fut = async move {
                 let size = read.read_varint_u64().await?.ok_or(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -2105,31 +2105,31 @@ pub mod rpc {
         }
     }
 
-    impl From<quinn::RecvStream> for crate::channel::none::NoReceiver {
-        fn from(read: quinn::RecvStream) -> Self {
+    impl From<noq::RecvStream> for crate::channel::none::NoReceiver {
+        fn from(read: noq::RecvStream) -> Self {
             drop(read);
             Self
         }
     }
 
-    impl<T: RpcMessage> From<quinn::RecvStream> for mpsc::Receiver<T> {
-        fn from(read: quinn::RecvStream) -> Self {
-            mpsc::Receiver::Boxed(Box::new(QuinnReceiver {
+    impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
+        fn from(read: noq::RecvStream) -> Self {
+            mpsc::Receiver::Boxed(Box::new(NoqReceiver {
                 recv: read,
                 _marker: PhantomData,
             }))
         }
     }
 
-    impl From<quinn::SendStream> for NoSender {
-        fn from(write: quinn::SendStream) -> Self {
+    impl From<noq::SendStream> for NoSender {
+        fn from(write: noq::SendStream) -> Self {
             let _ = write;
             NoSender
         }
     }
 
-    impl<T: RpcMessage> From<quinn::SendStream> for oneshot::Sender<T> {
-        fn from(mut writer: quinn::SendStream) -> Self {
+    impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
+        fn from(mut writer: noq::SendStream) -> Self {
             oneshot::Sender::Boxed(Box::new(move |value| {
                 Box::pin(async move {
                     let size = match postcard::experimental::serialized_size(&value) {
@@ -2161,10 +2161,10 @@ pub mod rpc {
         }
     }
 
-    impl<T: RpcMessage> From<quinn::SendStream> for mpsc::Sender<T> {
-        fn from(write: quinn::SendStream) -> Self {
-            mpsc::Sender::Boxed(Arc::new(QuinnSender(tokio::sync::Mutex::new(
-                QuinnSenderState::Open(QuinnSenderInner {
+    impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
+        fn from(write: noq::SendStream) -> Self {
+            mpsc::Sender::Boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
+                NoqSenderState::Open(NoqSenderInner {
                     send: write,
                     buffer: SmallVec::new(),
                     _marker: PhantomData,
@@ -2173,18 +2173,18 @@ pub mod rpc {
         }
     }
 
-    struct QuinnReceiver<T> {
-        recv: quinn::RecvStream,
+    struct NoqReceiver<T> {
+        recv: noq::RecvStream,
         _marker: std::marker::PhantomData<T>,
     }
 
-    impl<T> Debug for QuinnReceiver<T> {
+    impl<T> Debug for NoqReceiver<T> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("QuinnReceiver").finish()
+            f.debug_struct("NoqReceiver").finish()
         }
     }
 
-    impl<T: RpcMessage> DynReceiver<T> for QuinnReceiver<T> {
+    impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
         fn recv(
             &mut self,
         ) -> Pin<
@@ -2217,17 +2217,17 @@ pub mod rpc {
         }
     }
 
-    impl<T> Drop for QuinnReceiver<T> {
+    impl<T> Drop for NoqReceiver<T> {
         fn drop(&mut self) {}
     }
 
-    struct QuinnSenderInner<T> {
-        send: quinn::SendStream,
+    struct NoqSenderInner<T> {
+        send: noq::SendStream,
         buffer: SmallVec<[u8; 128]>,
         _marker: std::marker::PhantomData<T>,
     }
 
-    impl<T: RpcMessage> QuinnSenderInner<T> {
+    impl<T: RpcMessage> NoqSenderInner<T> {
         fn send(
             &mut self,
             value: T,
@@ -2291,21 +2291,21 @@ pub mod rpc {
     }
 
     #[derive(Default)]
-    enum QuinnSenderState<T> {
-        Open(QuinnSenderInner<T>),
+    enum NoqSenderState<T> {
+        Open(NoqSenderInner<T>),
         #[default]
         Closed,
     }
 
-    struct QuinnSender<T>(tokio::sync::Mutex<QuinnSenderState<T>>);
+    struct NoqSender<T>(tokio::sync::Mutex<NoqSenderState<T>>);
 
-    impl<T> Debug for QuinnSender<T> {
+    impl<T> Debug for NoqSender<T> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("QuinnSender").finish()
+            f.debug_struct("NoqSender").finish()
         }
     }
 
-    impl<T: RpcMessage> DynSender<T> for QuinnSender<T> {
+    impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
         fn send(
             &self,
             value: T,
@@ -2314,14 +2314,14 @@ pub mod rpc {
                 let mut guard = self.0.lock().await;
                 let sender = std::mem::take(guard.deref_mut());
                 match sender {
-                    QuinnSenderState::Open(mut sender) => {
+                    NoqSenderState::Open(mut sender) => {
                         let res = sender.send(value).await;
                         if res.is_ok() {
-                            *guard = QuinnSenderState::Open(sender);
+                            *guard = NoqSenderState::Open(sender);
                         }
                         res
                     }
-                    QuinnSenderState::Closed => {
+                    NoqSenderState::Closed => {
                         Err(io::Error::from(io::ErrorKind::BrokenPipe).into())
                     }
                 }
@@ -2336,14 +2336,14 @@ pub mod rpc {
                 let mut guard = self.0.lock().await;
                 let sender = std::mem::take(guard.deref_mut());
                 match sender {
-                    QuinnSenderState::Open(mut sender) => {
+                    NoqSenderState::Open(mut sender) => {
                         let res = sender.try_send(value).await;
                         if res.is_ok() {
-                            *guard = QuinnSenderState::Open(sender);
+                            *guard = NoqSenderState::Open(sender);
                         }
                         res
                     }
-                    QuinnSenderState::Closed => {
+                    NoqSenderState::Closed => {
                         Err(io::Error::from(io::ErrorKind::BrokenPipe).into())
                     }
                 }
@@ -2354,8 +2354,8 @@ pub mod rpc {
             Box::pin(async {
                 let mut guard = self.0.lock().await;
                 match guard.deref_mut() {
-                    QuinnSenderState::Open(sender) => sender.closed().await,
-                    QuinnSenderState::Closed => {}
+                    NoqSenderState::Open(sender) => sender.closed().await,
+                    NoqSenderState::Closed => {}
                 }
             })
         }
@@ -2367,11 +2367,7 @@ pub mod rpc {
 
     /// Type alias for a handler fn for remote requests
     pub type Handler<R> = Arc<
-        dyn Fn(
-                R,
-                quinn::RecvStream,
-                quinn::SendStream,
-            ) -> BoxFuture<std::result::Result<(), SendError>>
+        dyn Fn(R, noq::RecvStream, noq::SendStream) -> BoxFuture<std::result::Result<(), SendError>>
             + Send
             + Sync
             + 'static,
@@ -2384,11 +2380,7 @@ pub mod rpc {
     pub trait RemoteService: Service + Sized {
         /// Returns the message enum for this request by combining `self` (the protocol enum)
         /// with a pair of QUIC streams for `tx` and `rx` channels.
-        fn with_remote_channels(
-            self,
-            rx: quinn::RecvStream,
-            tx: quinn::SendStream,
-        ) -> Self::Message;
+        fn with_remote_channels(self, rx: noq::RecvStream, tx: noq::SendStream) -> Self::Message;
 
         /// Creates a [`Handler`] that forwards all messages to a [`LocalSender`].
         fn remote_handler(local_sender: LocalSender<Self>) -> Handler<Self> {
@@ -2401,7 +2393,7 @@ pub mod rpc {
 
     /// Utility function to listen for incoming connections and handle them with the provided handler
     pub async fn listen<R: DeserializeOwned + 'static>(
-        endpoint: quinn::Endpoint,
+        endpoint: noq::Endpoint,
         handler: Handler<R>,
     ) {
         let mut request_id = 0u64;
@@ -2439,7 +2431,7 @@ pub mod rpc {
 
     /// Handles a quic connection with the provided `handler`.
     pub async fn handle_connection<R: DeserializeOwned + 'static>(
-        connection: quinn::Connection,
+        connection: noq::Connection,
         handler: Handler<R>,
     ) -> io::Result<()> {
         tracing::Span::current().record(
@@ -2456,7 +2448,7 @@ pub mod rpc {
     }
 
     pub async fn read_request<S: RemoteService>(
-        connection: &quinn::Connection,
+        connection: &noq::Connection,
     ) -> std::io::Result<Option<S::Message>> {
         Ok(read_request_raw::<S>(connection)
             .await?
@@ -2471,8 +2463,8 @@ pub mod rpc {
     /// Returns None if the remote closed the connection with error code `0`.
     /// Returns an error for all other failure cases.
     pub async fn read_request_raw<R: DeserializeOwned + 'static>(
-        connection: &quinn::Connection,
-    ) -> std::io::Result<Option<(R, quinn::RecvStream, quinn::SendStream)>> {
+        connection: &noq::Connection,
+    ) -> std::io::Result<Option<(R, noq::RecvStream, noq::SendStream)>> {
         let (send, mut recv) = match connection.accept_bi().await {
             Ok((s, r)) => (s, r),
             Err(ConnectionError::ApplicationClosed(cause))

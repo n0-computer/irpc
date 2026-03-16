@@ -119,13 +119,13 @@ struct StorageApi {
 }
 
 impl StorageApi {
-    pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> Result<StorageApi> {
+    pub fn connect(endpoint: noq::Endpoint, addr: SocketAddr) -> Result<StorageApi> {
         Ok(StorageApi {
-            inner: Client::quinn(endpoint, addr),
+            inner: Client::noq(endpoint, addr),
         })
     }
 
-    pub fn listen(&self, endpoint: quinn::Endpoint) -> Result<AbortOnDropHandle<()>> {
+    pub fn listen(&self, endpoint: noq::Endpoint) -> Result<AbortOnDropHandle<()>> {
         let local = self
             .inner
             .as_local()
