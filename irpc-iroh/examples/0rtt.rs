@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::{
-    endpoint::{AfterHandshakeOutcome, ConnectionInfo, EndpointHooks},
+    endpoint::{presets, AfterHandshakeOutcome, ConnectionInfo, EndpointHooks},
     protocol::Router,
     Endpoint, EndpointAddr, EndpointId, SecretKey,
 };
@@ -23,7 +23,10 @@ async fn main() -> Result<()> {
         cli::Args::Listen { no_0rtt } => {
             let (server_router, server_addr) = {
                 let secret_key = get_or_generate_secret_key()?;
-                let endpoint = Endpoint::builder().secret_key(secret_key).bind().await?;
+                let endpoint = Endpoint::builder(presets::N0)
+                    .secret_key(secret_key)
+                    .bind()
+                    .await?;
                 endpoint.online().await;
                 let addr = endpoint.addr();
                 let api = EchoApi::spawn();
@@ -65,7 +68,7 @@ async fn main() -> Result<()> {
                 .unwrap_or(u64::MAX);
             let delay = std::time::Duration::from_millis(delay_ms);
             let connection_stats = ConnectionStats::default();
-            let endpoint = Endpoint::builder()
+            let endpoint = Endpoint::builder(presets::N0)
                 .hooks(connection_stats.clone())
                 .bind()
                 .await?;
