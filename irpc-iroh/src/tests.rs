@@ -1,4 +1,4 @@
-#[cfg(feature = "use-tracing-opentelemetry")]
+#[cfg(feature = "tracing-opentelemetry")]
 mod span_propagation {
     use std::sync::Arc;
 
