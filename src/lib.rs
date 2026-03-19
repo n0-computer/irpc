@@ -215,6 +215,12 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// * `no_rpc` *(optional, no value)*: If set, no implementation of `RemoteService` will be generated and the generated
 ///   code works without the `rpc` feature of `irpc`.
 /// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
+/// * `span_propagation` *(optional, no value)*: If set, enables OpenTelemetry span context propagation
+///   across remote connections. When enabled, span context is included in the wire format as
+///   `(Option<SpanContextCarrier>, Message)`, and the generated `RemoteService` implementation
+///   will set the parent span from the propagated remote context. Requires the `tracing-opentelemetry`
+///   feature to be enabled for actual OpenTelemetry integration; without it, the context is
+///   still serialized but has no effect.
 ///
 /// ## Variant attributes
 ///
@@ -324,17 +330,17 @@ mod sealed {
 ///
 /// This module provides the `SpanContextCarrier` type for propagating trace context
 /// across remote boundaries. The type is always available when `rpc` feature is enabled,
-/// but actual OpenTelemetry integration requires the `use-tracing-opentelemetry` feature.
+/// but actual OpenTelemetry integration requires the `tracing-opentelemetry` feature.
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod span_propagation {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
 
-    #[cfg(feature = "use-tracing-opentelemetry")]
+    #[cfg(feature = "tracing-opentelemetry")]
     use std::cell::RefCell;
 
-    #[cfg(feature = "use-tracing-opentelemetry")]
+    #[cfg(feature = "tracing-opentelemetry")]
     thread_local! {
         static SPAN_CONTEXT: RefCell<Option<opentelemetry::Context>> = const{ RefCell::new(None) }
     }
@@ -342,7 +348,7 @@ pub mod span_propagation {
     /// Carrier for propagating span context across RPC boundaries using W3C Trace Context format.
     ///
     /// This type is always available for serialization purposes. When the
-    /// `use-tracing-opentelemetry` feature is enabled, it can extract/inject actual
+    /// `tracing-opentelemetry` feature is enabled, it can extract/inject actual
     /// OpenTelemetry trace context. Without that feature, it simply serializes as an
     /// empty map.
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -350,14 +356,14 @@ pub mod span_propagation {
         headers: HashMap<String, String>,
     }
 
-    #[cfg(feature = "use-tracing-opentelemetry")]
+    #[cfg(feature = "tracing-opentelemetry")]
     impl opentelemetry::propagation::Injector for SpanContextCarrier {
         fn set(&mut self, key: &str, value: String) {
             self.headers.insert(key.to_string(), value);
         }
     }
 
-    #[cfg(feature = "use-tracing-opentelemetry")]
+    #[cfg(feature = "tracing-opentelemetry")]
     impl opentelemetry::propagation::Extractor for SpanContextCarrier {
         fn get(&self, key: &str) -> Option<&str> {
             self.headers.get(key).map(|v| v.as_str())
@@ -371,9 +377,9 @@ pub mod span_propagation {
     impl SpanContextCarrier {
         /// Create a carrier from the current OpenTelemetry context.
         ///
-        /// When `use-tracing-opentelemetry` feature is enabled, this extracts the current
+        /// When `tracing-opentelemetry` feature is enabled, this extracts the current
         /// trace context. Without the feature, this returns an empty carrier.
-        #[cfg(feature = "use-tracing-opentelemetry")]
+        #[cfg(feature = "tracing-opentelemetry")]
         pub fn from_current() -> Self {
             use opentelemetry::global;
             use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -389,15 +395,15 @@ pub mod span_propagation {
             carrier
         }
 
-        #[cfg(not(feature = "use-tracing-opentelemetry"))]
+        #[cfg(not(feature = "tracing-opentelemetry"))]
         pub fn from_current() -> Self {
             Self::default()
         }
 
         /// Extract an OpenTelemetry context from this carrier.
         ///
-        /// Only available when `use-tracing-opentelemetry` feature is enabled.
-        #[cfg(feature = "use-tracing-opentelemetry")]
+        /// Only available when `tracing-opentelemetry` feature is enabled.
+        #[cfg(feature = "tracing-opentelemetry")]
         pub fn to_context(&self) -> opentelemetry::Context {
             use opentelemetry::global;
             global::get_text_map_propagator(|prop| {
@@ -407,10 +413,10 @@ pub mod span_propagation {
 
         /// Store this carrier's context in thread-local storage for use by with_remote_channels.
         ///
-        /// When `use-tracing-opentelemetry` feature is enabled, this stores the context.
+        /// When `tracing-opentelemetry` feature is enabled, this stores the context.
         /// Otherwise, this is a no-op.
         pub fn store_in_thread_local(&self) {
-            #[cfg(feature = "use-tracing-opentelemetry")]
+            #[cfg(feature = "tracing-opentelemetry")]
             {
                 let context = self.to_context();
                 SPAN_CONTEXT.with(|cell| {
@@ -426,10 +432,10 @@ pub mod span_propagation {
     /// `span_propagation` is enabled. The function handles the conditional compilation
     /// internally, so generated code doesn't need `#[cfg]` attributes.
     ///
-    /// When `use-tracing-opentelemetry` feature is enabled, this takes the stored context
+    /// When `tracing-opentelemetry` feature is enabled, this takes the stored context
     /// and sets it as the parent of the provided span. Otherwise, this is a no-op.
     pub fn set_span_parent_from_remote(span: &tracing::Span) {
-        #[cfg(feature = "use-tracing-opentelemetry")]
+        #[cfg(feature = "tracing-opentelemetry")]
         {
             if let Some(ctx) = SPAN_CONTEXT.with(|cell| cell.borrow_mut().take()) {
                 use tracing_opentelemetry::OpenTelemetrySpanExt;

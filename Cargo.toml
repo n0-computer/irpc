@@ -44,7 +44,7 @@ n0-future = { workspace = true }
 futures-util = { workspace = true, optional = true }
 # for the derive reexport/feature
 irpc-derive = { version = "0.11.0", path = "./irpc-derive", optional = true }
-# for remote span propagation when use-tracing-opentelemetry feature is enabled
+# for remote span propagation when tracing-opentelemetry feature is enabled
 opentelemetry = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 
@@ -78,7 +78,7 @@ stream = ["dep:futures-util"]
 derive = ["dep:irpc-derive"]
 varint-util = ["dep:postcard", "dep:smallvec", "tokio/io-util"]
 # enable OpenTelemetry span context propagation across remote connections
-use-tracing-opentelemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry", "rpc"]
+tracing-opentelemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry", "rpc"]
 default = ["rpc", "noq_endpoint_setup", "spans", "stream", "derive"]
 
 [[example]]
@@ -98,6 +98,7 @@ name = "storage"
 required-features = ["rpc", "noq_endpoint_setup"]
 
 [workspace]
+resolver = "2"
 members = ["irpc-derive", "irpc-iroh"]
 
 [package.metadata.docs.rs]
