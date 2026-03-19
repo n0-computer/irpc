@@ -459,3 +459,6 @@ pub async fn listen<S: Service>(endpoint: iroh::Endpoint, handler: Handler<S>) {
         request_id += 1;
     }
 }
+
+#[cfg(test)]
+mod tests;
