@@ -43,4 +43,4 @@ tracing-opentelemetry = "0.32.1"
 
 [features]
 default = []
-use-tracing-opentelemetry = ["irpc/use-tracing-opentelemetry"]
+tracing-opentelemetry = ["irpc/tracing-opentelemetry"]
