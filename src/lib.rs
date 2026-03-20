@@ -214,6 +214,12 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref, resul
 /// * `no_rpc` *(optional, no value)*: If set, no implementation of `RemoteService` will be generated and the generated
 ///   code works without the `rpc` feature of `irpc`.
 /// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
+/// * `span_propagation` *(optional, no value)*: If set, enables OpenTelemetry span context propagation
+///   across remote connections. When enabled, span context is included in the wire format as
+///   `(Option<SpanContextCarrier>, Message)`, and the generated `RemoteService` implementation
+///   will set the parent span from the propagated remote context. Requires the `tracing-opentelemetry`
+///   feature to be enabled for actual OpenTelemetry integration; without it, the context is
+///   still serialized but has no effect.
 ///
 /// ## Variant attributes
 ///
@@ -318,6 +324,126 @@ mod sealed {
     pub trait Sealed {}
 }
 
+/// Span context propagation for remote RPC calls
+///
+/// This module provides the `SpanContextCarrier` type for propagating trace context
+/// across remote boundaries. The type is always available when `rpc` feature is enabled,
+/// but actual OpenTelemetry integration requires the `tracing-opentelemetry` feature.
+#[cfg(feature = "rpc")]
+#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
+pub mod span_propagation {
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
+
+    #[cfg(feature = "tracing-opentelemetry")]
+    use std::cell::RefCell;
+
+    #[cfg(feature = "tracing-opentelemetry")]
+    thread_local! {
+        static SPAN_CONTEXT: RefCell<Option<opentelemetry::Context>> = const{ RefCell::new(None) }
+    }
+
+    /// Carrier for propagating span context across RPC boundaries using W3C Trace Context format.
+    ///
+    /// This type is always available for serialization purposes. When the
+    /// `tracing-opentelemetry` feature is enabled, it can extract/inject actual
+    /// OpenTelemetry trace context. Without that feature, it simply serializes as an
+    /// empty map.
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct SpanContextCarrier {
+        headers: HashMap<String, String>,
+    }
+
+    #[cfg(feature = "tracing-opentelemetry")]
+    impl opentelemetry::propagation::Injector for SpanContextCarrier {
+        fn set(&mut self, key: &str, value: String) {
+            self.headers.insert(key.to_string(), value);
+        }
+    }
+
+    #[cfg(feature = "tracing-opentelemetry")]
+    impl opentelemetry::propagation::Extractor for SpanContextCarrier {
+        fn get(&self, key: &str) -> Option<&str> {
+            self.headers.get(key).map(|v| v.as_str())
+        }
+
+        fn keys(&self) -> Vec<&str> {
+            self.headers.keys().map(|k| k.as_str()).collect()
+        }
+    }
+
+    impl SpanContextCarrier {
+        /// Create a carrier from the current OpenTelemetry context.
+        ///
+        /// When `tracing-opentelemetry` feature is enabled, this extracts the current
+        /// trace context. Without the feature, this returns an empty carrier.
+        #[cfg(feature = "tracing-opentelemetry")]
+        pub fn from_current() -> Self {
+            use opentelemetry::global;
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+            let mut carrier = Self::default();
+            // Get the OTel context from the current tracing span, not from
+            // opentelemetry::Context::current(). The tracing-opentelemetry layer
+            // stores OTel spans inside tracing spans, so the thread-local OTel
+            // context won't have the right span.
+            let ctx = tracing::Span::current().context();
+            global::get_text_map_propagator(|prop| {
+                prop.inject_context(&ctx, &mut carrier);
+            });
+            carrier
+        }
+
+        #[cfg(not(feature = "tracing-opentelemetry"))]
+        pub fn from_current() -> Self {
+            Self::default()
+        }
+
+        /// Extract an OpenTelemetry context from this carrier.
+        ///
+        /// Only available when `tracing-opentelemetry` feature is enabled.
+        #[cfg(feature = "tracing-opentelemetry")]
+        pub fn to_context(&self) -> opentelemetry::Context {
+            use opentelemetry::global;
+            global::get_text_map_propagator(|prop| {
+                prop.extract_with_context(&opentelemetry::Context::current(), self)
+            })
+        }
+
+        /// Store this carrier's context in thread-local storage for use by with_remote_channels.
+        ///
+        /// When `tracing-opentelemetry` feature is enabled, this stores the context.
+        /// Otherwise, this is a no-op.
+        pub fn store_in_thread_local(&self) {
+            #[cfg(feature = "tracing-opentelemetry")]
+            {
+                let context = self.to_context();
+                SPAN_CONTEXT.with(|cell| {
+                    *cell.borrow_mut() = Some(context);
+                });
+            }
+        }
+    }
+
+    /// Set the parent of a span from the remote span context stored in thread-local storage.
+    ///
+    /// This is called by the generated `with_remote_channels` implementation when
+    /// `span_propagation` is enabled. The function handles the conditional compilation
+    /// internally, so generated code doesn't need `#[cfg]` attributes.
+    ///
+    /// When `tracing-opentelemetry` feature is enabled, this takes the stored context
+    /// and sets it as the parent of the provided span. Otherwise, this is a no-op.
+    pub fn set_span_parent_from_remote(span: &tracing::Span) {
+        #[cfg(feature = "tracing-opentelemetry")]
+        {
+            if let Some(ctx) = SPAN_CONTEXT.with(|cell| cell.borrow_mut().take()) {
+                use tracing_opentelemetry::OpenTelemetrySpanExt;
+                let _ = span.set_parent(ctx);
+            }
+        }
+        let _ = span; // Suppress unused variable warning when feature is disabled
+    }
+}
+
 /// Requirements for a RPC message
 ///
 /// Even when just using the mem transport, we require messages to be Serializable and Deserializable.
@@ -346,6 +472,14 @@ pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static 
     /// protocol enum, but its single unit field is the [`WithChannels`] struct
     /// that contains the inner request plus the `tx` and `rx` channels.
     type Message: Send + Unpin + 'static;
+
+    /// Whether this protocol includes span context in the wire format.
+    ///
+    /// When `true`, messages are serialized as `(Option<SpanContextCarrier>, Message)`.
+    /// When `false` (default), messages are serialized directly without span context wrapper.
+    ///
+    /// This is controlled by the `span_propagation` attribute on the `rpc_requests` macro.
+    const SPAN_PROPAGATION: bool = false;
 }
 
 /// Sealed marker trait for a sender
@@ -2047,15 +2181,33 @@ pub mod rpc {
         std::marker::PhantomData<S>,
     );
 
+    /// Serialize a message for sending over the wire.
+    ///
+    /// When `S::SPAN_PROPAGATION` is true, the message is wrapped in a tuple with
+    /// span context: `(Option<SpanContextCarrier>, msg)`.
+    /// When false, the message is serialized directly.
     pub(crate) fn prepare_write<S: Service>(
         msg: impl Into<S>,
     ) -> std::result::Result<SmallVec<[u8; 128]>, WriteError> {
         let msg = msg.into();
-        if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
-            return Err(e!(WriteError::MaxMessageSizeExceeded));
-        }
         let mut buf = SmallVec::<[u8; 128]>::new();
-        buf.write_length_prefixed(&msg)?;
+
+        if S::SPAN_PROPAGATION {
+            // Include span context in wire format
+            let span_ctx = Some(crate::span_propagation::SpanContextCarrier::from_current());
+            let payload = (span_ctx, msg);
+            if postcard::experimental::serialized_size(&payload)? as u64 > MAX_MESSAGE_SIZE {
+                return Err(e!(WriteError::MaxMessageSizeExceeded));
+            }
+            buf.write_length_prefixed(&payload)?;
+        } else {
+            // Original wire format without span context
+            if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
+                return Err(e!(WriteError::MaxMessageSizeExceeded));
+            }
+            buf.write_length_prefixed(&msg)?;
+        }
+
         Ok(buf)
     }
 
@@ -2391,11 +2543,10 @@ pub mod rpc {
         }
     }
 
-    /// Utility function to listen for incoming connections and handle them with the provided handler
-    pub async fn listen<R: DeserializeOwned + 'static>(
-        endpoint: noq::Endpoint,
-        handler: Handler<R>,
-    ) {
+    /// Utility function to listen for incoming connections and handle them with the provided handler.
+    ///
+    /// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
+    pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: Handler<S>) {
         let mut request_id = 0u64;
         let mut tasks = JoinSet::new();
         loop {
@@ -2430,9 +2581,12 @@ pub mod rpc {
     }
 
     /// Handles a quic connection with the provided `handler`.
-    pub async fn handle_connection<R: DeserializeOwned + 'static>(
+    ///
+    /// This function handles requests for a service `S`. The wire format used depends on
+    /// `S::SPAN_PROPAGATION` - if true, span context is expected in the wire format.
+    pub async fn handle_connection<S: Service>(
         connection: noq::Connection,
-        handler: Handler<R>,
+        handler: Handler<S>,
     ) -> io::Result<()> {
         tracing::Span::current().record(
             "remote",
@@ -2440,13 +2594,16 @@ pub mod rpc {
         );
         debug!("connection accepted");
         loop {
-            let Some((msg, rx, tx)) = read_request_raw(&connection).await? else {
+            let Some((msg, rx, tx)) = read_request_raw::<S>(&connection).await? else {
                 return Ok(());
             };
             handler(msg, rx, tx).await?;
         }
     }
 
+    /// Reads a request from a connection and converts it to a message enum.
+    ///
+    /// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
     pub async fn read_request<S: RemoteService>(
         connection: &noq::Connection,
     ) -> std::io::Result<Option<S::Message>> {
@@ -2459,12 +2616,16 @@ pub mod rpc {
     ///
     /// This accepts a bi-directional stream from the connection and reads and parses the request.
     ///
+    /// The wire format used depends on `S::SPAN_PROPAGATION`:
+    /// - When `true`: expects `(Option<SpanContextCarrier>, Message)` tuple format
+    /// - When `false`: expects plain `Message` format
+    ///
     /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
     /// Returns None if the remote closed the connection with error code `0`.
     /// Returns an error for all other failure cases.
-    pub async fn read_request_raw<R: DeserializeOwned + 'static>(
+    pub async fn read_request_raw<S: Service>(
         connection: &noq::Connection,
-    ) -> std::io::Result<Option<(R, noq::RecvStream, noq::SendStream)>> {
+    ) -> std::io::Result<Option<(S, noq::RecvStream, noq::SendStream)>> {
         let (send, mut recv) = match connection.accept_bi().await {
             Ok((s, r)) => (s, r),
             Err(ConnectionError::ApplicationClosed(cause))
@@ -2493,8 +2654,23 @@ pub mod rpc {
         recv.read_exact(&mut buf)
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-        let msg: R = postcard::from_bytes(&buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // Deserialize based on S::SPAN_PROPAGATION
+        let msg: S = if S::SPAN_PROPAGATION {
+            let (span_ctx, msg): (Option<crate::span_propagation::SpanContextCarrier>, S) =
+                postcard::from_bytes(&buf)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            // Store span context in thread-local for use by with_remote_channels
+            if let Some(ctx) = span_ctx {
+                ctx.store_in_thread_local();
+            }
+
+            msg
+        } else {
+            postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        };
+
         let rx = recv;
         let tx = send;
         Ok(Some((msg, rx, tx)))
