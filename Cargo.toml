@@ -93,12 +93,6 @@ required-features = ["rpc", "noq_endpoint_setup"]
 [workspace]
 members = ["irpc-derive", "irpc-iroh"]
 
-[patch.crates-io]
-iroh = { path = "/Users/rklaehn/projects_git/iroh/iroh" }
-iroh-base = { path = "/Users/rklaehn/projects_git/iroh/iroh-base" }
-portmapper = { git = "https://github.com/n0-computer/net-tools", rev = "97ef90b5ff749c6b7a8b7af7a014d0c9f5c7cf2d" }
-netwatch = { git = "https://github.com/n0-computer/net-tools", rev = "97ef90b5ff749c6b7a8b7af7a014d0c9f5c7cf2d" }
-
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "quicrpc_docsrs"]
@@ -115,7 +109,7 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.3", default-features = false }
 n0-error = { version = "0.1" }
 tracing-subscriber = { version = "0.3.20" }
-iroh = { version = "0.97" }
-iroh-base = { version = "0.97" }
+iroh = { version = "0.98" }
+iroh-base = { version = "0.98" }
 noq = { version = "0.18.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
