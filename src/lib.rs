@@ -1472,6 +1472,38 @@ impl<S: Service> Client<S> {
         }
     }
 
+    /// Performs a request for which the client can send updates but does not receive a reply from the server.
+    pub fn notify_streaming<Req, Update>(
+        &self,
+        msg: Req,
+        local_update_cap: usize,
+    ) -> impl Future<Output = Result<mpsc::Sender<Update>>>
+    where
+        S: From<Req>,
+        S::Message: From<WithChannels<Req, S>>,
+        Req: Channels<S, Tx = NoSender, Rx = mpsc::Receiver<Update>>,
+        Update: RpcMessage,
+    {
+        let client = self.clone();
+        async move {
+            let request = client.request().await?;
+            match request {
+                Request::Local(request) => {
+                    let (req_tx, req_rx) = mpsc::channel(local_update_cap);
+                    request.send((msg, NoSender, req_rx)).await?;
+                    Ok(req_tx)
+                }
+                #[cfg(not(feature = "rpc"))]
+                Request::Remote(_request) => unreachable!(),
+                #[cfg(feature = "rpc")]
+                Request::Remote(remote) => {
+                    let (s, _) = remote.write(msg).await?;
+                    Ok(s.into())
+                }
+            }
+        }
+    }
+
     /// Performs a request for which the client can send updates, and the server returns a mpsc receiver.
     pub fn bidi_streaming<Req, Update, Res>(
         &self,
