@@ -123,7 +123,7 @@ async fn ping_one_0rtt(
     connection_stats: ConnectionStats,
 ) -> Result<()> {
     let msg = i.to_be_bytes();
-    let data = api.echo_0rtt(msg.to_vec()).await?;
+    let data = api.echo(msg.to_vec()).await?;
     let rtt = connection_stats.rtt(&endpoint_id);
     if wait_for_ticket {
         tokio::spawn(async move {
@@ -256,10 +256,6 @@ mod ping {
 
         pub async fn echo(&self, data: Vec<u8>) -> irpc::Result<Vec<u8>> {
             self.inner.rpc(Echo { data }).await
-        }
-
-        pub async fn echo_0rtt(&self, data: Vec<u8>) -> irpc::Result<Vec<u8>> {
-            self.inner.rpc_0rtt(Echo { data }).await
         }
 
         pub fn expose_0rtt(self) -> Result<Iroh0RttProtocol<EchoProtocol>> {
