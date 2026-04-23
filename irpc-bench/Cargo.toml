@@ -1,0 +1,22 @@
+[package]
+name = "irpc-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+irpc = { version = "0.12.0", path = "..", features = ["rpc", "derive", "quinn_endpoint_setup"] }
+irpc-iroh = { version = "0.12.0", path = "../irpc-iroh" }
+iroh = { workspace = true }
+quinn = { workspace = true, features = ["runtime-tokio"] }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+tracing = { workspace = true }
+n0-future = { workspace = true }
+futures-buffered = "0.2.9"
+thousands = "0.2.0"
+anyhow = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+[target.'cfg(unix)'.dependencies]
+irpc-uds = { version = "0.1.0", path = "../irpc-uds" }
