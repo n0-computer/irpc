@@ -109,7 +109,8 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.3", default-features = false }
 n0-error = { version = "0.1" }
 tracing-subscriber = { version = "0.3.20" }
-iroh = { version = "0.98" }
+# iroh = { version = "0.98" }
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/relay-client-auth", default-features = false }
 iroh-base = { version = "0.98" }
 noq = { version = "0.18.0", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
