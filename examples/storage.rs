@@ -5,10 +5,10 @@ use std::{
 
 use anyhow::bail;
 use irpc::{
-    channel::{mpsc, none::NoReceiver, oneshot},
-    rpc::{listen, RemoteService},
-    util::{make_client_endpoint, make_server_endpoint},
     Channels, Client, Request, Service, WithChannels,
+    channel::{mpsc, none::NoReceiver, oneshot},
+    rpc::{RemoteService, listen},
+    util::{make_client_endpoint, make_server_endpoint},
 };
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};

@@ -10,8 +10,8 @@ mod proto {
     use std::collections::HashMap;
 
     use anyhow::Result;
-    use iroh::{endpoint::presets, protocol::Router, Endpoint, EndpointId};
-    use irpc::{channel::oneshot, rpc_requests, Client, WithChannels};
+    use iroh::{Endpoint, EndpointId, endpoint::presets, protocol::Router};
+    use irpc::{Client, WithChannels, channel::oneshot, rpc_requests};
     use irpc_iroh::IrohProtocol;
     use serde::{Deserialize, Serialize};
 
@@ -90,7 +90,7 @@ mod cli {
     use clap::Parser;
     use iroh::EndpointId;
 
-    use crate::proto::{connect, listen, GetRequest, SetRequest};
+    use crate::proto::{GetRequest, SetRequest, connect, listen};
 
     #[derive(Debug, Parser)]
     enum Cli {

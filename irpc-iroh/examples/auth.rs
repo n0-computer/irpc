@@ -4,7 +4,7 @@
 //! * Authenticating peers
 
 use anyhow::Result;
-use iroh::{endpoint::presets, protocol::Router, Endpoint};
+use iroh::{Endpoint, endpoint::presets, protocol::Router};
 
 use self::storage::{StorageClient, StorageServer};
 
@@ -67,16 +67,17 @@ mod storage {
 
     use anyhow::Result;
     use iroh::{
+        Endpoint,
         endpoint::Connection,
         protocol::{AcceptError, ProtocolHandler},
-        Endpoint,
     };
     use irpc::{
+        Client, WithChannels,
         channel::{mpsc, oneshot},
-        rpc_requests, Client, WithChannels,
+        rpc_requests,
     };
     // Import the macro
-    use irpc_iroh::{read_request, IrohLazyRemoteConnection};
+    use irpc_iroh::{IrohLazyRemoteConnection, read_request};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 

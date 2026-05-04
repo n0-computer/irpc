@@ -9,9 +9,9 @@ use std::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::{
-    endpoint::{presets, AfterHandshakeOutcome, ConnectionInfo, EndpointHooks},
-    protocol::Router,
     Endpoint, EndpointAddr, EndpointId, SecretKey,
+    endpoint::{AfterHandshakeOutcome, ConnectionInfo, EndpointHooks, presets},
+    protocol::Router,
 };
 use ping::EchoApi;
 
@@ -232,7 +232,7 @@ mod cli {
 mod ping {
     use anyhow::{Context, Result};
     use iroh::Endpoint;
-    use irpc::{channel::oneshot, rpc::RemoteService, rpc_requests, Client, WithChannels};
+    use irpc::{Client, WithChannels, channel::oneshot, rpc::RemoteService, rpc_requests};
     use irpc_iroh::{
         Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection, IrohZrttRemoteConnection,
     };

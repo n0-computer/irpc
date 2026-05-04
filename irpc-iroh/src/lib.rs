@@ -2,31 +2,31 @@ use std::{
     fmt,
     future::Future,
     io,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{Arc, atomic::AtomicU64},
 };
 
 use iroh::{
+    EndpointId,
     endpoint::{
         Accepting, Connection, ConnectionError, IncomingZeroRttConnection,
         OutgoingZeroRttConnection, RecvStream, RemoteEndpointIdError, SendStream, VarInt,
         ZeroRttStatus,
     },
     protocol::{AcceptError, ProtocolHandler},
-    EndpointId,
 };
 use irpc::{
+    LocalSender, RequestError,
     channel::oneshot,
     rpc::{
-        Handler, RemoteConnection, RemoteService, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
-        MAX_MESSAGE_SIZE,
+        ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, Handler, MAX_MESSAGE_SIZE, RemoteConnection,
+        RemoteService,
     },
     util::AsyncReadVarintExt,
-    LocalSender, RequestError,
 };
-use n0_error::{e, Result};
-use n0_future::{future::Boxed as BoxFuture, TryFutureExt};
+use n0_error::{Result, e};
+use n0_future::{TryFutureExt, future::Boxed as BoxFuture};
 use serde::de::DeserializeOwned;
-use tracing::{debug, error_span, trace, trace_span, warn, Instrument};
+use tracing::{Instrument, debug, error_span, trace, trace_span, warn};
 
 /// Returns a client that connects to a irpc service using an [`iroh::Endpoint`].
 pub fn client<S: irpc::Service>(

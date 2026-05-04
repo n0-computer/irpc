@@ -7,8 +7,8 @@ use std::{
 
 use irpc::{
     channel::{
-        mpsc::{self, Receiver, RecvError},
         SendError,
+        mpsc::{self, Receiver, RecvError},
     },
     util::AsyncWriteVarintExt,
 };

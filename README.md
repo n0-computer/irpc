@@ -22,6 +22,10 @@ See the [module docs](https://docs.rs/irpc/latest/irpc/).
 Properly building docs for this crate is quite complex. For all the gory details,
 see [DOCS.md].
 
+# Development
+
+Run `cargo make format` before committing, it will run `cargo fmt` with the arguments expected by this project.
+
 ## License
 
 Copyright 2025 N0, INC.

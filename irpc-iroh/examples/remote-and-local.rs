@@ -3,7 +3,7 @@
 //! The [`StorageApi`] struct is only defined once and can be used both locally and as a remote client.
 
 use anyhow::Result;
-use iroh::{endpoint::presets, protocol::Router, Endpoint};
+use iroh::{Endpoint, endpoint::presets, protocol::Router};
 
 use self::storage::StorageApi;
 
@@ -71,11 +71,12 @@ mod storage {
     use std::{collections::BTreeMap, sync::Arc};
 
     use anyhow::{Context, Result};
-    use iroh::{protocol::ProtocolHandler, Endpoint};
+    use iroh::{Endpoint, protocol::ProtocolHandler};
     use irpc::{
+        Client, WithChannels,
         channel::{mpsc, oneshot},
         rpc::RemoteService,
-        rpc_requests, Client, WithChannels,
+        rpc_requests,
     };
     // Import the macro
     use irpc_iroh::{IrohLazyRemoteConnection, IrohProtocol};

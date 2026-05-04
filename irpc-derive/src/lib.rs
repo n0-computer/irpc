@@ -2,14 +2,14 @@ use std::collections::HashSet;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{quote, ToTokens};
+use quote::{ToTokens, quote};
 use syn::{
+    Attribute, Data, DeriveInput, Error, Fields, Ident, LitStr, Token, Type, Visibility,
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
     spanned::Spanned,
     token::Comma,
-    Attribute, Data, DeriveInput, Error, Fields, Ident, LitStr, Token, Type, Visibility,
 };
 
 /// Attribute on protocol enums and variants
@@ -68,7 +68,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         let request_type = match rpc_attr.wrap {
             None => match &mut variant.fields {
-                Fields::Unnamed(ref mut fields) if fields.unnamed.len() == 1 => {
+                Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                     fields.unnamed[0].ty.clone()
                 }
                 _ => {
@@ -550,8 +550,8 @@ fn single_unnamed_field(ty: Type) -> Fields {
 
 fn set_fields_vis(fields: &mut Fields, vis: &Visibility) {
     let inner = match fields {
-        Fields::Named(ref mut named) => named.named.iter_mut(),
-        Fields::Unnamed(ref mut unnamed) => unnamed.unnamed.iter_mut(),
+        Fields::Named(named) => named.named.iter_mut(),
+        Fields::Unnamed(unnamed) => unnamed.unnamed.iter_mut(),
         Fields::Unit => return,
     };
     for field in inner {

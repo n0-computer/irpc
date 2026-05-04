@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use irpc::{channel::oneshot, rpc_requests, Client, WithChannels};
+use irpc::{Client, WithChannels, channel::oneshot, rpc_requests};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]

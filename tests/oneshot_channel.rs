@@ -4,8 +4,8 @@ use std::io::{self, ErrorKind};
 
 use irpc::{
     channel::{
-        oneshot::{self, RecvError},
         SendError,
+        oneshot::{self, RecvError},
     },
     util::AsyncWriteVarintExt,
 };
