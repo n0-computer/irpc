@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, SecretKey,
-    endpoint::{AfterHandshakeOutcome, ConnectionInfo, EndpointHooks},
+    endpoint::{AfterHandshakeOutcome, ConnectionInfo, EndpointHooks, presets},
     protocol::Router,
 };
 use ping::EchoApi;
@@ -23,7 +23,10 @@ async fn main() -> Result<()> {
         cli::Args::Listen { no_0rtt } => {
             let (server_router, server_addr) = {
                 let secret_key = get_or_generate_secret_key()?;
-                let endpoint = Endpoint::builder().secret_key(secret_key).bind().await?;
+                let endpoint = Endpoint::builder(presets::N0)
+                    .secret_key(secret_key)
+                    .bind()
+                    .await?;
                 endpoint.online().await;
                 let addr = endpoint.addr();
                 let api = EchoApi::spawn();
@@ -65,7 +68,7 @@ async fn main() -> Result<()> {
                 .unwrap_or(u64::MAX);
             let delay = std::time::Duration::from_millis(delay_ms);
             let connection_stats = ConnectionStats::default();
-            let endpoint = Endpoint::builder()
+            let endpoint = Endpoint::builder(presets::N0)
                 .hooks(connection_stats.clone())
                 .bind()
                 .await?;
@@ -98,7 +101,8 @@ impl ConnectionStats {
         let stats = self.0.lock().expect("poisoned");
         stats
             .get(endpoint_id)
-            .and_then(|conn_info| conn_info.selected_path().map(|path| path.rtt()))
+            .and_then(|conn_info| conn_info.selected_path())
+            .and_then(|path| path.rtt())
     }
 }
 
@@ -119,7 +123,7 @@ async fn ping_one_0rtt(
     connection_stats: ConnectionStats,
 ) -> Result<()> {
     let msg = i.to_be_bytes();
-    let data = api.echo_0rtt(msg.to_vec()).await?;
+    let data = api.echo(msg.to_vec()).await?;
     let rtt = connection_stats.rtt(&endpoint_id);
     if wait_for_ticket {
         tokio::spawn(async move {
@@ -191,7 +195,7 @@ pub fn get_or_generate_secret_key() -> Result<SecretKey> {
         SecretKey::from_str(&secret).context("Invalid secret key format")
     } else {
         // Generate a new random key
-        let secret_key = SecretKey::generate(&mut rand::rng());
+        let secret_key = SecretKey::generate();
         println!(
             "Generated new secret key: {}",
             hex::encode(secret_key.to_bytes())
@@ -252,10 +256,6 @@ mod ping {
 
         pub async fn echo(&self, data: Vec<u8>) -> irpc::Result<Vec<u8>> {
             self.inner.rpc(Echo { data }).await
-        }
-
-        pub async fn echo_0rtt(&self, data: Vec<u8>) -> irpc::Result<Vec<u8>> {
-            self.inner.rpc_0rtt(Echo { data }).await
         }
 
         pub fn expose_0rtt(self) -> Result<Iroh0RttProtocol<EchoProtocol>> {

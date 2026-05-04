@@ -306,8 +306,8 @@ fn generate_remote_service_impl(
         impl ::irpc::rpc::RemoteService for #proto_enum_name {
             fn with_remote_channels(
                 self,
-                rx: ::irpc::rpc::quinn::RecvStream,
-                tx: ::irpc::rpc::quinn::SendStream
+                rx: ::irpc::rpc::noq::RecvStream,
+                tx: ::irpc::rpc::noq::SendStream
             ) -> Self::Message {
                 match self {
                     #(#variants),*

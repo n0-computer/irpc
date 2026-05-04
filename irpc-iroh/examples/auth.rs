@@ -4,7 +4,7 @@
 //! * Authenticating peers
 
 use anyhow::Result;
-use iroh::{Endpoint, protocol::Router};
+use iroh::{Endpoint, endpoint::presets, protocol::Router};
 
 use self::storage::{StorageClient, StorageServer};
 
@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
 
 async fn remote() -> Result<()> {
     let (server_router, server_addr) = {
-        let endpoint = Endpoint::bind().await?;
+        let endpoint = Endpoint::bind(presets::N0).await?;
         let server = StorageServer::new("secret".to_string());
         let router = Router::builder(endpoint.clone())
             .accept(StorageServer::ALPN, server.clone())
@@ -28,7 +28,7 @@ async fn remote() -> Result<()> {
     };
 
     // correct authentication
-    let client_endpoint = Endpoint::builder().bind().await?;
+    let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
     let api = StorageClient::connect(client_endpoint, server_addr.clone());
     api.auth("secret").await?;
     api.set("hello".to_string(), "world".to_string()).await?;
@@ -41,13 +41,13 @@ async fn remote() -> Result<()> {
     }
 
     // invalid authentication
-    let client_endpoint = Endpoint::builder().bind().await?;
+    let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
     let api = StorageClient::connect(client_endpoint, server_addr.clone());
     assert!(api.auth("bad").await.is_err());
     assert!(api.get("hello".to_string()).await.is_err());
 
     // no authentication
-    let client_endpoint = Endpoint::builder().bind().await?;
+    let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
     let api = StorageClient::connect(client_endpoint, server_addr);
     assert!(api.get("hello".to_string()).await.is_err());
 

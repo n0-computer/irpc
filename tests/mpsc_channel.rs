@@ -1,4 +1,4 @@
-#![cfg(feature = "quinn_endpoint_setup")]
+#![cfg(feature = "noq_endpoint_setup")]
 
 use std::{
     io::{self, ErrorKind},
@@ -13,7 +13,7 @@ use irpc::{
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
-use quinn::Endpoint;
+use noq::Endpoint;
 use testresult::TestResult;
 use tokio::time::timeout;
 

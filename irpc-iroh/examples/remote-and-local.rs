@@ -3,7 +3,7 @@
 //! The [`StorageApi`] struct is only defined once and can be used both locally and as a remote client.
 
 use anyhow::Result;
-use iroh::{Endpoint, protocol::Router};
+use iroh::{Endpoint, endpoint::presets, protocol::Router};
 
 use self::storage::StorageApi;
 
@@ -39,7 +39,7 @@ async fn local() -> Result<()> {
 }
 
 async fn remote() -> Result<()> {
-    let endpoint = Endpoint::bind().await?;
+    let endpoint = Endpoint::bind(presets::N0).await?;
     let api = StorageApi::spawn();
     let router = Router::builder(endpoint.clone())
         .accept(StorageApi::ALPN, api.protocol_handler()?)
@@ -47,7 +47,7 @@ async fn remote() -> Result<()> {
 
     endpoint.online().await;
 
-    let client_endpoint = Endpoint::builder().bind().await?;
+    let client_endpoint = Endpoint::bind(presets::N0).await?;
     let api = StorageApi::connect(client_endpoint, endpoint.addr())?;
     api.set("hello".to_string(), "world".to_string()).await?;
     api.set("goodbye".to_string(), "world".to_string()).await?;

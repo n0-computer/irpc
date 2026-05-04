@@ -62,7 +62,7 @@ enum StorageMessage {
 }
 
 impl RemoteService for StorageProtocol {
-    fn with_remote_channels(self, rx: quinn::RecvStream, tx: quinn::SendStream) -> Self::Message {
+    fn with_remote_channels(self, rx: noq::RecvStream, tx: noq::SendStream) -> Self::Message {
         match self {
             StorageProtocol::Get(msg) => WithChannels::from((msg, tx, rx)).into(),
             StorageProtocol::Set(msg) => WithChannels::from((msg, tx, rx)).into(),
@@ -125,13 +125,13 @@ struct StorageApi {
 }
 
 impl StorageApi {
-    pub fn connect(endpoint: quinn::Endpoint, addr: SocketAddr) -> anyhow::Result<StorageApi> {
+    pub fn connect(endpoint: noq::Endpoint, addr: SocketAddr) -> anyhow::Result<StorageApi> {
         Ok(StorageApi {
-            inner: Client::quinn(endpoint, addr),
+            inner: Client::noq(endpoint, addr),
         })
     }
 
-    pub fn listen(&self, endpoint: quinn::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
+    pub fn listen(&self, endpoint: noq::Endpoint) -> anyhow::Result<AbortOnDropHandle<()>> {
         let Some(local) = self.inner.as_local() else {
             bail!("cannot listen on a remote service");
         };
