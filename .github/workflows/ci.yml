@@ -140,7 +140,7 @@ jobs:
       - name: Install wasm-tools
         uses: bytecodealliance/actions/wasm-tools/setup@v1
       - name: wasm32 build
-        run: cargo build --target wasm32-unknown-unknown --all
+        run: cargo build --target wasm32-unknown-unknown --workspace --exclude irpc-uds --exclude irpc-bench
       # If the Wasm file contains any 'import "env"' declarations, then
       # some non-Wasm-compatible code made it into the final code.
       - name: Ensure no 'import "env"' in wasm

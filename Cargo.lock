@@ -1812,6 +1812,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "irpc-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-buffered",
+ "iroh",
+ "iroh-quinn",
+ "irpc",
+ "irpc-iroh",
+ "irpc-uds",
+ "n0-future",
+ "serde",
+ "thousands",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "irpc-derive"
 version = "0.11.0"
 dependencies = [
@@ -1841,6 +1860,23 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "irpc-uds"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "iroh-quinn",
+ "iroh-quinn-proto",
+ "irpc",
+ "libc",
+ "serde",
+ "testresult",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
