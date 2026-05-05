@@ -329,18 +329,21 @@ mod sealed {
 /// This module provides the `SpanContextCarrier` type for propagating trace context
 /// across remote boundaries. The type is always available when `rpc` feature is enabled,
 /// but actual OpenTelemetry integration requires the `tracing-opentelemetry` feature.
+///
+/// The propagated context is carried through the server-side handler stack via a
+/// tokio task-local, set up by [`scope_remote`] / [`scope_remote_sync`]. The
+/// task-local follows the task across `.await` points and across thread migrations,
+/// and is isolated from concurrent requests on the same OS thread.
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod span_propagation {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+    use std::future::Future;
 
     #[cfg(feature = "tracing-opentelemetry")]
-    use std::cell::RefCell;
-
-    #[cfg(feature = "tracing-opentelemetry")]
-    thread_local! {
-        static SPAN_CONTEXT: RefCell<Option<opentelemetry::Context>> = const{ RefCell::new(None) }
+    tokio::task_local! {
+        static SPAN_CONTEXT: opentelemetry::Context;
     }
 
     /// Carrier for propagating span context across RPC boundaries using W3C Trace Context format.
@@ -384,8 +387,7 @@ pub mod span_propagation {
             let mut carrier = Self::default();
             // Get the OTel context from the current tracing span, not from
             // opentelemetry::Context::current(). The tracing-opentelemetry layer
-            // stores OTel spans inside tracing spans, so the thread-local OTel
-            // context won't have the right span.
+            // stores OTel spans inside tracing spans.
             let ctx = tracing::Span::current().context();
             global::get_text_map_propagator(|prop| {
                 prop.inject_context(&ctx, &mut carrier);
@@ -399,8 +401,6 @@ pub mod span_propagation {
         }
 
         /// Extract an OpenTelemetry context from this carrier.
-        ///
-        /// Only available when `tracing-opentelemetry` feature is enabled.
         #[cfg(feature = "tracing-opentelemetry")]
         pub fn to_context(&self) -> opentelemetry::Context {
             use opentelemetry::global;
@@ -408,39 +408,53 @@ pub mod span_propagation {
                 prop.extract_with_context(&opentelemetry::Context::current(), self)
             })
         }
-
-        /// Store this carrier's context in thread-local storage for use by with_remote_channels.
-        ///
-        /// When `tracing-opentelemetry` feature is enabled, this stores the context.
-        /// Otherwise, this is a no-op.
-        pub fn store_in_thread_local(&self) {
-            #[cfg(feature = "tracing-opentelemetry")]
-            {
-                let context = self.to_context();
-                SPAN_CONTEXT.with(|cell| {
-                    *cell.borrow_mut() = Some(context);
-                });
-            }
-        }
     }
 
-    /// Set the parent of a span from the remote span context stored in thread-local storage.
+    /// Run `fut` with `carrier`'s context installed for any
+    /// [`set_span_parent_from_remote`] calls inside the future.
     ///
-    /// This is called by the generated `with_remote_channels` implementation when
-    /// `span_propagation` is enabled. The function handles the conditional compilation
-    /// internally, so generated code doesn't need `#[cfg]` attributes.
+    /// Used on the server side by `handle_connection` to scope the propagated
+    /// context to the lifetime of a single request handler.
+    pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F) -> F::Output {
+        #[cfg(feature = "tracing-opentelemetry")]
+        {
+            if let Some(carrier) = carrier {
+                return SPAN_CONTEXT.scope(carrier.to_context(), fut).await;
+            }
+        }
+        let _ = carrier;
+        fut.await
+    }
+
+    /// Synchronous variant of [`scope_remote`] for code that completes without yielding.
+    pub fn scope_remote_sync<R>(
+        carrier: Option<SpanContextCarrier>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        #[cfg(feature = "tracing-opentelemetry")]
+        {
+            if let Some(carrier) = carrier {
+                return SPAN_CONTEXT.sync_scope(carrier.to_context(), f);
+            }
+        }
+        let _ = carrier;
+        f()
+    }
+
+    /// Set the parent of a span from the propagated remote context, if any is installed.
     ///
-    /// When `tracing-opentelemetry` feature is enabled, this takes the stored context
-    /// and sets it as the parent of the provided span. Otherwise, this is a no-op.
+    /// Looks up the per-task scope set by [`scope_remote`] / [`scope_remote_sync`].
+    /// If no scope is active (e.g. no carrier was sent, or the call site is outside
+    /// a server handler) this is a no-op.
     pub fn set_span_parent_from_remote(span: &tracing::Span) {
         #[cfg(feature = "tracing-opentelemetry")]
         {
-            if let Some(ctx) = SPAN_CONTEXT.with(|cell| cell.borrow_mut().take()) {
+            let _ = SPAN_CONTEXT.try_with(|ctx| {
                 use tracing_opentelemetry::OpenTelemetrySpanExt;
-                let _ = span.set_parent(ctx);
-            }
+                let _ = span.set_parent(ctx.clone());
+            });
         }
-        let _ = span; // Suppress unused variable warning when feature is disabled
+        let _ = span;
     }
 }
 
@@ -2537,8 +2551,11 @@ pub mod rpc {
         /// Creates a [`Handler`] that forwards all messages to a [`LocalSender`].
         fn remote_handler(local_sender: LocalSender<Self>) -> Handler<Self> {
             Arc::new(move |msg, rx, tx| {
-                let msg = Self::with_remote_channels(msg, rx, tx);
-                Box::pin(local_sender.send_raw(msg))
+                let local_sender = local_sender.clone();
+                Box::pin(async move {
+                    let msg = Self::with_remote_channels(msg, rx, tx);
+                    local_sender.send_raw(msg).await
+                })
             })
         }
     }
@@ -2594,10 +2611,12 @@ pub mod rpc {
         );
         debug!("connection accepted");
         loop {
-            let Some((msg, rx, tx)) = read_request_raw::<S>(&connection).await? else {
+            let Some((msg, carrier, rx, tx)) =
+                read_request_raw_with_context::<S>(&connection).await?
+            else {
                 return Ok(());
             };
-            handler(msg, rx, tx).await?;
+            crate::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
         }
     }
 
@@ -2607,18 +2626,20 @@ pub mod rpc {
     pub async fn read_request<S: RemoteService>(
         connection: &noq::Connection,
     ) -> std::io::Result<Option<S::Message>> {
-        Ok(read_request_raw::<S>(connection)
+        Ok(read_request_raw_with_context::<S>(connection)
             .await?
-            .map(|(msg, rx, tx)| S::with_remote_channels(msg, rx, tx)))
+            .map(|(msg, carrier, rx, tx)| {
+                crate::span_propagation::scope_remote_sync(carrier, || {
+                    S::with_remote_channels(msg, rx, tx)
+                })
+            }))
     }
 
     /// Reads a single request from the connection.
     ///
     /// This accepts a bi-directional stream from the connection and reads and parses the request.
-    ///
-    /// The wire format used depends on `S::SPAN_PROPAGATION`:
-    /// - When `true`: expects `(Option<SpanContextCarrier>, Message)` tuple format
-    /// - When `false`: expects plain `Message` format
+    /// When `S::SPAN_PROPAGATION` is true, the propagated carrier (if any) is silently
+    /// discarded. Use [`read_request_raw_with_context`] if you need access to it.
     ///
     /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
     /// Returns None if the remote closed the connection with error code `0`.
@@ -2626,6 +2647,27 @@ pub mod rpc {
     pub async fn read_request_raw<S: Service>(
         connection: &noq::Connection,
     ) -> std::io::Result<Option<(S, noq::RecvStream, noq::SendStream)>> {
+        Ok(read_request_raw_with_context::<S>(connection)
+            .await?
+            .map(|(msg, _carrier, rx, tx)| (msg, rx, tx)))
+    }
+
+    /// Like [`read_request_raw`], but additionally returns the propagated span context carrier.
+    ///
+    /// The carrier is `Some` iff `S::SPAN_PROPAGATION` is true and the remote sent one.
+    /// Pair with [`crate::span_propagation::scope_remote`] (or `scope_remote_sync`) to make
+    /// the context visible to [`crate::span_propagation::set_span_parent_from_remote`] inside
+    /// the handler.
+    pub async fn read_request_raw_with_context<S: Service>(
+        connection: &noq::Connection,
+    ) -> std::io::Result<
+        Option<(
+            S,
+            Option<crate::span_propagation::SpanContextCarrier>,
+            noq::RecvStream,
+            noq::SendStream,
+        )>,
+    > {
         let (send, mut recv) = match connection.accept_bi().await {
             Ok((s, r)) => (s, r),
             Err(ConnectionError::ApplicationClosed(cause))
@@ -2655,25 +2697,17 @@ pub mod rpc {
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
 
-        // Deserialize based on S::SPAN_PROPAGATION
-        let msg: S = if S::SPAN_PROPAGATION {
-            let (span_ctx, msg): (Option<crate::span_propagation::SpanContextCarrier>, S) =
+        let (carrier, msg): (Option<crate::span_propagation::SpanContextCarrier>, S) =
+            if S::SPAN_PROPAGATION {
                 postcard::from_bytes(&buf)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            } else {
+                let msg = postcard::from_bytes(&buf)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                (None, msg)
+            };
 
-            // Store span context in thread-local for use by with_remote_channels
-            if let Some(ctx) = span_ctx {
-                ctx.store_in_thread_local();
-            }
-
-            msg
-        } else {
-            postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        };
-
-        let rx = recv;
-        let tx = send;
-        Ok(Some((msg, rx, tx)))
+        Ok(Some((msg, carrier, recv, send)))
     }
 }
 
