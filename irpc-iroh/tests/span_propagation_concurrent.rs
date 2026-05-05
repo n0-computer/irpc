@@ -16,15 +16,15 @@
 
 use std::sync::Arc;
 
-use iroh::{endpoint::presets, protocol::Router, Endpoint};
-use irpc::{channel::oneshot, rpc::RemoteService, rpc_requests, WithChannels};
+use iroh::{Endpoint, endpoint::presets, protocol::Router};
+use irpc::{WithChannels, channel::oneshot, rpc::RemoteService, rpc_requests};
 use irpc_iroh::IrohProtocol;
 use n0_error::StdResultExt;
 use opentelemetry::trace::TraceId;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use serde::{Deserialize, Serialize};
-use tracing::{info_span, Instrument};
-use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
+use tracing::{Instrument, info_span};
+use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
 
 fn trace_id_for_req(spans: &[SpanData], name: &str, val: i64) -> Option<TraceId> {
     spans

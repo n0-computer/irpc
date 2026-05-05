@@ -24,12 +24,12 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use iroh::{endpoint::presets, protocol::Router, Endpoint};
-use irpc::{channel::oneshot, rpc::RemoteService, rpc_requests, WithChannels};
+use iroh::{Endpoint, endpoint::presets, protocol::Router};
+use irpc::{WithChannels, channel::oneshot, rpc::RemoteService, rpc_requests};
 use irpc_iroh::IrohProtocol;
 use serde::{Deserialize, Serialize};
-use tracing::{info, info_span, Instrument};
-use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
+use tracing::{Instrument, info, info_span};
+use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
 
 #[rpc_requests(message = Message, span_propagation)]
 #[derive(Debug, Serialize, Deserialize)]

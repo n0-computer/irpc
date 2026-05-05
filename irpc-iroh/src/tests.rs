@@ -2,14 +2,14 @@
 mod span_propagation {
     use std::sync::Arc;
 
-    use iroh::{endpoint::presets, protocol::Router, Endpoint};
-    use irpc::{channel::oneshot, rpc::RemoteService, rpc_requests, Service, WithChannels};
+    use iroh::{Endpoint, endpoint::presets, protocol::Router};
+    use irpc::{Service, WithChannels, channel::oneshot, rpc::RemoteService, rpc_requests};
     use n0_error::{Result, StdResultExt};
     use opentelemetry::trace::TraceId;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
     use serde::{Deserialize, Serialize};
-    use tracing::{info, info_span, Instrument};
-    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
+    use tracing::{Instrument, info, info_span};
+    use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
 
     use crate::IrohProtocol;
 
