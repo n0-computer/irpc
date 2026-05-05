@@ -299,10 +299,10 @@ pub async fn handle_connection<S: Service>(
     }
     debug!("connection accepted");
     loop {
-        let Some((msg, rx, tx)) = read_request_raw::<S>(connection).await? else {
+        let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
             return Ok(());
         };
-        handler(msg, rx, tx).await?;
+        irpc::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
     }
 }
 
@@ -312,9 +312,15 @@ pub async fn handle_connection<S: Service>(
 pub async fn read_request<S: RemoteService>(
     connection: &impl IncomingRemoteConnection,
 ) -> std::io::Result<Option<S::Message>> {
-    Ok(read_request_raw::<S>(connection)
-        .await?
-        .map(|(msg, rx, tx)| S::with_remote_channels(msg, rx, tx)))
+    let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        irpc::span_propagation::scope_remote(carrier, async move {
+            S::with_remote_channels(msg, rx, tx)
+        })
+        .await,
+    ))
 }
 
 /// Abstracts over [`Connection`] and [`IncomingZeroRttConnection`].
@@ -365,9 +371,9 @@ impl IncomingRemoteConnection for Connection {
 ///
 /// This accepts a bi-directional stream from the connection and reads and parses the request.
 ///
-/// The wire format used depends on `S::SPAN_PROPAGATION`:
-/// - When `true`: expects `(Option<SpanContextCarrier>, Message)` tuple format
-/// - When `false`: expects plain `Message` format
+/// When `S::SPAN_PROPAGATION` is true, any propagated span context on the wire is
+/// silently dropped. Use [`handle_connection`] (or [`read_request`]) if you need
+/// the propagated context to reach the generated handler spans.
 ///
 /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
 /// Returns None if the remote closed the connection with error code `0`.
@@ -375,6 +381,24 @@ impl IncomingRemoteConnection for Connection {
 pub async fn read_request_raw<S: Service>(
     connection: &impl IncomingRemoteConnection,
 ) -> std::io::Result<Option<(S, RecvStream, SendStream)>> {
+    Ok(read_request_inner::<S>(connection)
+        .await?
+        .map(|(msg, _carrier, rx, tx)| (msg, rx, tx)))
+}
+
+/// Internal: read a request and also return the propagated span context carrier.
+///
+/// The carrier is `Some` iff `S::SPAN_PROPAGATION` is true and the remote sent one.
+async fn read_request_inner<S: Service>(
+    connection: &impl IncomingRemoteConnection,
+) -> std::io::Result<
+    Option<(
+        S,
+        Option<irpc::span_propagation::SpanContextCarrier>,
+        RecvStream,
+        SendStream,
+    )>,
+> {
     let (send, mut recv) = match connection.accept_bi().await {
         Ok((s, r)) => (s, r),
         Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
@@ -402,25 +426,16 @@ pub async fn read_request_raw<S: Service>(
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
 
-    // Deserialize based on S::SPAN_PROPAGATION
-    let msg: S = if S::SPAN_PROPAGATION {
-        let (span_ctx, msg): (Option<irpc::span_propagation::SpanContextCarrier>, S) =
-            postcard::from_bytes(&buf)
+    let (carrier, msg): (Option<irpc::span_propagation::SpanContextCarrier>, S) =
+        if S::SPAN_PROPAGATION {
+            postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        } else {
+            let msg = postcard::from_bytes(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            (None, msg)
+        };
 
-        // Store span context in thread-local for use by with_remote_channels
-        if let Some(ctx) = span_ctx {
-            ctx.store_in_thread_local();
-        }
-
-        msg
-    } else {
-        postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-    };
-
-    let rx = recv;
-    let tx = send;
-    Ok(Some((msg, rx, tx)))
+    Ok(Some((msg, carrier, recv, send)))
 }
 
 /// Utility function to listen for incoming connections and handle them with the provided handler.

@@ -73,6 +73,8 @@ jobs:
         run: cargo check --locked --no-default-features --features spans --bins --tests --examples
       - name: cargo check (irpc, feature rpc)
         run: cargo check --locked --no-default-features --features rpc --bins --tests --examples
+      - name: cargo check (irpc, feature tracing-opentelemetry)
+        run: cargo check --locked --no-default-features --features tracing-opentelemetry --bins --tests --examples
 
   test-release:
     runs-on: ${{ matrix.target.os }}
