@@ -338,9 +338,9 @@ mod sealed {
 #[cfg(feature = "rpc")]
 #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod span_propagation {
+    use std::{collections::HashMap, future::Future};
+
     use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
-    use std::future::Future;
 
     #[cfg(feature = "tracing-opentelemetry")]
     tokio::task_local! {
