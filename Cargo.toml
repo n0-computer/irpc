@@ -105,6 +105,9 @@ members = ["irpc-derive", "irpc-iroh"]
 all-features = true
 rustdoc-args = ["--cfg", "quicrpc_docsrs"]
 
+[package.metadata.release]
+pre-release-hook = ["git", "cliff", "--unreleased", "--tag", "{{version}}", "--prepend", "CHANGELOG.md"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(quicrpc_docsrs)"] }
 
