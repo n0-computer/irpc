@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, SecretKey,
-    endpoint::{AfterHandshakeOutcome, ConnectionInfo, EndpointHooks, presets},
+    endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks, WeakConnectionHandle, presets},
     protocol::Router,
 };
 use ping::EchoApi;
@@ -94,22 +94,26 @@ async fn main() -> Result<()> {
 }
 
 #[derive(Debug, Default, Clone)]
-struct ConnectionStats(Arc<Mutex<HashMap<EndpointId, ConnectionInfo>>>);
+struct ConnectionStats(Arc<Mutex<HashMap<EndpointId, WeakConnectionHandle>>>);
 
 impl ConnectionStats {
     fn rtt(&self, endpoint_id: &EndpointId) -> Option<Duration> {
-        let stats = self.0.lock().expect("poisoned");
-        stats
-            .get(endpoint_id)
-            .and_then(|conn_info| conn_info.selected_path())
-            .and_then(|path| path.rtt())
+        let map = self.0.lock().expect("poisoned");
+        map.get(endpoint_id)
+            .and_then(|handle| handle.upgrade())
+            .and_then(|conn| {
+                conn.paths()
+                    .iter()
+                    .find(|p| p.is_selected())
+                    .map(|p| p.rtt())
+            })
     }
 }
 
 impl EndpointHooks for ConnectionStats {
-    async fn after_handshake<'a>(&'a self, conn: &'a ConnectionInfo) -> AfterHandshakeOutcome {
+    async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
         let mut stats = self.0.lock().expect("lock poisoned");
-        let _ = stats.insert(conn.remote_id(), conn.clone());
+        let _ = stats.insert(conn.remote_id(), conn.weak_handle());
         AfterHandshakeOutcome::Accept
     }
 }
