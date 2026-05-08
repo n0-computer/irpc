@@ -2,6 +2,24 @@
 
 All notable changes to irpc will be documented in this file.
 
+## [0.15.0](https://github.com/n0-computer/irpc/compare/v0.14.0..0.15.0) - 2026-05-08
+
+### 🚜 Refactor
+
+- Remove specialized 0rtt rpc calls ([#92](https://github.com/n0-computer/irpc/issues/92)) - ([1dd579d](https://github.com/n0-computer/irpc/commit/1dd579d92dd772c4a8fb39b5d9f68d0078666221))
+
+### 📚 Documentation
+
+- *(irpc-iroh)* Expand span_propagation example to work with Jaeger ([#100](https://github.com/n0-computer/irpc/issues/100)) - ([910d56e](https://github.com/n0-computer/irpc/commit/910d56e68e8aa601c42591c2f4f75f4499af4fe5))
+- Update license text to match other repos - ([d758de3](https://github.com/n0-computer/irpc/commit/d758de39b4f68873f8a131d3150ffd24f4f55a70))
+
+### ⚙️ Miscellaneous Tasks
+
+- Migrate to rust edition 2024, align formatting with iroh standards ([#90](https://github.com/n0-computer/irpc/issues/90)) - ([56dc5a3](https://github.com/n0-computer/irpc/commit/56dc5a33344d3a73e51fcc5149602dc632bee4c6))
+- Migrate to rust edition 2024, align formatting with iroh standards ([#90](https://github.com/n0-computer/irpc/issues/90)) - ([b109a95](https://github.com/n0-computer/irpc/commit/b109a9510ef20fc7c6590136e090693799063fba))
+- Update to noq 1.0-rc.0 and iroh 1.0-rc.0 ([#99](https://github.com/n0-computer/irpc/issues/99)) - ([b96a6d0](https://github.com/n0-computer/irpc/commit/b96a6d0abe689cc77b3b36885ca763a8a31ead51))
+- Setup changelog generation - ([67aadf1](https://github.com/n0-computer/irpc/commit/67aadf19015839d2b65f2f5082b232e03acd170c))
+
 ## [0.14.0](https://github.com/n0-computer/irpc/compare/v0.13.0..v0.14.0) - 2026-04-20
 
 ### ⛰️  Features
