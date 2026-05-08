@@ -1910,7 +1910,7 @@ pub mod rpc {
     /// (i.e. when using iroh).
     #[doc(hidden)]
     pub use noq;
-    use noq::ConnectionError;
+    use noq::{ConnectionError, PathId};
     use serde::de::DeserializeOwned;
     use smallvec::SmallVec;
     use tracing::{Instrument, debug, error_span, trace, warn};
@@ -2525,10 +2525,12 @@ pub mod rpc {
         connection: noq::Connection,
         handler: Handler<S>,
     ) -> io::Result<()> {
-        tracing::Span::current().record(
-            "remote",
-            tracing::field::display(connection.remote_address()),
-        );
+        let remote = connection
+            .path(PathId::ZERO)
+            .and_then(|p| p.remote_address().ok());
+        if let Some(remote) = remote {
+            tracing::Span::current().record("remote", tracing::field::display(remote));
+        }
         debug!("connection accepted");
         loop {
             let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(&connection).await? else {
