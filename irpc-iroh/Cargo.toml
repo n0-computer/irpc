@@ -39,6 +39,7 @@ tokio = { workspace = true, features = ["full"] }
 n0-tracing-test = "0.3.0"
 opentelemetry = "0.31.0"
 opentelemetry_sdk = { version = "0.31.0", features = ["testing"] }
+opentelemetry-otlp = { version = "0.31.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 tracing-opentelemetry = "0.32.1"
 
 [features]
