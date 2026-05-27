@@ -2,6 +2,12 @@
 
 All notable changes to irpc will be documented in this file.
 
+## [0.16.0](https://github.com/n0-computer/irpc/compare/v0.15.0..0.16.0) - 2026-05-27
+
+### ⛰️  Features
+
+- [**breaking**] Update to iroh@1.0.0-rc.1 ([#101](https://github.com/n0-computer/irpc/issues/101)) - ([eba4551](https://github.com/n0-computer/irpc/commit/eba4551f9078d3cd7290c9a80d1e0ad31364cb79))
+
 ## [0.15.0](https://github.com/n0-computer/irpc/compare/v0.14.0..0.15.0) - 2026-05-08
 
 ### 🚜 Refactor
