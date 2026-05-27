@@ -120,7 +120,7 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.3", default-features = false }
 n0-error = { version = "=1.0.0-rc.0" }
 tracing-subscriber = { version = "0.3.23" }
-iroh = { version = "=1.0.0-rc.0" }
-iroh-base = { version = "=1.0.0-rc.0" }
-noq = { version = "=1.0.0-rc.0", default-features = false }
+iroh = { version = "=1.0.0-rc.1" }
+iroh-base = { version = "=1.0.0-rc.1" }
+noq = { version = "=1.0.0-rc.1", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
