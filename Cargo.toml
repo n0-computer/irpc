@@ -45,8 +45,8 @@ futures-util = { workspace = true, optional = true }
 # for the derive reexport/feature
 irpc-derive = { version = "0.16.0", path = "./irpc-derive", optional = true }
 # for remote span propagation when tracing-opentelemetry feature is enabled
-opentelemetry = { version = "0.31", optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 noq = { workspace = true, optional = true, features = ["runtime-tokio"] }
