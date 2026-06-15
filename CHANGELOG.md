@@ -2,6 +2,12 @@
 
 All notable changes to irpc will be documented in this file.
 
+## [0.17.0](https://github.com/n0-computer/irpc/compare/v0.16.0..0.17.0) - 2026-06-15
+
+### ⛰️  Features
+
+- *(deps)* [**breaking**] Update to iroh 1.0 and noq 1.0 ([#103](https://github.com/n0-computer/irpc/issues/103)) - ([c485bff](https://github.com/n0-computer/irpc/commit/c485bff025b9c37c9da53c5c4229d8749a407362))
+
 ## [0.16.0](https://github.com/n0-computer/irpc/compare/v0.15.0..0.16.0) - 2026-05-27
 
 ### ⛰️  Features
