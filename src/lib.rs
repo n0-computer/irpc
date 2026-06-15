@@ -1323,7 +1323,6 @@ where
             tx: tx.into(),
             rx: rx.into(),
             #[cfg(feature = "spans")]
-            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
             span: tracing::Span::current(),
         }
     }
@@ -1345,7 +1344,6 @@ where
             tx: tx.into(),
             rx: NoReceiver,
             #[cfg(feature = "spans")]
-            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
             span: tracing::Span::current(),
         }
     }
@@ -1364,7 +1362,6 @@ where
             tx: NoSender,
             rx: NoReceiver,
             #[cfg(feature = "spans")]
-            #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
             span: tracing::Span::current(),
         }
     }
