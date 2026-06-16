@@ -1,5 +1,4 @@
 //! Module for cross-process RPC using [`noq`].
-//!
 use std::{
     fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
 };
