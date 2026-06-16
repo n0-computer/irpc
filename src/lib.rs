@@ -151,7 +151,7 @@
 //! framework for any transport with cheap streams such as QUIC. Compared to
 //! quic-rpc, this crate does not abstract over the stream type and is focused
 //! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [noq](https://docs.rs/noq/latest/noq/index.html).
-#![cfg_attr(quicrpc_docsrs, feature(doc_cfg))]
+#![cfg_attr(irpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 
 /// Processes an RPC request enum and generates trait implementations for use with `irpc`.
@@ -301,7 +301,6 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// [`WithChannels<T, Service>`]: WithChannels
 /// [`Channels<S>`]: Channels
 #[cfg(feature = "derive")]
-#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "derive")))]
 pub use irpc_derive::rpc_requests;
 #[cfg(feature = "rpc")]
 use n0_error::AnyError;
@@ -320,7 +319,6 @@ use crate::channel::SendError;
 
 pub mod channel;
 #[cfg(feature = "rpc")]
-#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod span_propagation;
 #[cfg(test)]
 mod tests;
@@ -330,7 +328,6 @@ pub mod rpc {
     pub struct RemoteSender<S>(std::marker::PhantomData<S>);
 }
 #[cfg(feature = "rpc")]
-#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
 pub mod rpc;
 
 mod sealed {
@@ -409,7 +406,6 @@ pub struct WithChannels<I: Channels<S>, S: Service> {
     pub rx: <I as Channels<S>>::Rx,
     /// The current span where the full message was created.
     #[cfg(feature = "spans")]
-    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "spans")))]
     pub span: tracing::Span,
 }
 
@@ -873,10 +869,8 @@ impl<S: Service> Client<S> {
 pub(crate) enum ClientInner<M> {
     Local(crate::channel::mpsc::Sender<M>),
     #[cfg(feature = "rpc")]
-    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     Remote(Box<dyn rpc::RemoteConnection>),
     #[cfg(not(feature = "rpc"))]
-    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     #[allow(dead_code)]
     Remote(PhantomData<M>),
 }
@@ -912,7 +906,6 @@ impl<M> ClientInner<M> {
 pub enum RequestError {
     /// Error in noq during connect
     #[cfg(feature = "rpc")]
-    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     #[error("Error establishing connection")]
     Connect {
         #[error(std_err)]
@@ -920,7 +913,6 @@ pub enum RequestError {
     },
     /// Error in noq when the connection already exists, when opening a stream pair
     #[cfg(feature = "rpc")]
-    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     #[error("Error opening stream")]
     Connection {
         #[error(std_err)]
@@ -928,7 +920,6 @@ pub enum RequestError {
     },
     /// Generic error for non-noq transports
     #[cfg(feature = "rpc")]
-    #[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "rpc")))]
     #[error("Error opening stream")]
     Other { source: AnyError },
 

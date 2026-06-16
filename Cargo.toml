@@ -103,13 +103,17 @@ members = ["irpc-derive", "irpc-iroh"]
 
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "quicrpc_docsrs"]
+rustdoc-args = ["--cfg", "irpc_docsrs"]
 
 [package.metadata.release]
 pre-release-hook = ["git", "cliff", "--unreleased", "--tag", "{{version}}", "--prepend", "CHANGELOG.md"]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(quicrpc_docsrs)"] }
+# Documents which cargo features an API needs. Preview locally with:
+# RUSTDOCFLAGS="--cfg irpc_docsrs" cargo +nightly doc --all-features.
+# We use our own irpc_docsrs rather than the common docsrs so the cfg
+# does not leak into dependencies, some of which fail to build under it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(irpc_docsrs)"] }
 
 [workspace.dependencies]
 anyhow = { version = "1" }
