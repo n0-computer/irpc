@@ -120,7 +120,10 @@ tracing = { version = "0.1.41", default-features = false }
 n0-future = { version = "0.3", default-features = false }
 n0-error = { version = "1" }
 tracing-subscriber = { version = "0.3.23" }
-iroh = { version = "1" }
-iroh-base = { version = "1" }
+# default-features = false to keep `tls-ring` (and the reqwest/portmapper/metrics
+# bloat) out of the build — required for the Xtensa ESP32 target, which uses a
+# pure-Rust crypto provider instead of ring. See server-esp32-spiram-dht22.
+iroh = { version = "1", default-features = false }
+iroh-base = { version = "1", default-features = false }
 noq = { version = "1", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
