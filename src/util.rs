@@ -3,7 +3,6 @@
 //! This module contains utilities to read and write varints, as well as
 //! functions to set up noq endpoints for local rpc and testing.
 #[cfg(feature = "noq_endpoint_setup")]
-#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "noq_endpoint_setup")))]
 mod noq_setup_utils {
     use std::{sync::Arc, time::Duration};
 
@@ -175,14 +174,9 @@ mod noq_setup_utils {
     }
 }
 #[cfg(feature = "noq_endpoint_setup")]
-#[cfg_attr(quicrpc_docsrs, doc(cfg(feature = "noq_endpoint_setup")))]
 pub use noq_setup_utils::*;
 
 #[cfg(any(feature = "rpc", feature = "varint-util"))]
-#[cfg_attr(
-    quicrpc_docsrs,
-    doc(cfg(any(feature = "rpc", feature = "varint-util")))
-)]
 mod varint_util {
     use std::{
         future::Future,
@@ -392,10 +386,6 @@ mod varint_util {
 }
 
 #[cfg(any(feature = "rpc", feature = "varint-util"))]
-#[cfg_attr(
-    quicrpc_docsrs,
-    doc(cfg(any(feature = "rpc", feature = "varint-util")))
-)]
 pub use varint_util::{AsyncReadVarintExt, AsyncWriteVarintExt, WriteVarintExt};
 
 mod fuse_wrapper {
