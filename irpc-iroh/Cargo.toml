@@ -20,7 +20,12 @@ serde = { workspace = true }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 n0-error = { workspace = true }
 n0-future = { workspace = true }
-irpc = { version = "0.17.0", path = ".." }
+# AtomicU64 on 32-bit targets without native 64-bit atomics (Xtensa ESP32), as iroh does.
+portable-atomic = "1"
+# default-features = false drops irpc's `noq_endpoint_setup` (rcgen + noq/rustls-ring,
+# both ring) — test-only cert utilities not needed by the iroh transport. Keep the
+# real RPC features. Required for the ring-free Xtensa ESP32 build.
+irpc = { version = "0.17.0", path = "..", default-features = false, features = ["rpc", "spans", "stream", "derive"] }
 iroh-base.workspace = true
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]

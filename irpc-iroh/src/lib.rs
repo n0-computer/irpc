@@ -1,9 +1,8 @@
-use std::{
-    fmt,
-    future::Future,
-    io,
-    sync::{Arc, atomic::AtomicU64},
-};
+use std::{fmt, future::Future, io, sync::Arc};
+
+// portable-atomic provides AtomicU64 on 32-bit targets (e.g. Xtensa ESP32) that
+// lack native 64-bit atomics, same as iroh itself.
+use portable_atomic::{AtomicU64, Ordering};
 
 use iroh::{
     EndpointId,
@@ -221,7 +220,7 @@ impl<S: Service> ProtocolHandler for IrohProtocol<S> {
         let handler = self.handler.clone();
         let request_id = self
             .request_id
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            .fetch_add(1, Ordering::AcqRel);
         let fut = handle_connection::<S>(&connection, handler).map_err(AcceptError::from_err);
         let span = trace_span!("rpc", id = request_id);
         fut.instrument(span).await
@@ -269,7 +268,7 @@ impl<S: Service> ProtocolHandler for Iroh0RttProtocol<S> {
         let handler = self.handler.clone();
         let request_id = self
             .request_id
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            .fetch_add(1, Ordering::AcqRel);
         handle_connection::<S>(&zrtt_conn, handler)
             .map_err(AcceptError::from_err)
             .instrument(trace_span!("rpc", id = request_id))
