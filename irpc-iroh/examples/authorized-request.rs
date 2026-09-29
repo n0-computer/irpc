@@ -144,13 +144,6 @@ mod kv {
         ReadWrite,
     }
 
-    impl Access {
-        /// Returns `true` if holding this covers everything `needed` allows.
-        fn covers(self, needed: Access) -> bool {
-            self == needed || self == Self::ReadWrite
-        }
-    }
-
     /// What a delegation grants: an access over a key prefix. A real one
     /// would carry more verbs, several ranges, expiry, and a delegation chain.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,7 +160,8 @@ mod kv {
 
         /// Returns `true` if `self` grants the permissions described by `other`.
         fn permits(&self, other: &Cap) -> bool {
-            other.prefix.starts_with(&self.prefix) && self.access.covers(other.access)
+            other.prefix.starts_with(&self.prefix)
+                && (self.access == other.access || self.access == Access::ReadWrite)
         }
     }
 
@@ -256,13 +250,6 @@ mod kv {
     #[derive(Debug, Serialize, Deserialize)]
     pub struct Authenticate(Delegation);
 
-    /// Result of an [`Authenticate`].
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-    pub enum AuthenticateResponse {
-        Accepted(CapId),
-        Refused(InvocationError),
-    }
-
     /// Names a verified capability, on the connection that presented it.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     pub struct CapId(u64);
@@ -341,7 +328,7 @@ mod kv {
     #[derive(Debug, Serialize, Deserialize)]
     enum KvProtocol {
         /// Presents a delegation, which the server verifies once and caches.
-        #[rpc(tx = oneshot::Sender<AuthenticateResponse>)]
+        #[rpc(tx = oneshot::Sender<Result<CapId, ServerError>>)]
         Authenticate(Authenticate),
         #[rpc(tx = oneshot::Sender<Result<String, ServerError>>)]
         Get(Authorized<Get>),
@@ -418,10 +405,11 @@ mod kv {
                 // The one request that authorizes itself.
                 KvMessage::Authenticate(msg) => {
                     let WithChannels { inner, tx, .. } = msg;
-                    let res = match inner.0.check_invocation_from(&self.principal, remote) {
-                        Ok(cap) => AuthenticateResponse::Accepted(caps.insert(cap.clone())),
-                        Err(refusal) => AuthenticateResponse::Refused(refusal),
-                    };
+                    let res = inner
+                        .0
+                        .check_invocation_from(&self.principal, remote)
+                        .map(|cap| caps.insert(cap.clone()))
+                        .map_err(ServerError::from);
                     tx.send(res).await.ok();
                 }
                 KvMessage::Get(msg) => {
@@ -483,10 +471,8 @@ mod kv {
             let conn =
                 IrohLazyRemoteConnection::new(endpoint, addr.into(), KvServer::ALPN.to_vec());
             let inner = Client::boxed(conn);
-            match inner.rpc(Authenticate(delegation)).await? {
-                AuthenticateResponse::Accepted(cap) => Ok(Self { inner, cap }),
-                AuthenticateResponse::Refused(refusal) => Err(ServerError::from(refusal).into()),
-            }
+            let cap = inner.rpc(Authenticate(delegation)).await??;
+            Ok(Self { inner, cap })
         }
 
         pub async fn get(&self, key: &str) -> Result<String, Error> {
