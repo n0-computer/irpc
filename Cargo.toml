@@ -49,7 +49,6 @@ opentelemetry = { version = "0.32", optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
 # used for the iroh transport
 iroh = { workspace = true, optional = true }
-iroh-base = { workspace = true, optional = true }
 portable-atomic = { version = "1", optional = true }
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
@@ -90,8 +89,8 @@ tracing-opentelemetry = "0.33"
 # enable the remote transport
 rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:tracing", "tokio/io-util"]
 # enable the iroh transport
-iroh = ["rpc", "dep:iroh", "dep:iroh-base", "dep:portable-atomic", "dep:getrandom"]
-# add test utilities
+iroh = ["rpc", "dep:iroh", "dep:portable-atomic", "dep:getrandom"]
+# add helpers to create noq endpoints, for tests and for rpc on localhost
 noq_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:futures-buffered", "noq/rustls-ring"]
 # pick up parent span when creating channel messages
 spans = ["dep:tracing"]
@@ -100,7 +99,7 @@ derive = ["dep:irpc-derive"]
 varint-util = ["dep:postcard", "dep:smallvec", "tokio/io-util"]
 # enable OpenTelemetry span context propagation across remote connections
 tracing-opentelemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry", "rpc"]
-default = ["rpc", "iroh", "noq_endpoint_setup", "spans", "stream", "derive"]
+default = ["rpc", "iroh", "spans", "stream", "derive"]
 
 [[example]]
 name = "derive"
@@ -186,7 +185,6 @@ n0-future = { version = "0.3", default-features = false }
 n0-error = { version = "1" }
 tracing-subscriber = { version = "0.3.23" }
 iroh = { version = "1", default-features = false }
-iroh-base = { version = "1", default-features = false }
 noq = { version = "1", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
 

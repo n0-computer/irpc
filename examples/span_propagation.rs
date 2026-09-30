@@ -204,7 +204,7 @@ async fn client(otlp_endpoint: &str, endpoint_id: EndpointId, count: u32) -> Res
     let client_ep = Endpoint::bind(presets::N0).await?;
     let provider = init_tracing("example-client", client_ep.id(), otlp_endpoint)?;
     for req_id in 0..count {
-        let client = irpc::iroh::client::<Proto>(client_ep.clone(), endpoint_id, ALPN);
+        let client = irpc::Client::<Proto>::iroh(client_ep.clone(), endpoint_id, ALPN);
         let payload = format!("hello-{req_id}");
         async {
             info!(%payload, "sending request");

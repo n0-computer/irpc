@@ -126,7 +126,8 @@ mod kv {
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
-        iroh::{IrohLazyRemoteConnection, read_request},
+        iroh::IrohLazyRemoteConnection,
+        rpc::read_request,
         rpc_requests,
     };
     use n0_error::stack_error;

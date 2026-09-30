@@ -239,7 +239,7 @@ mod ping {
     use irpc::{
         Client, WithChannels,
         channel::oneshot,
-        iroh::{Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection, IrohZrttRemoteConnection},
+        iroh::{Iroh0RttProtocol, IrohProtocol},
         rpc::RemoteService,
         rpc_requests,
     };
@@ -290,7 +290,7 @@ mod ping {
                 .await
                 .context("failed to connect to remote service")?;
             Ok(EchoApi {
-                inner: Client::boxed(IrohRemoteConnection::new(conn)),
+                inner: Client::boxed(conn),
             })
         }
 
@@ -306,14 +306,14 @@ mod ping {
                 Ok(conn) => {
                     info!("0-RTT possible from our side");
                     Ok(EchoApi {
-                        inner: Client::boxed(IrohZrttRemoteConnection::new(conn)),
+                        inner: Client::boxed(conn),
                     })
                 }
                 Err(connecting) => {
                     info!("0-RTT not possible from our side");
                     let conn = connecting.await?;
                     Ok(EchoApi {
-                        inner: Client::boxed(IrohRemoteConnection::new(conn)),
+                        inner: Client::boxed(conn),
                     })
                 }
             }

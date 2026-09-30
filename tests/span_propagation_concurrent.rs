@@ -17,7 +17,13 @@
 use std::sync::Arc;
 
 use iroh::{Endpoint, endpoint::presets, protocol::Router};
-use irpc::{WithChannels, channel::oneshot, iroh::IrohProtocol, rpc::RemoteService, rpc_requests};
+use irpc::{
+    Client, WithChannels,
+    channel::oneshot,
+    iroh::{IrohLazyRemoteConnection, IrohProtocol},
+    rpc::RemoteService,
+    rpc_requests,
+};
 use n0_error::StdResultExt;
 use opentelemetry::trace::TraceId;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
@@ -95,7 +101,11 @@ async fn span_propagation_concurrent() -> n0_error::Result<()> {
     const N: i64 = 32;
     let mut handles = Vec::with_capacity(N as usize);
     for req_id in 0..N {
-        let client = irpc::iroh::client::<Proto>(client_ep.clone(), server_addr.clone(), ALPN);
+        let client = Client::<Proto>::boxed(IrohLazyRemoteConnection::new(
+            client_ep.clone(),
+            server_addr.clone(),
+            ALPN.to_vec(),
+        ));
         let payload = format!("req-{req_id}");
         let expected = payload.to_uppercase();
         let h = tokio::spawn(

@@ -79,7 +79,7 @@ mod proto {
     pub async fn connect(endpoint_id: EndpointId) -> Result<Client<FooProtocol>> {
         println!("connecting to {endpoint_id}");
         let endpoint = Endpoint::bind(presets::N0).await?;
-        let client = irpc::iroh::client(endpoint, endpoint_id, ALPN);
+        let client = irpc::Client::iroh(endpoint, endpoint_id, ALPN);
         Ok(client)
     }
 }

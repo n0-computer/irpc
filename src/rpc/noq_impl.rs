@@ -1,19 +1,13 @@
 //! RPC over [`noq`] connections, with dial by socket address.
-use std::{io, sync::Arc};
+use std::sync::Arc;
 
-use n0_error::e;
 use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
-use noq::{ConnectionError, PathId};
-use tracing::{Instrument, debug, error_span, trace, warn};
+use noq::{ConnectionError, PathId, RecvStream, SendStream, VarInt};
+use tracing::{Instrument, debug, error_span, warn};
 
 use crate::{
     RequestError, Service,
-    channel::mpsc,
-    rpc::{
-        ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, Handler, MAX_MESSAGE_SIZE, RemoteConnection,
-        RemoteService,
-    },
-    util::AsyncReadVarintExt,
+    rpc::{Handler, IncomingRemoteConnection, RemoteConnection, handle_connection},
 };
 
 /// A connection to a remote service.
@@ -127,7 +121,7 @@ pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: Handler<S>) {
         let handler = handler.clone();
         let fut = async move {
             match incoming.await {
-                Ok(connection) => match handle_connection(connection, handler).await {
+                Ok(connection) => match handle_connection(&connection, handler).await {
                     Err(err) => warn!("connection closed with error: {err:?}"),
                     Ok(()) => debug!("connection closed"),
                 },
@@ -142,115 +136,19 @@ pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: Handler<S>) {
     }
 }
 
-/// Handles a quic connection with the provided `handler`.
-///
-/// This function handles requests for a service `S`. The wire format used depends on
-/// `S::SPAN_PROPAGATION` - if true, span context is expected in the wire format.
-pub async fn handle_connection<S: Service>(
-    connection: noq::Connection,
-    handler: Handler<S>,
-) -> io::Result<()> {
-    let remote = connection
-        .path(PathId::ZERO)
-        .and_then(|p| p.remote_address().ok());
-    if let Some(remote) = remote {
-        tracing::Span::current().record("remote", tracing::field::display(remote));
+impl IncomingRemoteConnection for noq::Connection {
+    async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
+        self.accept_bi().await
     }
-    debug!("connection accepted");
-    loop {
-        let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(&connection).await? else {
-            return Ok(());
-        };
-        crate::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
+
+    fn close(&self, error_code: VarInt, reason: &[u8]) {
+        self.close(error_code, reason)
     }
-}
 
-/// Reads a request from a connection and converts it to a message enum.
-///
-/// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
-pub async fn read_request<S: RemoteService>(
-    connection: &noq::Connection,
-) -> std::io::Result<Option<S::Message>> {
-    let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
-        return Ok(None);
-    };
-    Ok(Some(
-        crate::span_propagation::scope_remote(carrier, async move {
-            S::with_remote_channels(msg, rx, tx)
-        })
-        .await,
-    ))
-}
-
-/// Reads a single request from the connection.
-///
-/// This accepts a bi-directional stream from the connection and reads and parses the request.
-///
-/// When `S::SPAN_PROPAGATION` is true, any propagated span context on the wire is
-/// silently dropped. Use [`handle_connection`] (or [`read_request`]) if you need
-/// the propagated context to reach the generated handler spans.
-///
-/// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
-/// Returns None if the remote closed the connection with error code `0`.
-/// Returns an error for all other failure cases.
-pub async fn read_request_raw<S: Service>(
-    connection: &noq::Connection,
-) -> std::io::Result<Option<(S, noq::RecvStream, noq::SendStream)>> {
-    Ok(read_request_inner::<S>(connection)
-        .await?
-        .map(|(msg, _carrier, rx, tx)| (msg, rx, tx)))
-}
-
-/// Internal: read a request and also return the propagated span context carrier.
-///
-/// The carrier is `Some` iff `S::SPAN_PROPAGATION` is true and the remote sent one.
-async fn read_request_inner<S: Service>(
-    connection: &noq::Connection,
-) -> std::io::Result<
-    Option<(
-        S,
-        Option<crate::span_propagation::SpanContextCarrier>,
-        noq::RecvStream,
-        noq::SendStream,
-    )>,
-> {
-    let (send, mut recv) = match connection.accept_bi().await {
-        Ok((s, r)) => (s, r),
-        Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
-            trace!("remote side closed connection {cause:?}");
-            return Ok(None);
-        }
-        Err(cause) => {
-            warn!("failed to accept bi stream {cause:?}");
-            return Err(cause.into());
-        }
-    };
-    let size = recv
-        .read_varint_u64()
-        .await?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
-    if size > MAX_MESSAGE_SIZE {
-        connection.close(
-            ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
-            b"request exceeded max message size",
-        );
-        return Err(e!(mpsc::RecvError::MaxMessageSizeExceeded).into());
+    fn remote_label(&self) -> Option<String> {
+        let remote = self.path(PathId::ZERO)?.remote_address().ok()?;
+        Some(remote.to_string())
     }
-    let mut buf = vec![0; size as usize];
-    recv.read_exact(&mut buf)
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-
-    let (carrier, msg): (Option<crate::span_propagation::SpanContextCarrier>, S) =
-        if S::SPAN_PROPAGATION {
-            postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        } else {
-            let msg = postcard::from_bytes(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            (None, msg)
-        };
-
-    Ok(Some((msg, carrier, recv, send)))
 }
 
 #[cfg(feature = "noq_endpoint_setup")]

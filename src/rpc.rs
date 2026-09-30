@@ -1,12 +1,18 @@
-//! Module for cross-process RPC using [`noq`].
+//! Module for cross-process RPC.
+//!
+//! The code in this module works with all connections that use [`noq`]
+//! streams. The [`crate::noq`] module has the transport with dial by socket
+//! address. The [`crate::iroh`] module has the transport with dial by endpoint id.
 use std::{
     fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
 };
 
 use n0_error::{e, stack_error};
 use n0_future::future::Boxed as BoxFuture;
+use noq::{ConnectionError, VarInt};
 use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
+use tracing::{debug, trace, warn};
 
 #[cfg(feature = "iroh")]
 pub(crate) mod iroh_impl;
@@ -98,9 +104,6 @@ impl From<noq::WriteError> for SendError {
 /// can have different connection implementations for normal noq connections,
 /// iroh connections, and possibly noq connections with disabled encryption
 /// for performance.
-///
-/// This is done as a trait instead of an enum, so we don't need an iroh
-/// dependency in the main crate.
 pub trait RemoteConnection: Send + Sync + Debug + 'static {
     /// Boxed clone so the trait is dynable.
     fn clone_boxed(&self) -> Box<dyn RemoteConnection>;
@@ -476,4 +479,133 @@ pub trait RemoteService: Service + Sized {
             })
         })
     }
+}
+
+/// Abstracts over the connections that a server can read requests from.
+///
+/// This is implemented for noq connections, and for iroh connections with and
+/// without 0-RTT. You don't need to implement this trait yourself. It is used by
+/// [`read_request`] and [`handle_connection`] to work with all of these.
+pub trait IncomingRemoteConnection {
+    /// Accepts a single bidirectional stream.
+    fn accept_bi(
+        &self,
+    ) -> impl Future<Output = Result<(noq::SendStream, noq::RecvStream), ConnectionError>> + Send;
+
+    /// Closes the connection.
+    fn close(&self, error_code: VarInt, reason: &[u8]);
+
+    /// Returns a label for the remote side, for use in tracing spans.
+    ///
+    /// Returns `None` if the remote is not known yet, which can happen for
+    /// 0-RTT connections.
+    fn remote_label(&self) -> Option<String>;
+}
+
+/// Handles a single connection with the provided `handler`.
+///
+/// This function handles requests for a service `S`. The wire format used depends on
+/// `S::SPAN_PROPAGATION` - if true, span context is expected in the wire format.
+pub async fn handle_connection<S: Service>(
+    connection: &impl IncomingRemoteConnection,
+    handler: Handler<S>,
+) -> io::Result<()> {
+    if let Some(remote) = connection.remote_label() {
+        tracing::Span::current().record("remote", tracing::field::display(remote));
+    }
+    debug!("connection accepted");
+    loop {
+        let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
+            return Ok(());
+        };
+        crate::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
+    }
+}
+
+/// Reads a request from a connection and converts it to a message enum.
+///
+/// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
+pub async fn read_request<S: RemoteService>(
+    connection: &impl IncomingRemoteConnection,
+) -> std::io::Result<Option<S::Message>> {
+    let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        crate::span_propagation::scope_remote(carrier, async move {
+            S::with_remote_channels(msg, rx, tx)
+        })
+        .await,
+    ))
+}
+
+/// Reads a single request from the connection.
+///
+/// This accepts a bi-directional stream from the connection and reads and parses the request.
+///
+/// When `S::SPAN_PROPAGATION` is true, any propagated span context on the wire is
+/// silently dropped. Use [`handle_connection`] (or [`read_request`]) if you need
+/// the propagated context to reach the generated handler spans.
+///
+/// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
+/// Returns None if the remote closed the connection with error code `0`.
+/// Returns an error for all other failure cases.
+pub async fn read_request_raw<S: Service>(
+    connection: &impl IncomingRemoteConnection,
+) -> std::io::Result<Option<(S, noq::RecvStream, noq::SendStream)>> {
+    Ok(read_request_inner::<S>(connection)
+        .await?
+        .map(|(msg, _carrier, rx, tx)| (msg, rx, tx)))
+}
+
+/// Internal: read a request and also return the propagated span context carrier.
+///
+/// The carrier is `Some` iff `S::SPAN_PROPAGATION` is true and the remote sent one.
+async fn read_request_inner<S: Service>(
+    connection: &impl IncomingRemoteConnection,
+) -> std::io::Result<
+    Option<(
+        S,
+        Option<crate::span_propagation::SpanContextCarrier>,
+        noq::RecvStream,
+        noq::SendStream,
+    )>,
+> {
+    let (send, mut recv) = match connection.accept_bi().await {
+        Ok((s, r)) => (s, r),
+        Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
+            trace!("remote side closed connection {cause:?}");
+            return Ok(None);
+        }
+        Err(cause) => {
+            warn!("failed to accept bi stream {cause:?}");
+            return Err(cause.into());
+        }
+    };
+    let size = recv
+        .read_varint_u64()
+        .await?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
+    if size > MAX_MESSAGE_SIZE {
+        connection.close(
+            ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
+            b"request exceeded max message size",
+        );
+        return Err(e!(mpsc::RecvError::MaxMessageSizeExceeded).into());
+    }
+    let mut buf = vec![0; size as usize];
+    recv.read_exact(&mut buf)
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
+
+    let (carrier, msg): (Option<crate::span_propagation::SpanContextCarrier>, S) =
+        if S::SPAN_PROPAGATION {
+            postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        } else {
+            let msg = postcard::from_bytes(&buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            (None, msg)
+        };
+
+    Ok(Some((msg, carrier, recv, send)))
 }

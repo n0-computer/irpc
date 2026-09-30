@@ -1537,7 +1537,6 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "iroh",
- "iroh-base",
  "irpc-derive",
  "lazy_static",
  "n0-error",

@@ -58,13 +58,13 @@ mod storage {
         endpoint::Connection,
         protocol::{AcceptError, ProtocolHandler},
     };
-    // Import the macro
-    use irpc::iroh::{IrohLazyRemoteConnection, IrohRemoteConnection, read_request};
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
         rpc_requests,
     };
+    // Import the macro
+    use irpc::{iroh::IrohLazyRemoteConnection, rpc::read_request};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
@@ -189,7 +189,7 @@ mod storage {
         /// not reconnect and all calls will return errors.
         pub fn from_connection(conn: Connection) -> StorageClient {
             StorageClient {
-                inner: Client::boxed(IrohRemoteConnection::new(conn)),
+                inner: Client::boxed(conn),
             }
         }
 

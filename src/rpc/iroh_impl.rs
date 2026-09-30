@@ -1,11 +1,10 @@
-use std::{fmt, future::Future, io, sync::Arc};
+//! RPC over [`iroh`] connections, with dial by endpoint id.
+use std::{fmt, sync::Arc};
 
 use iroh::{
-    EndpointId,
     endpoint::{
         Accepting, Connection, ConnectionError, IncomingZeroRttConnection,
-        OutgoingZeroRttConnection, RecvStream, RemoteEndpointIdError, SendStream, VarInt,
-        ZeroRttStatus,
+        OutgoingZeroRttConnection, RecvStream, SendStream, VarInt, ZeroRttStatus,
     },
     protocol::{AcceptError, ProtocolHandler},
 };
@@ -14,53 +13,20 @@ use n0_future::{TryFutureExt, future::Boxed as BoxFuture};
 // portable-atomic provides AtomicU64 on 32-bit targets (e.g. Xtensa ESP32) that
 // lack native 64-bit atomics, same as iroh itself.
 use portable_atomic::{AtomicU64, Ordering};
-use tracing::{Instrument, debug, error_span, trace, trace_span, warn};
+use tracing::{Instrument, debug, error_span, trace_span, warn};
 
 use crate::{
     LocalSender, RequestError, Service,
-    channel::oneshot,
-    rpc::{
-        ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, Handler, MAX_MESSAGE_SIZE, RemoteConnection,
-        RemoteService,
-    },
-    util::AsyncReadVarintExt,
+    rpc::{Handler, IncomingRemoteConnection, RemoteConnection, RemoteService, handle_connection},
 };
 
-/// Returns a client that connects to a irpc service using an [`iroh::Endpoint`].
-pub fn client<S: crate::Service>(
-    endpoint: iroh::Endpoint,
-    addr: impl Into<iroh::EndpointAddr>,
-    alpn: impl AsRef<[u8]>,
-) -> crate::Client<S> {
-    let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), alpn.as_ref().to_vec());
-    crate::Client::boxed(conn)
-}
-
-/// Wrap an existing iroh connection as an irpc remote connection.
-///
-/// This will stop working as soon as the underlying iroh connection is closed.
-/// If you need to support reconnects, use [`IrohLazyRemoteConnection`] instead.
-// TODO: remove this and provide a From instance as soon as iroh is 1.0 and
-// we can move irpc-iroh into irpc?
-#[derive(Debug, Clone)]
-pub struct IrohRemoteConnection(Connection);
-
-impl IrohRemoteConnection {
-    pub fn new(connection: Connection) -> Self {
-        Self(connection)
-    }
-}
-
-impl crate::rpc::RemoteConnection for IrohRemoteConnection {
-    fn clone_boxed(&self) -> Box<dyn crate::rpc::RemoteConnection> {
+impl RemoteConnection for Connection {
+    fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
         Box::new(self.clone())
     }
 
-    fn open_bi(
-        &self,
-    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), crate::RequestError>>
-    {
-        let conn = self.0.clone();
+    fn open_bi(&self) -> BoxFuture<std::result::Result<(SendStream, RecvStream), RequestError>> {
+        let conn = self.clone();
         Box::pin(async move {
             let (send, recv) = conn.open_bi().await?;
             Ok((send, recv))
@@ -72,25 +38,13 @@ impl crate::rpc::RemoteConnection for IrohRemoteConnection {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct IrohZrttRemoteConnection(OutgoingZeroRttConnection);
-
-impl IrohZrttRemoteConnection {
-    pub fn new(connection: OutgoingZeroRttConnection) -> Self {
-        Self(connection)
-    }
-}
-
-impl crate::rpc::RemoteConnection for IrohZrttRemoteConnection {
-    fn clone_boxed(&self) -> Box<dyn crate::rpc::RemoteConnection> {
+impl RemoteConnection for OutgoingZeroRttConnection {
+    fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
         Box::new(self.clone())
     }
 
-    fn open_bi(
-        &self,
-    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), crate::RequestError>>
-    {
-        let conn = self.0.clone();
+    fn open_bi(&self) -> BoxFuture<std::result::Result<(SendStream, RecvStream), RequestError>> {
+        let conn = self.clone();
         Box::pin(async move {
             let (send, recv) = conn.open_bi().await?;
             Ok((send, recv))
@@ -98,7 +52,7 @@ impl crate::rpc::RemoteConnection for IrohZrttRemoteConnection {
     }
 
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
-        let conn = self.0.clone();
+        let conn = self.clone();
         Box::pin(async move {
             match conn.handshake_completed().await {
                 Err(_) => true,
@@ -282,60 +236,6 @@ impl<S: Service> ProtocolHandler for Iroh0RttProtocol<S> {
     }
 }
 
-/// Handles a single iroh connection with the provided `handler`.
-///
-/// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
-pub async fn handle_connection<S: Service>(
-    connection: &impl IncomingRemoteConnection,
-    handler: Handler<S>,
-) -> io::Result<()> {
-    if let Ok(remote) = connection.remote_id() {
-        tracing::Span::current().record("remote", tracing::field::display(remote.fmt_short()));
-    }
-    debug!("connection accepted");
-    loop {
-        let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
-            return Ok(());
-        };
-        crate::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
-    }
-}
-
-/// Reads a request from a connection and converts it to a message enum.
-///
-/// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
-pub async fn read_request<S: RemoteService>(
-    connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<Option<S::Message>> {
-    let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
-        return Ok(None);
-    };
-    Ok(Some(
-        crate::span_propagation::scope_remote(carrier, async move {
-            S::with_remote_channels(msg, rx, tx)
-        })
-        .await,
-    ))
-}
-
-/// Abstracts over [`Connection`] and [`IncomingZeroRttConnection`].
-///
-/// You don't need to implement this trait yourself. It is used by [`read_request`] and
-/// [`handle_connection`] to work with both fully authenticated connections and with
-/// 0-RTT connections.
-pub trait IncomingRemoteConnection {
-    /// Accepts a single bidirectional stream.
-    fn accept_bi(
-        &self,
-    ) -> impl Future<Output = Result<(SendStream, RecvStream), ConnectionError>> + Send;
-    /// Close the connection.
-    fn close(&self, error_code: VarInt, reason: &[u8]);
-    /// Returns the remote's endpoint id.
-    ///
-    /// This may only fail for 0-RTT connections.
-    fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError>;
-}
-
 impl IncomingRemoteConnection for IncomingZeroRttConnection {
     async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
         self.accept_bi().await
@@ -344,8 +244,10 @@ impl IncomingRemoteConnection for IncomingZeroRttConnection {
     fn close(&self, error_code: VarInt, reason: &[u8]) {
         self.close(error_code, reason)
     }
-    fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError> {
-        self.remote_id()
+
+    fn remote_label(&self) -> Option<String> {
+        let remote = self.remote_id().ok()?;
+        Some(remote.fmt_short().to_string())
     }
 }
 
@@ -357,80 +259,10 @@ impl IncomingRemoteConnection for Connection {
     fn close(&self, error_code: VarInt, reason: &[u8]) {
         self.close(error_code, reason)
     }
-    fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError> {
-        Ok(self.remote_id())
+
+    fn remote_label(&self) -> Option<String> {
+        Some(self.remote_id().fmt_short().to_string())
     }
-}
-
-/// Reads a single request from the connection.
-///
-/// This accepts a bi-directional stream from the connection and reads and parses the request.
-///
-/// When `S::SPAN_PROPAGATION` is true, any propagated span context on the wire is
-/// silently dropped. Use [`handle_connection`] (or [`read_request`]) if you need
-/// the propagated context to reach the generated handler spans.
-///
-/// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
-/// Returns None if the remote closed the connection with error code `0`.
-/// Returns an error for all other failure cases.
-pub async fn read_request_raw<S: Service>(
-    connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<Option<(S, RecvStream, SendStream)>> {
-    Ok(read_request_inner::<S>(connection)
-        .await?
-        .map(|(msg, _carrier, rx, tx)| (msg, rx, tx)))
-}
-
-/// Internal: read a request and also return the propagated span context carrier.
-///
-/// The carrier is `Some` iff `S::SPAN_PROPAGATION` is true and the remote sent one.
-async fn read_request_inner<S: Service>(
-    connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<
-    Option<(
-        S,
-        Option<crate::span_propagation::SpanContextCarrier>,
-        RecvStream,
-        SendStream,
-    )>,
-> {
-    let (send, mut recv) = match connection.accept_bi().await {
-        Ok((s, r)) => (s, r),
-        Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
-            trace!("remote side closed connection {cause:?}");
-            return Ok(None);
-        }
-        Err(cause) => {
-            warn!("failed to accept bi stream {cause:?}");
-            return Err(cause.into());
-        }
-    };
-    let size = recv
-        .read_varint_u64()
-        .await?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
-    if size > MAX_MESSAGE_SIZE {
-        connection.close(
-            ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
-            b"request exceeded max message size",
-        );
-        return Err(e!(oneshot::RecvError::MaxMessageSizeExceeded).into());
-    }
-    let mut buf = vec![0; size as usize];
-    recv.read_exact(&mut buf)
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-
-    let (carrier, msg): (Option<crate::span_propagation::SpanContextCarrier>, S) =
-        if S::SPAN_PROPAGATION {
-            postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        } else {
-            let msg = postcard::from_bytes(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            (None, msg)
-        };
-
-    Ok(Some((msg, carrier, recv, send)))
 }
 
 /// Utility function to listen for incoming connections and handle them with the provided handler.

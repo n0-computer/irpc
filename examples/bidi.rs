@@ -13,7 +13,7 @@
 //!   check liveness.
 //!
 //! The trick is that each peer holds *both* an [`irpc::Client`] (to open streams and send its own
-//! requests) *and* a [`irpc::iroh::read_request`] loop (to accept and answer the other peer's
+//! requests) *and* a [`irpc::rpc::read_request`] loop (to accept and answer the other peer's
 //! requests). Both are built from the same [`iroh::endpoint::Connection`]. Because `accept_bi`
 //! only ever yields streams opened by the *remote* side, the two directions never collide: the
 //! listener's accept loop only sees `ClientToServer` streams, the connector's accept loop only
@@ -47,12 +47,7 @@ mod proto {
         endpoint::{Connection, presets},
         protocol::{AcceptError, ProtocolHandler, Router},
     };
-    use irpc::{
-        Client, WithChannels,
-        channel::oneshot,
-        iroh::{IrohRemoteConnection, read_request},
-        rpc_requests,
-    };
+    use irpc::{Client, WithChannels, channel::oneshot, rpc::read_request, rpc_requests};
     use serde::{Deserialize, Serialize};
     use tokio::time::Instant;
 
@@ -139,7 +134,7 @@ mod proto {
             // Build a client on top of the incoming connection and register it under the peer's id.
             // The ping loop opens `ServerToClient` streams through this, in the reverse direction
             // to the `ClientToServer` streams we accept below.
-            let client = Client::boxed(IrohRemoteConnection::new(conn.clone()));
+            let client = Client::boxed(conn.clone());
             self.clients
                 .lock()
                 .unwrap()
@@ -223,7 +218,7 @@ mod proto {
         let endpoint = Endpoint::bind(presets::N0).await?;
         let conn = endpoint.connect(endpoint_id, ALPN).await?;
         // The outgoing client with which we send `ClientToServerRequests` to the peer.
-        let client = Client::boxed(IrohRemoteConnection::new(conn.clone()));
+        let client = Client::boxed(conn.clone());
         // Spawn a task that reads `ServerToClient` requests from the peer, on the same connection we
         // use for outgoing requests. The task terminates once the connection closes.
         tokio::spawn(async move {
