@@ -13,7 +13,7 @@ description = "A streaming rpc system based on quic"
 rust-version = "1.91"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
 # we require serde even in non-rpc mode
@@ -128,3 +128,37 @@ iroh = { version = "1", default-features = false }
 iroh-base = { version = "1", default-features = false }
 noq = { version = "1", default-features = false }
 futures-util = { version = "0.3", features = ["sink"] }
+
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+    # workspace crates
+    "irpc_derive::rpc_requests",
+
+    # 1.0 crates
+    "iroh::*",
+    "iroh_base::*",
+    "n0_error::*",
+    "noq::*",
+    "noq_proto::*",
+    "postcard::error::Error",
+    "serde_core::*",
+    "tokio::io::async_read::AsyncRead",
+    "tokio::io::async_write::AsyncWrite",
+    "tokio::sync::mpsc::bounded::Receiver",
+    "tokio::sync::mpsc::bounded::Sender",
+    "tokio::sync::oneshot::Receiver",
+    "tokio::sync::oneshot::Sender",
+    "tracing::span::Span",
+
+    # stable-ish non-1.0 crates that we accept in the public API
+    "futures_core::stream::Stream",
+    "futures_lite::future::Boxed",
+    "futures_sink::Sink",
+
+    # only under the tracing-opentelemtry feature
+    # TODO: it would be preferable to find a way to not have this in the public API for 1.0
+    # because otherwise we can't update the opentelemetry version
+    "opentelemetry::context::Context",
+    "opentelemetry::propagation::Extractor",
+    "opentelemetry::propagation::Injector",
+]

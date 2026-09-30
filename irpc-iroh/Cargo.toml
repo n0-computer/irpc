@@ -10,7 +10,7 @@ repository = "https://github.com/n0-computer/irpc"
 description = "Iroh transport for irpc"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
 iroh = { workspace = true }
@@ -48,3 +48,16 @@ tracing-opentelemetry = "0.33"
 [features]
 default = []
 tracing-opentelemetry = ["irpc/tracing-opentelemetry"]
+
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+    # workspace crates
+    "irpc::*",
+
+    # 1.0 crates
+    "iroh::*",
+    "iroh_base::*",
+    "n0_error::*",
+    "noq::*",
+    "noq_proto::*",
+]
