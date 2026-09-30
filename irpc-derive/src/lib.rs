@@ -88,7 +88,13 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                     vis,
                 );
                 wrapper_types.extend(quote! {
-                    #[derive(::std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize, #(#derive),* )]
+                    #[derive(
+                        ::std::fmt::Debug,
+                        ::irpc::__macro_exports::serde::Serialize,
+                        ::irpc::__macro_exports::serde::Deserialize,
+                        #(#derive),*
+                    )]
+                    #[serde(crate = "::irpc::__macro_exports::serde")]
                     #struc
                 });
                 variant.fields = single_unnamed_field(ty.clone());
@@ -221,11 +227,11 @@ fn generate_parent_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> Tok
     quote! {
         impl #enum_name {
             /// Get the parent span of the message
-            pub fn parent_span(&self) -> ::tracing::Span {
+            pub fn parent_span(&self) -> ::irpc::__macro_exports::tracing::Span {
                 let span = match self {
                     #(#enum_name::#variant_names(inner) => inner.parent_span_opt()),*
                 };
-                span.cloned().unwrap_or_else(|| ::tracing::Span::current())
+                span.cloned().unwrap_or_else(|| ::irpc::__macro_exports::tracing::Span::current())
             }
         }
     }
@@ -312,7 +318,7 @@ fn generate_remote_service_impl(
                 quote! {
                     #proto_enum_name::#variant_name(msg) => {
                         // Create a span for this specific RPC operation
-                        let span = ::tracing::info_span!(#span_name);
+                        let span = ::irpc::__macro_exports::tracing::info_span!(#span_name);
                         // Set its parent to the propagated remote context if available
                         ::irpc::span_propagation::set_span_parent_from_remote(&span);
                         let _guard = span.enter();
@@ -332,8 +338,8 @@ fn generate_remote_service_impl(
         impl ::irpc::rpc::RemoteService for #proto_enum_name {
             fn with_remote_channels(
                 self,
-                rx: ::irpc::rpc::noq::RecvStream,
-                tx: ::irpc::rpc::noq::SendStream
+                rx: ::irpc::__macro_exports::RecvStream,
+                tx: ::irpc::__macro_exports::SendStream
             ) -> Self::Message {
                 match self {
                     #(#variants),*

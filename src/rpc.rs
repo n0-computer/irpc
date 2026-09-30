@@ -5,11 +5,6 @@ use std::{
 
 use n0_error::{e, stack_error};
 use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
-/// This is used by irpc-derive to refer to noq types (SendStream and RecvStream)
-/// to make generated code work for users without having to depend on noq directly
-/// (i.e. when using iroh).
-#[doc(hidden)]
-pub use noq;
 use noq::{ConnectionError, PathId};
 use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
