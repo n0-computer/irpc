@@ -31,6 +31,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets --all-features
       - run: cargo make format-check
+      - name: Assert lockfile unchanged
+        # cargo make takes no --locked; assert the lockfile instead.
+        run: git diff --exit-code Cargo.lock
 
   test:
     runs-on: ${{ matrix.target.os }}
@@ -123,9 +126,9 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: irpc
-        run: cargo docs-rs -p irpc
+        run: cargo docs-rs --locked -p irpc
       - name: irpc-iroh
-        run: cargo docs-rs -p irpc-iroh
+        run: cargo docs-rs --locked -p irpc-iroh
 
   wasm_build:
     name: Build wasm32
@@ -142,7 +145,7 @@ jobs:
       - name: Install wasm-tools
         uses: bytecodealliance/actions/wasm-tools/setup@v1
       - name: wasm32 build
-        run: cargo build --target wasm32-unknown-unknown --all
+        run: cargo build --locked --target wasm32-unknown-unknown --all
       # If the Wasm file contains any 'import "env"' declarations, then
       # some non-Wasm-compatible code made it into the final code.
       - name: Ensure no 'import "env"' in wasm
@@ -158,7 +161,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
       - name: cargo check
-        run: cargo check --workspace --all-features --lib --bins
+        run: cargo check --locked --workspace --all-features --lib --bins
 
   minimal-crates:
     runs-on: ubuntu-latest
@@ -169,7 +172,9 @@ jobs:
       - name: cargo check
         run: |
           rm -f Cargo.lock
-          cargo +nightly check -Z minimal-versions -p irpc -p irpc-derive --all-features --lib --bins
+          cargo +nightly check -Z minimal-versions -Z min-publish-age \
+            --config 'registry.global-min-publish-age="3 days"' \
+            -p irpc -p irpc-derive --all-features --lib --bins
 
   check_semver:
     runs-on: ubuntu-latest
