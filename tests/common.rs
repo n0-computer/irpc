@@ -2,7 +2,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use irpc::util::{make_client_endpoint, make_server_endpoint};
+use irpc::noq::{make_client_endpoint, make_server_endpoint};
 use n0_error::stack_error;
 use noq::Endpoint;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

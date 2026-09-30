@@ -8,9 +8,9 @@ use futures_buffered::BufferedStreamExt;
 use irpc::{
     Client, Request, WithChannels,
     channel::{mpsc, oneshot},
-    rpc::{RemoteService, listen},
+    noq::{listen, make_client_endpoint, make_server_endpoint},
+    rpc::RemoteService,
     rpc_requests,
-    util::{make_client_endpoint, make_server_endpoint},
 };
 use n0_future::{
     stream::StreamExt,
