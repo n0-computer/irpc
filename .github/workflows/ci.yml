@@ -144,8 +144,6 @@ jobs:
 
       - name: irpc
         run: cargo docs-rs --locked -p irpc
-      - name: irpc-iroh
-        run: cargo docs-rs --locked -p irpc-iroh
 
   wasm_build:
     name: Build wasm32
@@ -172,7 +170,6 @@ jobs:
       - name: Ensure no 'import "env"' in wasm
         run: |
           ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/irpc.wasm | grep 'import "env"'
-          ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/irpc_iroh.wasm | grep 'import "env"'
 
   # Checks correct runtime deps and features are requested by not including dev-dependencies.
   check-deps:
@@ -246,7 +243,7 @@ jobs:
         # uses: obi1kenobi/cargo-semver-checks-action@v2
         uses: n0-computer/cargo-semver-checks-action@b49de9133f8849bb51cae32c6bdeb19a5c37e61f # feat-baseline
         with:
-          package: irpc, irpc-iroh
+          package: irpc
           baseline-rev: ${{ env.HEAD_COMMIT_SHA }}
           use-cache: false
 

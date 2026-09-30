@@ -9,7 +9,14 @@ use iroh::{
     },
     protocol::{AcceptError, ProtocolHandler},
 };
-use irpc::{
+use n0_error::{Result, e};
+use n0_future::{TryFutureExt, future::Boxed as BoxFuture};
+// portable-atomic provides AtomicU64 on 32-bit targets (e.g. Xtensa ESP32) that
+// lack native 64-bit atomics, same as iroh itself.
+use portable_atomic::{AtomicU64, Ordering};
+use tracing::{Instrument, debug, error_span, trace, trace_span, warn};
+
+use crate::{
     LocalSender, RequestError, Service,
     channel::oneshot,
     rpc::{
@@ -18,21 +25,15 @@ use irpc::{
     },
     util::AsyncReadVarintExt,
 };
-use n0_error::{Result, e};
-use n0_future::{TryFutureExt, future::Boxed as BoxFuture};
-// portable-atomic provides AtomicU64 on 32-bit targets (e.g. Xtensa ESP32) that
-// lack native 64-bit atomics, same as iroh itself.
-use portable_atomic::{AtomicU64, Ordering};
-use tracing::{Instrument, debug, error_span, trace, trace_span, warn};
 
 /// Returns a client that connects to a irpc service using an [`iroh::Endpoint`].
-pub fn client<S: irpc::Service>(
+pub fn client<S: crate::Service>(
     endpoint: iroh::Endpoint,
     addr: impl Into<iroh::EndpointAddr>,
     alpn: impl AsRef<[u8]>,
-) -> irpc::Client<S> {
+) -> crate::Client<S> {
     let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), alpn.as_ref().to_vec());
-    irpc::Client::boxed(conn)
+    crate::Client::boxed(conn)
 }
 
 /// Wrap an existing iroh connection as an irpc remote connection.
@@ -50,14 +51,14 @@ impl IrohRemoteConnection {
     }
 }
 
-impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
-    fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
+impl crate::rpc::RemoteConnection for IrohRemoteConnection {
+    fn clone_boxed(&self) -> Box<dyn crate::rpc::RemoteConnection> {
         Box::new(self.clone())
     }
 
     fn open_bi(
         &self,
-    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), irpc::RequestError>>
+    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), crate::RequestError>>
     {
         let conn = self.0.clone();
         Box::pin(async move {
@@ -80,14 +81,14 @@ impl IrohZrttRemoteConnection {
     }
 }
 
-impl irpc::rpc::RemoteConnection for IrohZrttRemoteConnection {
-    fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
+impl crate::rpc::RemoteConnection for IrohZrttRemoteConnection {
+    fn clone_boxed(&self) -> Box<dyn crate::rpc::RemoteConnection> {
         Box::new(self.clone())
     }
 
     fn open_bi(
         &self,
-    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), irpc::RequestError>>
+    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), crate::RequestError>>
     {
         let conn = self.0.clone();
         Box::pin(async move {
@@ -296,7 +297,7 @@ pub async fn handle_connection<S: Service>(
         let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
             return Ok(());
         };
-        irpc::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
+        crate::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
     }
 }
 
@@ -310,7 +311,7 @@ pub async fn read_request<S: RemoteService>(
         return Ok(None);
     };
     Ok(Some(
-        irpc::span_propagation::scope_remote(carrier, async move {
+        crate::span_propagation::scope_remote(carrier, async move {
             S::with_remote_channels(msg, rx, tx)
         })
         .await,
@@ -388,7 +389,7 @@ async fn read_request_inner<S: Service>(
 ) -> std::io::Result<
     Option<(
         S,
-        Option<irpc::span_propagation::SpanContextCarrier>,
+        Option<crate::span_propagation::SpanContextCarrier>,
         RecvStream,
         SendStream,
     )>,
@@ -420,7 +421,7 @@ async fn read_request_inner<S: Service>(
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
 
-    let (carrier, msg): (Option<irpc::span_propagation::SpanContextCarrier>, S) =
+    let (carrier, msg): (Option<crate::span_propagation::SpanContextCarrier>, S) =
         if S::SPAN_PROPAGATION {
             postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         } else {
@@ -468,6 +469,3 @@ pub async fn listen<S: Service>(endpoint: iroh::Endpoint, handler: Handler<S>) {
         request_id += 1;
     }
 }
-
-#[cfg(test)]
-mod tests;

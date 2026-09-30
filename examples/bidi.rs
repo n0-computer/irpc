@@ -13,7 +13,7 @@
 //!   check liveness.
 //!
 //! The trick is that each peer holds *both* an [`irpc::Client`] (to open streams and send its own
-//! requests) *and* a [`irpc_iroh::read_request`] loop (to accept and answer the other peer's
+//! requests) *and* a [`irpc::iroh::read_request`] loop (to accept and answer the other peer's
 //! requests). Both are built from the same [`iroh::endpoint::Connection`]. Because `accept_bi`
 //! only ever yields streams opened by the *remote* side, the two directions never collide: the
 //! listener's accept loop only sees `ClientToServer` streams, the connector's accept loop only
@@ -47,8 +47,12 @@ mod proto {
         endpoint::{Connection, presets},
         protocol::{AcceptError, ProtocolHandler, Router},
     };
-    use irpc::{Client, WithChannels, channel::oneshot, rpc_requests};
-    use irpc_iroh::{IrohRemoteConnection, read_request};
+    use irpc::{
+        Client, WithChannels,
+        channel::oneshot,
+        iroh::{IrohRemoteConnection, read_request},
+        rpc_requests,
+    };
     use serde::{Deserialize, Serialize};
     use tokio::time::Instant;
 

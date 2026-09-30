@@ -591,7 +591,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1530,16 +1530,26 @@ name = "irpc"
 version = "0.17.0"
 dependencies = [
  "anyhow",
+ "clap",
  "derive_more",
  "futures-buffered",
  "futures-util",
+ "getrandom 0.4.3",
+ "hex",
+ "iroh",
+ "iroh-base",
  "irpc-derive",
  "lazy_static",
  "n0-error",
  "n0-future",
+ "n0-tracing-test",
  "noq",
  "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "portable-atomic",
  "postcard",
+ "rand 0.10.3",
  "rcgen",
  "rustls",
  "serde",
@@ -1561,35 +1571,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "irpc-iroh"
-version = "0.17.0"
-dependencies = [
- "anyhow",
- "clap",
- "futures-util",
- "getrandom 0.4.3",
- "hex",
- "iroh",
- "iroh-base",
- "irpc",
- "irpc-derive",
- "n0-error",
- "n0-future",
- "n0-tracing-test",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "portable-atomic",
- "postcard",
- "rand 0.10.3",
- "serde",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1700,9 +1681,9 @@ dependencies = [
 
 [[package]]
 name = "lazy_static"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libc"

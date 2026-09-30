@@ -71,13 +71,13 @@ mod storage {
         endpoint::Connection,
         protocol::{AcceptError, ProtocolHandler},
     };
+    // Import the macro
+    use irpc::iroh::{IrohLazyRemoteConnection, read_request};
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
         rpc_requests,
     };
-    // Import the macro
-    use irpc_iroh::{IrohLazyRemoteConnection, read_request};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 

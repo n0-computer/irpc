@@ -72,14 +72,14 @@ mod storage {
 
     use anyhow::{Context, Result};
     use iroh::{Endpoint, protocol::ProtocolHandler};
+    // Import the macro
+    use irpc::iroh::{IrohLazyRemoteConnection, IrohProtocol};
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
         rpc::RemoteService,
         rpc_requests,
     };
-    // Import the macro
-    use irpc_iroh::{IrohLazyRemoteConnection, IrohProtocol};
     use n0_future::task::AbortOnDropHandle;
     use serde::{Deserialize, Serialize};
     use tracing::info;

@@ -10,6 +10,9 @@ use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
 use tracing::{Instrument, debug, error_span, trace, warn};
 
+#[cfg(feature = "iroh")]
+pub(crate) mod iroh_impl;
+
 use crate::{
     LocalSender, RequestError, RpcMessage, Service,
     channel::{

@@ -236,9 +236,12 @@ mod cli {
 mod ping {
     use anyhow::{Context, Result};
     use iroh::Endpoint;
-    use irpc::{Client, WithChannels, channel::oneshot, rpc::RemoteService, rpc_requests};
-    use irpc_iroh::{
-        Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection, IrohZrttRemoteConnection,
+    use irpc::{
+        Client, WithChannels,
+        channel::oneshot,
+        iroh::{Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection, IrohZrttRemoteConnection},
+        rpc::RemoteService,
+        rpc_requests,
     };
     use serde::{Deserialize, Serialize};
     use tracing::info;

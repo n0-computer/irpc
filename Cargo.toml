@@ -47,6 +47,13 @@ irpc-derive = { version = "0.17.0", path = "./irpc-derive", optional = true }
 # for remote span propagation when tracing-opentelemetry feature is enabled
 opentelemetry = { version = "0.32", optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
+# used for the iroh transport
+iroh = { workspace = true, optional = true }
+iroh-base = { workspace = true, optional = true }
+portable-atomic = { version = "1", optional = true }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 noq = { workspace = true, optional = true, features = ["runtime-tokio"] }
@@ -66,10 +73,24 @@ trybuild = "1.0.104"
 testresult = "0.4.1"
 # used in examples
 anyhow = { workspace = true }
+# Tests and examples need a crypto provider, which iroh's default features supply.
+iroh = { workspace = true, default-features = true }
+n0-future = { workspace = true }
+clap = { version = "4.5.41", features = ["derive"] }
+futures-util.workspace = true
+hex = "0.4.3"
+rand = "0.10.3"
+n0-tracing-test = "0.3.0"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+tracing-opentelemetry = "0.33"
 
 [features]
 # enable the remote transport
 rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:tracing", "tokio/io-util"]
+# enable the iroh transport
+iroh = ["rpc", "dep:iroh", "dep:iroh-base", "dep:portable-atomic", "dep:getrandom"]
 # add test utilities
 noq_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:futures-buffered", "noq/rustls-ring"]
 # pick up parent span when creating channel messages
@@ -79,7 +100,7 @@ derive = ["dep:irpc-derive"]
 varint-util = ["dep:postcard", "dep:smallvec", "tokio/io-util"]
 # enable OpenTelemetry span context propagation across remote connections
 tracing-opentelemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry", "rpc"]
-default = ["rpc", "noq_endpoint_setup", "spans", "stream", "derive"]
+default = ["rpc", "iroh", "noq_endpoint_setup", "spans", "stream", "derive"]
 
 [[example]]
 name = "derive"
@@ -97,9 +118,49 @@ required-features = ["derive"]
 name = "storage"
 required-features = ["rpc", "noq_endpoint_setup"]
 
+[[example]]
+name = "0rtt"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[example]]
+name = "auth"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[example]]
+name = "authorized-request"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[example]]
+name = "bidi"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[example]]
+name = "remote-and-local"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[example]]
+name = "server-actor"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[example]]
+name = "server-shared-state"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[example]]
+name = "span_propagation"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[test]]
+name = "span_propagation"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[test]]
+name = "span_propagation_concurrent"
+required-features = ["iroh", "spans", "stream", "derive"]
+
 [workspace]
 resolver = "2"
-members = ["irpc-derive", "irpc-iroh"]
+members = ["irpc-derive"]
 
 [package.metadata.docs.rs]
 all-features = true

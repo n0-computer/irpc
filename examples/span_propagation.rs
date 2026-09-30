@@ -9,13 +9,13 @@
 //! Server (prints its endpoint id):
 //!
 //! ```sh
-//! cargo run -p irpc-iroh --features tracing-opentelemetry --example span_propagation -- server
+//! cargo run --features tracing-opentelemetry --example span_propagation -- server
 //! ```
 //!
 //! Client:
 //!
 //! ```sh
-//! cargo run -p irpc-iroh --features tracing-opentelemetry --example span_propagation -- client <ENDPOINT_ID>
+//! cargo run --features tracing-opentelemetry --example span_propagation -- client <ENDPOINT_ID>
 //! ```
 //!
 //! Open <http://localhost:16686>, pick the `example-client` service, and each
@@ -29,8 +29,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use iroh::{Endpoint, EndpointId, endpoint::presets, protocol::Router};
-use irpc::{WithChannels, channel::oneshot, rpc::RemoteService, rpc_requests};
-use irpc_iroh::IrohProtocol;
+use irpc::{WithChannels, channel::oneshot, iroh::IrohProtocol, rpc::RemoteService, rpc_requests};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
@@ -187,7 +186,7 @@ async fn server(otlp_endpoint: &str) -> Result<()> {
     println!("server endpoint id: {}", router.endpoint().id());
     println!("run the client with:");
     println!(
-        "    cargo run -p irpc-iroh --features tracing-opentelemetry --example span_propagation -- client {}",
+        "    cargo run --features tracing-opentelemetry --example span_propagation -- client {}",
         router.endpoint().id()
     );
     println!("press ctrl+c to stop");
@@ -205,7 +204,7 @@ async fn client(otlp_endpoint: &str, endpoint_id: EndpointId, count: u32) -> Res
     let client_ep = Endpoint::bind(presets::N0).await?;
     let provider = init_tracing("example-client", client_ep.id(), otlp_endpoint)?;
     for req_id in 0..count {
-        let client = irpc_iroh::client::<Proto>(client_ep.clone(), endpoint_id, ALPN);
+        let client = irpc::iroh::client::<Proto>(client_ep.clone(), endpoint_id, ALPN);
         let payload = format!("hello-{req_id}");
         async {
             info!(%payload, "sending request");

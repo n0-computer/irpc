@@ -329,6 +329,11 @@ pub mod rpc {
 }
 #[cfg(feature = "rpc")]
 pub mod rpc;
+/// RPC over iroh connections.
+#[cfg(feature = "iroh")]
+pub mod iroh {
+    pub use crate::rpc::iroh_impl::*;
+}
 
 mod sealed {
     pub trait Sealed {}

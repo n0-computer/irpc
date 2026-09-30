@@ -126,9 +126,9 @@ mod kv {
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
+        iroh::{IrohLazyRemoteConnection, read_request},
         rpc_requests,
     };
-    use irpc_iroh::{IrohLazyRemoteConnection, read_request};
     use n0_error::stack_error;
     use serde::{Deserialize, Serialize};
 

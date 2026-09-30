@@ -3,15 +3,16 @@ mod span_propagation {
     use std::sync::Arc;
 
     use iroh::{Endpoint, endpoint::presets, protocol::Router};
-    use irpc::{Service, WithChannels, channel::oneshot, rpc::RemoteService, rpc_requests};
+    use irpc::{
+        Service, WithChannels, channel::oneshot, iroh::IrohProtocol, rpc::RemoteService,
+        rpc_requests,
+    };
     use n0_error::{Result, StdResultExt};
     use opentelemetry::trace::TraceId;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
     use serde::{Deserialize, Serialize};
     use tracing::{Instrument, info, info_span};
     use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
-
-    use crate::IrohProtocol;
 
     /// Find the trace ID of the first span named `name` that has a `req_id` attribute equal to `val`.
     fn trace_id_for_req(spans: &[SpanData], name: &str, val: i64) -> Option<TraceId> {
@@ -104,7 +105,7 @@ mod span_propagation {
 
         let server = listen().instrument(info_span!("server")).await?;
         let client_ep = Endpoint::bind(presets::N0).await?;
-        let client = crate::client::<Proto>(client_ep.clone(), server.endpoint().addr(), ALPN);
+        let client = irpc::iroh::client::<Proto>(client_ep.clone(), server.endpoint().addr(), ALPN);
 
         async {
             async {
@@ -119,7 +120,7 @@ mod span_propagation {
 
             async {
                 let client =
-                    crate::client::<Proto>(client_ep.clone(), server.endpoint().addr(), ALPN);
+                    irpc::iroh::client::<Proto>(client_ep.clone(), server.endpoint().addr(), ALPN);
                 info!("send request: bye");
                 let res = client.rpc(GetRequest("bye".to_string())).await?;
                 info!("got response: {res:?}");
