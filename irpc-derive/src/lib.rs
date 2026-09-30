@@ -533,6 +533,7 @@ impl Parse for WrapArgs {
 
 fn type_from_ident(ident: &Ident) -> Type {
     Type::Path(syn::TypePath {
+        attrs: Default::default(),
         qself: None,
         path: syn::Path {
             leading_colon: None,
@@ -570,8 +571,9 @@ fn single_unnamed_field(ty: Type) -> Fields {
         vis: Visibility::Inherited,
         ident: None,
         colon_token: None,
-        mutability: syn::FieldMutability::None,
         ty,
+        modifiers: Default::default(),
+        default: None,
     };
     Fields::Unnamed(syn::FieldsUnnamed {
         paren_token: syn::token::Paren(Span::call_site()),
