@@ -9,7 +9,7 @@ use irpc::{
     Client, Request, WithChannels,
     channel::{mpsc, oneshot},
     noq::{listen, make_client_endpoint, make_server_endpoint},
-    rpc::RemoteService,
+    rpc::Handler,
     rpc_requests,
 };
 use n0_future::{
@@ -154,7 +154,7 @@ impl ComputeApi {
         let Some(local) = self.inner.as_local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler = ComputeProtocol::remote_handler(local);
+        let handler = Handler::from_sender(local);
         Ok(AbortOnDropHandle::new(task::spawn(listen(
             endpoint, handler,
         ))))

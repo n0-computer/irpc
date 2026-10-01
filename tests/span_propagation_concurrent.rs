@@ -1,12 +1,12 @@
 //! Stress test for span context propagation under concurrent load on a
 //! multi-threaded runtime.
 //!
-//! Fires many in-flight requests so that handler futures are very likely to
-//! yield and migrate worker threads between dispatch and span creation. With
-//! the previous `thread_local!` storage this was racy — a yielding task could
-//! lose its slot to another request landing on the same OS thread. The
-//! `task_local!` scope is per-task and survives migration, so every server
-//! "Get" span must share its client's trace id.
+//! Sends many requests at the same time, so that a handler future likely
+//! yields and moves to another worker thread before it creates its span.
+//! With `thread_local!` storage, a task that yields could lose its slot to
+//! another request on the same OS thread. A `task_local!` scope belongs to
+//! the task and moves with it. So every server "Get" span must have the trace
+//! id of its client.
 //!
 //! Lives in its own integration-test binary because it installs a global
 //! tracing subscriber and tracer provider, which would conflict with the
@@ -14,14 +14,12 @@
 
 #![cfg(feature = "tracing-opentelemetry")]
 
-use std::sync::Arc;
-
 use iroh::{Endpoint, endpoint::presets, protocol::Router};
 use irpc::{
     Client, WithChannels,
     channel::oneshot,
     iroh::{IrohLazyRemoteConnection, IrohProtocol},
-    rpc::RemoteService,
+    rpc::{Handler, RemoteService},
     rpc_requests,
 };
 use n0_error::StdResultExt;
@@ -77,21 +75,19 @@ async fn span_propagation_concurrent() -> n0_error::Result<()> {
     const ALPN: &[u8] = b"test-concurrent";
 
     let endpoint = Endpoint::bind(presets::N0).await?;
-    let protocol = IrohProtocol::<Proto>::new(Arc::new(|req, rx, tx| {
-        Box::pin(async move {
-            // Yield before constructing the WithChannels so the handler is
-            // very likely to resume on a different worker thread.
-            tokio::task::yield_now().await;
-            let msg: Message = <Proto as RemoteService>::with_remote_channels(req, rx, tx);
-            match msg {
-                Message::Get(msg) => {
-                    let WithChannels { inner, tx, .. } = msg;
-                    tokio::task::yield_now().await;
-                    tx.send(inner.0.to_uppercase()).await.ok();
-                }
+    // A raw handler, so that it can yield before it creates the message.
+    let protocol = IrohProtocol::<Proto>::new(Handler::raw(|request: Proto, rx, tx| async move {
+        // Yield before the message exists, so that the handler likely
+        // continues on another worker thread.
+        tokio::task::yield_now().await;
+        match request.with_remote_channels(rx, tx) {
+            Message::Get(msg) => {
+                let WithChannels { inner, tx, .. } = msg;
+                tokio::task::yield_now().await;
+                tx.send(inner.0.to_uppercase()).await.ok();
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }));
     let server = Router::builder(endpoint).accept(ALPN, protocol).spawn();
 

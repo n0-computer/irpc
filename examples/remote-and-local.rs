@@ -77,7 +77,6 @@ mod storage {
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
-        rpc::RemoteService,
         rpc_requests,
     };
     use n0_future::task::AbortOnDropHandle;
@@ -183,7 +182,7 @@ mod storage {
                 .client
                 .as_local()
                 .context("can not listen on remote service")?;
-            Ok(IrohProtocol::new(StorageProtocol::remote_handler(local)))
+            Ok(IrohProtocol::new(local))
         }
 
         pub async fn get(&self, key: String) -> irpc::Result<Option<String>> {
