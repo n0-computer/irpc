@@ -334,6 +334,20 @@ mod sealed {
     pub trait Sealed {}
 }
 
+/// Re-exports for the code that the [`rpc_requests`] macro generates.
+///
+/// The generated code names these items through this module, so that crates
+/// that use the macro do not need their own dependency on these crates. This
+/// module is not part of the public API.
+#[doc(hidden)]
+pub mod __macro_exports {
+    #[cfg(feature = "rpc")]
+    pub use ::noq::{RecvStream, SendStream};
+    pub use serde;
+    #[cfg(any(feature = "rpc", feature = "spans"))]
+    pub use tracing;
+}
+
 /// Requirements for a RPC message
 ///
 /// Even when just using the mem transport, we require messages to be Serializable and Deserializable.
