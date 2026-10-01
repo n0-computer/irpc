@@ -17,10 +17,7 @@ use tracing::{Instrument, debug, error_span, trace_span, warn};
 
 use crate::{
     RequestError, Service,
-    rpc::{
-        CloseConnection, Handler, IncomingRemoteConnection, RemoteConnection, RemoteService,
-        handle_connection,
-    },
+    rpc::{CloseConnection, Handler, IncomingRemoteConnection, RemoteConnection, RemoteService},
 };
 
 impl RemoteConnection for Connection {
@@ -199,9 +196,11 @@ impl<S: RemoteService> IrohProtocol<S> {
 
 impl<S: Service> ProtocolHandler for IrohProtocol<S> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let handler = self.handler.clone();
         let request_id = self.request_id.fetch_add(1, Ordering::AcqRel);
-        let fut = handle_connection::<S>(&connection, handler).map_err(AcceptError::from_err);
+        let fut = self
+            .handler
+            .handle_connection(&connection)
+            .map_err(AcceptError::from_err);
         let remote = connection.remote_id().fmt_short();
         let span = trace_span!("rpc", id = request_id, remote = %remote);
         fut.instrument(span).await
@@ -241,14 +240,14 @@ impl<S: Service> Iroh0RttProtocol<S> {
 impl<S: Service> ProtocolHandler for Iroh0RttProtocol<S> {
     async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
         let zrtt_conn = accepting.into_0rtt();
-        let handler = self.handler.clone();
         let request_id = self.request_id.fetch_add(1, Ordering::AcqRel);
         let span = trace_span!("rpc", id = request_id, remote = tracing::field::Empty);
         // The remote id of a 0-RTT connection can be unknown.
         if let Ok(remote) = zrtt_conn.remote_id() {
             span.record("remote", tracing::field::display(remote.fmt_short()));
         }
-        handle_connection::<S>(&zrtt_conn, handler)
+        self.handler
+            .handle_connection(&zrtt_conn)
             .map_err(AcceptError::from_err)
             .instrument(span)
             .await?;
@@ -315,7 +314,7 @@ pub async fn listen<S: Service>(endpoint: iroh::Endpoint, handler: impl Into<Han
                 Ok(connection) => {
                     let remote = connection.remote_id().fmt_short();
                     tracing::Span::current().record("remote", tracing::field::display(remote));
-                    match handle_connection::<S>(&connection, handler).await {
+                    match handler.handle_connection(&connection).await {
                         Err(err) => warn!("connection closed with error: {err:?}"),
                         Ok(()) => debug!("connection closed"),
                     }

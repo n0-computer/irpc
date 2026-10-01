@@ -7,7 +7,7 @@ use tracing::{Instrument, debug, error_span, warn};
 
 use crate::{
     RequestError, Service,
-    rpc::{Handler, IncomingRemoteConnection, RemoteConnection, handle_connection},
+    rpc::{Handler, IncomingRemoteConnection, RemoteConnection},
 };
 
 /// A connection to a remote service.
@@ -126,7 +126,7 @@ pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: impl Into<Hand
                     if let Some(remote) = remote_address(&connection) {
                         tracing::Span::current().record("remote", tracing::field::display(remote));
                     }
-                    match handle_connection(&connection, handler).await {
+                    match handler.handle_connection(&connection).await {
                         Err(err) => warn!("connection closed with error: {err:?}"),
                         Ok(()) => debug!("connection closed"),
                     }
