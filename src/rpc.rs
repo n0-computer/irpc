@@ -301,10 +301,11 @@ impl From<noq::RecvStream> for crate::channel::none::NoReceiver {
 
 impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
     fn from(read: noq::RecvStream) -> Self {
-        mpsc::Receiver::Boxed(Box::new(NoqReceiver {
+        let receiver: Box<dyn DynReceiver<T>> = Box::new(NoqReceiver {
             recv: read,
             _marker: PhantomData,
-        }))
+        });
+        receiver.into()
     }
 }
 
@@ -317,7 +318,7 @@ impl From<noq::SendStream> for NoSender {
 
 impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
     fn from(mut writer: noq::SendStream) -> Self {
-        oneshot::Sender::Boxed(Box::new(move |value| {
+        let sender: oneshot::BoxedSender<T> = Box::new(move |value| {
             Box::pin(async move {
                 let size = match postcard::experimental::serialized_size(&value) {
                     Ok(size) => size,
@@ -344,19 +345,21 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
                 writer.write_all(&buf).await?;
                 Ok(())
             })
-        }))
+        });
+        sender.into()
     }
 }
 
 impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
     fn from(write: noq::SendStream) -> Self {
-        mpsc::Sender::Boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
+        let sender: Arc<dyn DynSender<T>> = Arc::new(NoqSender(tokio::sync::Mutex::new(
             NoqSenderState::Open(NoqSenderInner {
                 send: write,
                 buffer: SmallVec::new(),
                 _marker: PhantomData,
             }),
-        ))))
+        )));
+        sender.into()
     }
 }
 

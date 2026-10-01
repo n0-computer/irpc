@@ -14,6 +14,7 @@ pub mod oneshot;
 /// For rpc communication, there can be any number of errors, so this is a
 /// generic io error.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum SendError {
     /// The receiver has been closed. This is the only error that can occur
     /// for local communication.

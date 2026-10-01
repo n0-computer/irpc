@@ -14,6 +14,7 @@ use crate::util::FusedOneshotReceiver;
 /// For rpc communication, there can be any number of errors, so this is a
 /// generic io error.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum RecvError {
     /// The sender has been closed. This is the only error that can occur
     /// for local communication.
@@ -85,7 +86,12 @@ pub type BoxedReceiver<T> = BoxFuture<Result<T, RecvError>>;
 /// Compared to a local onehsot sender, sending a message is async since in the case
 /// of remote communication, sending over the wire is async. Other than that it
 /// behaves like a local oneshot sender and has no overhead in the local case.
-pub enum Sender<T> {
+///
+/// Create a local sender with [`channel`] or from a tokio oneshot sender, and
+/// a boxed sender from a [`BoxedSender`].
+pub struct Sender<T>(SenderInner<T>);
+
+enum SenderInner<T> {
     Tokio(tokio::sync::oneshot::Sender<T>),
     /// we can't yet distinguish between local and remote boxed oneshot senders.
     /// If we ever want to have local boxed oneshot senders, we need to add a
@@ -95,16 +101,23 @@ pub enum Sender<T> {
 
 impl<T> Debug for Sender<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tokio(_) => f.debug_tuple("Tokio").finish(),
-            Self::Boxed(_) => f.debug_tuple("Boxed").finish(),
+        match &self.0 {
+            SenderInner::Tokio(_) => f.debug_tuple("Tokio").finish(),
+            SenderInner::Boxed(_) => f.debug_tuple("Boxed").finish(),
         }
     }
 }
 
 impl<T> From<tokio::sync::oneshot::Sender<T>> for Sender<T> {
     fn from(tx: tokio::sync::oneshot::Sender<T>) -> Self {
-        Self::Tokio(tx)
+        Self(SenderInner::Tokio(tx))
+    }
+}
+
+/// Converts a boxed send function into a sender.
+impl<T> From<BoxedSender<T>> for Sender<T> {
+    fn from(tx: BoxedSender<T>) -> Self {
+        Self(SenderInner::Boxed(tx))
     }
 }
 
@@ -112,9 +125,9 @@ impl<T> TryFrom<Sender<T>> for tokio::sync::oneshot::Sender<T> {
     type Error = Sender<T>;
 
     fn try_from(value: Sender<T>) -> Result<Self, Self::Error> {
-        match value {
-            Sender::Tokio(tx) => Ok(tx),
-            Sender::Boxed(_) => Err(value),
+        match value.0 {
+            SenderInner::Tokio(tx) => Ok(tx),
+            inner @ SenderInner::Boxed(_) => Err(Sender(inner)),
         }
     }
 }
@@ -125,9 +138,9 @@ impl<T> Sender<T> {
     /// If this is a boxed sender that represents a remote connection, sending may yield or fail with an io error.
     /// Local senders will never yield, but can fail if the receiver has been closed.
     pub async fn send(self, value: T) -> Result<(), SendError> {
-        match self {
-            Sender::Tokio(tx) => tx.send(value).map_err(|_| e!(SendError::ReceiverClosed)),
-            Sender::Boxed(f) => f(value).await,
+        match self.0 {
+            SenderInner::Tokio(tx) => tx.send(value).map_err(|_| e!(SendError::ReceiverClosed)),
+            SenderInner::Boxed(f) => f(value).await,
         }
     }
 
@@ -136,9 +149,9 @@ impl<T> Sender<T> {
     where
         T: 'static,
     {
-        match self {
-            Sender::Tokio(_) => false,
-            Sender::Boxed(_) => true,
+        match self.0 {
+            SenderInner::Tokio(_) => false,
+            SenderInner::Boxed(_) => true,
         }
     }
 }
@@ -178,7 +191,7 @@ impl<T: Send + Sync + 'static> Sender<T> {
                 }
             })
         });
-        Sender::Boxed(inner)
+        Sender(SenderInner::Boxed(inner))
     }
 }
 
@@ -189,7 +202,12 @@ impl<T> crate::Sender for Sender<T> {}
 ///
 /// Compared to a local oneshot receiver, receiving a message can fail not just
 /// when the sender has been closed, but also when the remote connection fails.
-pub enum Receiver<T> {
+///
+/// Create a local receiver with [`channel`] or from a tokio oneshot receiver,
+/// and a boxed receiver from a function that returns a future.
+pub struct Receiver<T>(ReceiverInner<T>);
+
+enum ReceiverInner<T> {
     Tokio(FusedOneshotReceiver<T>),
     Boxed(BoxedReceiver<T>),
 }
@@ -198,11 +216,11 @@ impl<T> Future for Receiver<T> {
     type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
-        match self.get_mut() {
-            Self::Tokio(rx) => Pin::new(rx)
+        match &mut self.get_mut().0 {
+            ReceiverInner::Tokio(rx) => Pin::new(rx)
                 .poll(cx)
                 .map_err(|_| e!(RecvError::SenderClosed)),
-            Self::Boxed(rx) => Pin::new(rx).poll(cx),
+            ReceiverInner::Boxed(rx) => Pin::new(rx).poll(cx),
         }
     }
 }
@@ -210,7 +228,7 @@ impl<T> Future for Receiver<T> {
 /// Convert a tokio oneshot receiver to a receiver for this crate
 impl<T> From<tokio::sync::oneshot::Receiver<T>> for Receiver<T> {
     fn from(rx: tokio::sync::oneshot::Receiver<T>) -> Self {
-        Self::Tokio(FusedOneshotReceiver(rx))
+        Self(ReceiverInner::Tokio(FusedOneshotReceiver(rx)))
     }
 }
 
@@ -218,9 +236,9 @@ impl<T> TryFrom<Receiver<T>> for tokio::sync::oneshot::Receiver<T> {
     type Error = Receiver<T>;
 
     fn try_from(value: Receiver<T>) -> Result<Self, Self::Error> {
-        match value {
-            Receiver::Tokio(tx) => Ok(tx.0),
-            Receiver::Boxed(_) => Err(value),
+        match value.0 {
+            ReceiverInner::Tokio(rx) => Ok(rx.0),
+            inner @ ReceiverInner::Boxed(_) => Err(Receiver(inner)),
         }
     }
 }
@@ -232,15 +250,15 @@ where
     Fut: Future<Output = Result<T, RecvError>> + Send + 'static,
 {
     fn from(f: F) -> Self {
-        Self::Boxed(Box::pin(f()))
+        Self(ReceiverInner::Boxed(Box::pin(f())))
     }
 }
 
 impl<T> Debug for Receiver<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tokio(_) => f.debug_tuple("Tokio").finish(),
-            Self::Boxed(_) => f.debug_tuple("Boxed").finish(),
+        match &self.0 {
+            ReceiverInner::Tokio(_) => f.debug_tuple("Tokio").finish(),
+            ReceiverInner::Boxed(_) => f.debug_tuple("Boxed").finish(),
         }
     }
 }
