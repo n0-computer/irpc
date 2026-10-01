@@ -102,7 +102,8 @@ async fn connect_and_open_bi(
 /// Utility function to listen for incoming connections and handle them with the provided handler.
 ///
 /// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
-pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: Handler<S>) {
+pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: impl Into<Handler<S>>) {
+    let handler = handler.into();
     let mut request_id = 0u64;
     let mut tasks = JoinSet::new();
     loop {

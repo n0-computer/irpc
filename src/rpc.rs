@@ -4,15 +4,24 @@
 //! streams. The [`crate::noq`] module has the transport with dial by socket
 //! address. The [`crate::iroh`] module has the transport with dial by endpoint id.
 use std::{
-    fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
+    fmt::Debug,
+    future::Future,
+    io,
+    marker::PhantomData,
+    ops::DerefMut,
+    pin::{Pin, pin},
+    sync::Arc,
 };
 
 use n0_error::{e, stack_error};
-use n0_future::future::Boxed as BoxFuture;
+use n0_future::{
+    future::Boxed as BoxFuture,
+    task::{JoinError, JoinSet},
+};
 use noq::{ConnectionError, VarInt};
 use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
-use tracing::{debug, trace, warn};
+use tracing::{Instrument, debug, error, trace, warn};
 
 #[cfg(feature = "iroh")]
 pub(crate) mod iroh_impl;
@@ -449,13 +458,328 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
     }
 }
 
-/// Type alias for a handler fn for remote requests
-pub type Handler<R> = Arc<
-    dyn Fn(R, noq::RecvStream, noq::SendStream) -> BoxFuture<std::result::Result<(), SendError>>
+/// The function inside a [`Handler`].
+type HandlerFn<S> = Arc<
+    dyn Fn(
+            S,
+            noq::RecvStream,
+            noq::SendStream,
+        ) -> BoxFuture<std::result::Result<(), CloseConnection>>
         + Send
         + Sync
         + 'static,
 >;
+
+/// A request to close the connection, with a code and a reason.
+///
+/// A handler function returns `Err(CloseConnection)` to close the connection,
+/// for example when the remote violates the protocol. The server loop then
+/// closes the connection with the code and the reason. It reads no more
+/// requests from the connection.
+///
+/// irpc itself uses these codes to close a connection:
+///
+/// - `0`: a normal close. The server loop does not treat a close with code 0
+///   as an error. A connection that is dropped also closes with code 0.
+///   [`Handler::from_sender`] uses code 0 when its receiver is gone.
+/// - [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] (1): a request is larger than
+///   [`MAX_MESSAGE_SIZE`].
+///
+/// An application can use these codes too. Streams have their own codes,
+/// separate from the codes of a connection.
+///
+/// # Examples
+///
+/// ```
+/// use irpc::{
+///     channel::oneshot,
+///     rpc::{CloseConnection, Handler},
+///     rpc_requests,
+/// };
+/// use serde::{Deserialize, Serialize};
+///
+/// #[rpc_requests(message = AuthMessage)]
+/// #[derive(Debug, Serialize, Deserialize)]
+/// enum AuthProtocol {
+///     #[rpc(tx = oneshot::Sender<()>)]
+///     #[wrap(Auth)]
+///     Auth(String),
+/// }
+///
+/// let handler = Handler::<AuthProtocol>::sequential(|msg| async move {
+///     let AuthMessage::Auth(msg) = msg;
+///     if msg.inner.0 != "secret" {
+///         Err(CloseConnection::new(401, "permission denied"))
+///     } else {
+///         msg.tx.send(()).await.ok();
+///         Ok(())
+///     }
+/// });
+/// ```
+#[derive(Debug, Clone)]
+pub struct CloseConnection {
+    code: VarInt,
+    reason: Vec<u8>,
+}
+
+impl CloseConnection {
+    /// Creates a request to close the connection with `code` and `reason`.
+    pub fn new(code: u32, reason: impl AsRef<[u8]>) -> Self {
+        Self {
+            code: VarInt::from_u32(code),
+            reason: reason.as_ref().to_vec(),
+        }
+    }
+}
+
+/// How the server loop runs the requests of one connection.
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    /// Runs each request in the loop, before the loop reads the next request.
+    Sequential,
+    /// Runs each request in a task, with at most this many tasks per connection.
+    Concurrent(usize),
+}
+
+/// Handles the requests that a server reads from a connection.
+///
+/// A server uses one handler for all its connections. Create a handler with
+/// one of these functions:
+///
+/// - [`Handler::from_sender`] sends each request to a [`LocalSender`], for
+///   example the sender of an actor.
+/// - [`Handler::concurrent`] runs a function for each request. It runs at
+///   most a given number of requests of a connection at the same time.
+/// - [`Handler::sequential`] runs a function for each request. It runs the
+///   requests of a connection one after the other.
+/// - [`Handler::raw`] runs a function on the protocol enum and the two
+///   streams of each request. The function can pass the request to another
+///   handler with [`Handler::call`].
+///
+/// The function of [`Handler::concurrent`] and [`Handler::sequential`] takes
+/// the message enum. The compiler cannot get the protocol type from it. If no
+/// other code names the protocol type, write it, for example
+/// `Handler::<MyProtocol>::concurrent(..)`.
+///
+/// # Examples
+///
+/// ```
+/// use irpc::{WithChannels, channel::oneshot, rpc::Handler, rpc_requests};
+/// use serde::{Deserialize, Serialize};
+///
+/// #[rpc_requests(message = EchoMessage)]
+/// #[derive(Debug, Serialize, Deserialize)]
+/// enum EchoProtocol {
+///     #[rpc(tx = oneshot::Sender<String>)]
+///     #[wrap(Echo)]
+///     Echo(String),
+/// }
+///
+/// let handler: Handler<EchoProtocol> = Handler::concurrent(16, |msg| async move {
+///     match msg {
+///         EchoMessage::Echo(msg) => {
+///             let WithChannels { inner, tx, .. } = msg;
+///             tx.send(inner.0).await.ok();
+///         }
+///     }
+///     Ok(())
+/// });
+/// ```
+pub struct Handler<S> {
+    f: HandlerFn<S>,
+    mode: Mode,
+}
+
+impl<S> Clone for Handler<S> {
+    fn clone(&self) -> Self {
+        Self {
+            f: self.f.clone(),
+            mode: self.mode,
+        }
+    }
+}
+
+impl<S> Debug for Handler<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handler")
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: Service> Handler<S> {
+    /// Creates a handler that runs `f` on the protocol enum and the streams of each request.
+    ///
+    /// The server loop runs the requests of a connection one after the other.
+    /// It waits for the future of `f` before it reads the next request. The
+    /// future returns `Err(CloseConnection)` to close the connection.
+    ///
+    /// Use this handler to pass a request to another handler, see
+    /// [`Handler::call`]. If `f` needs the message enum, call
+    /// [`RemoteService::with_remote_channels`] inside the future. With span
+    /// propagation, the remote span context is only available while the future
+    /// runs.
+    pub fn raw<F, Fut>(f: F) -> Self
+    where
+        F: Fn(S, noq::RecvStream, noq::SendStream) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static,
+    {
+        let f: HandlerFn<S> = Arc::new(move |msg, rx, tx| Box::pin(f(msg, rx, tx)));
+        Self {
+            f,
+            mode: Mode::Sequential,
+        }
+    }
+}
+
+impl<S: Service> Handler<S> {
+    /// Runs this handler on one request, in the current task.
+    ///
+    /// Use it inside a [`Handler::raw`] to pass a request to another handler.
+    /// In the example, the inner protocols are variants of `AppProtocol`. The
+    /// returned future ends when the request ends. The limit of a
+    /// [`Handler::concurrent`] does not apply here.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use irpc::{Service, channel::oneshot, rpc::Handler, rpc_requests};
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[rpc_requests(message = PingMessage)]
+    /// #[derive(Debug, Serialize, Deserialize)]
+    /// enum PingProtocol {
+    ///     #[rpc(tx = oneshot::Sender<()>)]
+    ///     #[wrap(Ping)]
+    ///     Ping,
+    /// }
+    ///
+    /// #[rpc_requests(message = EchoMessage)]
+    /// #[derive(Debug, Serialize, Deserialize)]
+    /// enum EchoProtocol {
+    ///     #[rpc(tx = oneshot::Sender<String>)]
+    ///     #[wrap(Echo)]
+    ///     Echo(String),
+    /// }
+    ///
+    /// /// Holds a request of `PingProtocol` or of `EchoProtocol`.
+    /// #[derive(Debug, Serialize, Deserialize)]
+    /// enum AppProtocol {
+    ///     Ping(PingProtocol),
+    ///     Echo(EchoProtocol),
+    /// }
+    ///
+    /// impl Service for AppProtocol {
+    ///     // The server passes the inner requests to other handlers, so it
+    ///     // needs no message enum.
+    ///     type Message = ();
+    /// }
+    ///
+    /// fn app_handler(
+    ///     ping: Handler<PingProtocol>,
+    ///     echo: Handler<EchoProtocol>,
+    /// ) -> Handler<AppProtocol> {
+    ///     Handler::raw(move |request, rx, tx| {
+    ///         let (ping, echo) = (ping.clone(), echo.clone());
+    ///         async move {
+    ///             match request {
+    ///                 AppProtocol::Ping(request) => ping.call(request, rx, tx).await,
+    ///                 AppProtocol::Echo(request) => echo.call(request, rx, tx).await,
+    ///             }
+    ///         }
+    ///     })
+    /// }
+    /// ```
+    pub fn call(
+        &self,
+        request: S,
+        rx: noq::RecvStream,
+        tx: noq::SendStream,
+    ) -> impl Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static {
+        (self.f)(request, rx, tx)
+    }
+}
+
+impl<S: RemoteService> Handler<S> {
+    /// Creates a handler that sends each request to `local_sender`.
+    ///
+    /// The server loop waits until the request is in the channel of the
+    /// sender. Then it reads the next request of the connection. So a full
+    /// channel applies backpressure to the connection.
+    pub fn from_sender(local_sender: impl Into<LocalSender<S>>) -> Self {
+        let local_sender = local_sender.into();
+        Self::sequential(move |msg| {
+            let local_sender = local_sender.clone();
+            async move {
+                local_sender.send_raw(msg).await.map_err(|err| {
+                    // The receiver is gone, so the handler cannot handle any
+                    // request. Close with code 0, as a dropped connection does.
+                    warn!("handler stopped: {err:#}");
+                    CloseConnection::new(0, b"")
+                })
+            }
+        })
+    }
+
+    /// Creates a handler that runs `f` for each request, at most `max_concurrent` at a time.
+    ///
+    /// Each call of `f` runs in its own task. The limit applies to each
+    /// connection separately. When `max_concurrent` tasks of a connection run,
+    /// the server loop waits until one of them ends. Then it reads the next
+    /// request.
+    ///
+    /// When the connection ends, the server loop waits for the tasks that still
+    /// run. If a task panics, the server loop logs the panic and continues.
+    ///
+    /// The server uses the handler for all its connections, so `f` must clone
+    /// the state that it needs into its future. The future returns
+    /// `Err(CloseConnection)` to close the connection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_concurrent` is zero.
+    pub fn concurrent<F, Fut>(max_concurrent: usize, f: F) -> Self
+    where
+        F: Fn(S::Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static,
+    {
+        assert!(max_concurrent > 0, "max_concurrent must not be zero");
+        Self {
+            mode: Mode::Concurrent(max_concurrent),
+            ..Self::sequential(f)
+        }
+    }
+
+    /// Creates a handler that runs `f` for each request, one request at a time.
+    ///
+    /// The server loop waits for the future of `f` before it reads the next
+    /// request of the connection. Requests of other connections run at the
+    /// same time. `f` runs in the task of the connection, so a panic ends the
+    /// connection.
+    ///
+    /// The future returns `Err(CloseConnection)` to close the connection.
+    pub fn sequential<F, Fut>(f: F) -> Self
+    where
+        F: Fn(S::Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static,
+    {
+        let f = Arc::new(f);
+        Self::raw(move |msg, rx, tx| {
+            let f = f.clone();
+            async move {
+                // Create the message inside the future: the remote span context
+                // is only available while the future runs.
+                f(S::with_remote_channels(msg, rx, tx)).await
+            }
+        })
+    }
+}
+
+impl<S: RemoteService> From<LocalSender<S>> for Handler<S> {
+    fn from(local_sender: LocalSender<S>) -> Self {
+        Self::from_sender(local_sender)
+    }
+}
 
 /// Extension trait to [`Service`] to create a [`Service::Message`] from a [`Service`]
 /// and a pair of QUIC streams.
@@ -465,20 +789,6 @@ pub trait RemoteService: Service + Sized {
     /// Returns the message enum for this request by combining `self` (the protocol enum)
     /// with a pair of QUIC streams for `tx` and `rx` channels.
     fn with_remote_channels(self, rx: noq::RecvStream, tx: noq::SendStream) -> Self::Message;
-
-    /// Creates a [`Handler`] that forwards all messages to a [`LocalSender`].
-    fn remote_handler(local_sender: LocalSender<Self>) -> Handler<Self> {
-        Arc::new(move |msg, rx, tx| {
-            // `with_remote_channels` reads the task-local span context installed by
-            // the dispatch loop, so it must run inside the future (which is polled
-            // within that scope) rather than eagerly here.
-            let local_sender = local_sender.clone();
-            Box::pin(async move {
-                let msg = Self::with_remote_channels(msg, rx, tx);
-                local_sender.send_raw(msg).await
-            })
-        })
-    }
 }
 
 /// Abstracts over the connections that a server can read requests from.
@@ -503,16 +813,84 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 ///
 /// This function handles requests for a service `S`. The wire format used depends on
 /// `S::SPAN_PROPAGATION` - if true, span context is expected in the wire format.
+///
+/// The [`Handler`] decides if the requests of the connection run one after the
+/// other or at the same time. When the connection ends, this function waits for
+/// the requests that still run. If the caller drops the future of this
+/// function, the requests that still run are aborted.
 pub async fn handle_connection<S: Service>(
     connection: &impl IncomingRemoteConnection,
-    handler: Handler<S>,
+    handler: impl Into<Handler<S>>,
 ) -> io::Result<()> {
+    let Handler { f, mode } = handler.into();
     debug!("connection accepted");
+    // The tasks of concurrent requests. When the set is dropped, the tasks are aborted.
+    let mut tasks = JoinSet::new();
+    let res = read_requests(connection, &f, mode, &mut tasks).await;
+    // The remote can close the connection right after a request, for example
+    // after `Client::notify`. Let such requests complete.
+    while let Some(task) = tasks.join_next().await {
+        task_result(task);
+    }
+    res
+}
+
+/// Reads and runs the requests of a connection until the connection ends.
+async fn read_requests<S: Service>(
+    connection: &impl IncomingRemoteConnection,
+    f: &HandlerFn<S>,
+    mode: Mode,
+    tasks: &mut JoinSet<std::result::Result<(), CloseConnection>>,
+) -> io::Result<()> {
+    let max_concurrent = match mode {
+        Mode::Sequential => 1,
+        Mode::Concurrent(max_concurrent) => max_concurrent,
+    };
+    // The loop keeps this future across iterations, so that a task that ends
+    // does not cancel a request that is only partly read.
+    let mut read = pin!(read_request_inner::<S>(connection));
     loop {
-        let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
-            return Ok(());
+        let close = tokio::select! {
+            biased;
+            Some(task) = tasks.join_next() => task_result(task),
+            next = &mut read, if tasks.len() < max_concurrent => {
+                read.set(read_request_inner::<S>(connection));
+                let Some((msg, carrier, rx, tx)) = next? else {
+                    return Ok(());
+                };
+                let fut = crate::span_propagation::scope_remote(carrier, f(msg, rx, tx));
+                match mode {
+                    Mode::Sequential => fut.await.err(),
+                    Mode::Concurrent(_) => {
+                        tasks.spawn(fut.instrument(tracing::Span::current()));
+                        None
+                    }
+                }
+            }
         };
-        crate::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
+        if let Some(close) = close {
+            close_connection(connection, close);
+            return Ok(());
+        }
+    }
+}
+
+/// Closes `connection` with the code and the reason from a handler.
+fn close_connection(connection: &impl IncomingRemoteConnection, close: CloseConnection) {
+    debug!(code = %close.code, "handler closed the connection");
+    connection.close(close.code, &close.reason);
+}
+
+/// Returns the `CloseConnection` of a request task, and logs a task that panicked.
+fn task_result(
+    result: std::result::Result<std::result::Result<(), CloseConnection>, JoinError>,
+) -> Option<CloseConnection> {
+    match result {
+        Ok(res) => res.err(),
+        Err(err) => {
+            error!("request task failed: {err:#}");
+            None
+        }
     }
 }
 

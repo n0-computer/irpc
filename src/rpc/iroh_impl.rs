@@ -1,5 +1,5 @@
 //! RPC over [`iroh`] connections, with dial by endpoint id.
-use std::{fmt, sync::Arc};
+use std::{fmt, future::Future, sync::Arc};
 
 use iroh::{
     endpoint::{
@@ -16,8 +16,11 @@ use portable_atomic::{AtomicU64, Ordering};
 use tracing::{Instrument, debug, error_span, trace_span, warn};
 
 use crate::{
-    LocalSender, RequestError, Service,
-    rpc::{Handler, IncomingRemoteConnection, RemoteConnection, RemoteService, handle_connection},
+    RequestError, Service,
+    rpc::{
+        CloseConnection, Handler, IncomingRemoteConnection, RemoteConnection, RemoteService,
+        handle_connection,
+    },
 };
 
 impl RemoteConnection for Connection {
@@ -152,20 +155,45 @@ impl<T> fmt::Debug for IrohProtocol<T> {
 }
 
 impl<S: Service> IrohProtocol<S> {
-    pub fn with_sender(local_sender: impl Into<LocalSender<S>>) -> Self
-    where
-        S: RemoteService,
-    {
-        let handler = S::remote_handler(local_sender.into());
-        Self::new(handler)
-    }
-
     /// Creates a new [`IrohProtocol`] for the `handler`.
-    pub fn new(handler: Handler<S>) -> Self {
+    ///
+    /// `handler` can also be a [`LocalSender`](crate::LocalSender). The protocol then sends
+    /// each request to it.
+    pub fn new(handler: impl Into<Handler<S>>) -> Self {
         Self {
-            handler,
+            handler: handler.into(),
             request_id: Default::default(),
         }
+    }
+}
+
+impl<S: RemoteService> IrohProtocol<S> {
+    /// Creates an [`IrohProtocol`] that runs `f` for each request, at most `max_concurrent` at a time.
+    ///
+    /// This is the same as `IrohProtocol::new(Handler::concurrent(max_concurrent, f))`.
+    /// See [`Handler::concurrent`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_concurrent` is zero.
+    pub fn concurrent<F, Fut>(max_concurrent: usize, f: F) -> Self
+    where
+        F: Fn(S::Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), CloseConnection>> + Send + 'static,
+    {
+        Self::new(Handler::concurrent(max_concurrent, f))
+    }
+
+    /// Creates an [`IrohProtocol`] that runs `f` for each request, one request at a time.
+    ///
+    /// This is the same as `IrohProtocol::new(Handler::sequential(f))`. See
+    /// [`Handler::sequential`].
+    pub fn sequential<F, Fut>(f: F) -> Self
+    where
+        F: Fn(S::Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), CloseConnection>> + Send + 'static,
+    {
+        Self::new(Handler::sequential(f))
     }
 }
 
@@ -198,18 +226,13 @@ impl<T> fmt::Debug for Iroh0RttProtocol<T> {
 }
 
 impl<S: Service> Iroh0RttProtocol<S> {
-    pub fn with_sender(local_sender: impl Into<LocalSender<S>>) -> Self
-    where
-        S: RemoteService,
-    {
-        let handler = S::remote_handler(local_sender.into());
-        Self::new(handler)
-    }
-
     /// Creates a new [`Iroh0RttProtocol`] for the `handler`.
-    pub fn new(handler: Handler<S>) -> Self {
+    ///
+    /// `handler` can also be a [`LocalSender`](crate::LocalSender). The protocol then sends
+    /// each request to it.
+    pub fn new(handler: impl Into<Handler<S>>) -> Self {
         Self {
-            handler,
+            handler: handler.into(),
             request_id: Default::default(),
         }
     }
@@ -269,7 +292,8 @@ impl IncomingRemoteConnection for Connection {
 /// Utility function to listen for incoming connections and handle them with the provided handler.
 ///
 /// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
-pub async fn listen<S: Service>(endpoint: iroh::Endpoint, handler: Handler<S>) {
+pub async fn listen<S: Service>(endpoint: iroh::Endpoint, handler: impl Into<Handler<S>>) {
+    let handler = handler.into();
     let mut request_id = 0u64;
     let mut tasks = n0_future::task::JoinSet::new();
     loop {
