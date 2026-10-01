@@ -698,6 +698,31 @@ impl<S: Service> Handler<S> {
     ) -> impl Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static {
         (self.f)(request, rx, tx)
     }
+
+    /// Handles the requests of `connection` until the connection ends.
+    ///
+    /// The wire format depends on `S::SPAN_PROPAGATION`. If it is true, each
+    /// request carries a span context.
+    ///
+    /// The handler decides if the requests of the connection run one after the
+    /// other or at the same time. When the connection ends, this function waits
+    /// for the requests that still run. If the caller drops the future of this
+    /// function, the requests that still run are aborted.
+    pub async fn handle_connection(
+        &self,
+        connection: &impl IncomingRemoteConnection,
+    ) -> io::Result<()> {
+        debug!("connection accepted");
+        // The tasks of concurrent requests. When the set is dropped, the tasks are aborted.
+        let mut tasks = JoinSet::new();
+        let res = read_requests(connection, &self.f, self.mode, &mut tasks).await;
+        // The remote can close the connection right after a request, for example
+        // after `Client::notify`. Let such requests complete.
+        while let Some(task) = tasks.join_next().await {
+            task_result(task);
+        }
+        res
+    }
 }
 
 impl<S: RemoteService> Handler<S> {
@@ -794,8 +819,8 @@ pub trait RemoteService: Service + Sized {
 /// Abstracts over the connections that a server can read requests from.
 ///
 /// This is implemented for noq connections, and for iroh connections with and
-/// without 0-RTT. It is used by [`read_request`] and [`handle_connection`] to
-/// work with all of these.
+/// without 0-RTT. It is used by [`read_request`] and [`Handler::handle_connection`]
+/// to work with all of these.
 ///
 /// This trait is sealed: only irpc can implement it. So irpc can add methods to
 /// it without a breaking change.
@@ -807,32 +832,6 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 
     /// Closes the connection.
     fn close(&self, error_code: VarInt, reason: &[u8]);
-}
-
-/// Handles a single connection with the provided `handler`.
-///
-/// This function handles requests for a service `S`. The wire format used depends on
-/// `S::SPAN_PROPAGATION` - if true, span context is expected in the wire format.
-///
-/// The [`Handler`] decides if the requests of the connection run one after the
-/// other or at the same time. When the connection ends, this function waits for
-/// the requests that still run. If the caller drops the future of this
-/// function, the requests that still run are aborted.
-pub async fn handle_connection<S: Service>(
-    connection: &impl IncomingRemoteConnection,
-    handler: impl Into<Handler<S>>,
-) -> io::Result<()> {
-    let Handler { f, mode } = handler.into();
-    debug!("connection accepted");
-    // The tasks of concurrent requests. When the set is dropped, the tasks are aborted.
-    let mut tasks = JoinSet::new();
-    let res = read_requests(connection, &f, mode, &mut tasks).await;
-    // The remote can close the connection right after a request, for example
-    // after `Client::notify`. Let such requests complete.
-    while let Some(task) = tasks.join_next().await {
-        task_result(task);
-    }
-    res
 }
 
 /// Reads and runs the requests of a connection until the connection ends.
@@ -916,7 +915,7 @@ pub async fn read_request<S: RemoteService>(
 /// This accepts a bi-directional stream from the connection and reads and parses the request.
 ///
 /// When `S::SPAN_PROPAGATION` is true, any propagated span context on the wire is
-/// silently dropped. Use [`handle_connection`] (or [`read_request`]) if you need
+/// silently dropped. Use [`Handler::handle_connection`] (or [`read_request`]) if you need
 /// the propagated context to reach the generated handler spans.
 ///
 /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.

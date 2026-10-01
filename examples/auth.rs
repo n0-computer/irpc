@@ -79,7 +79,7 @@ mod storage {
     // Import the macro
     use irpc::{
         iroh::IrohLazyRemoteConnection,
-        rpc::{CloseConnection, Handler, handle_connection, read_request},
+        rpc::{CloseConnection, Handler, read_request},
     };
     use serde::{Deserialize, Serialize};
     use tracing::info;
@@ -152,7 +152,8 @@ mod storage {
                 let this = this.clone();
                 async move { this.handle_authenticated(msg).await }
             });
-            handle_connection(&conn, handler)
+            handler
+                .handle_connection(&conn)
                 .await
                 .map_err(AcceptError::from_err)?;
             Ok(())

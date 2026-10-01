@@ -5,7 +5,7 @@
 //! but actual OpenTelemetry integration requires the `tracing-opentelemetry` feature.
 //!
 //! The propagated context is scoped to a single request handler via a tokio task-local,
-//! installed by the dispatch loop in `handle_connection`. This isolates concurrent
+//! installed by the dispatch loop in `Handler::handle_connection`. This isolates concurrent
 //! requests from each other and is robust to thread migration across `.await` points.
 
 use std::{collections::HashMap, future::Future};
