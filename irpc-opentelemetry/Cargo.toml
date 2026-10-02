@@ -11,7 +11,7 @@ description = "OpenTelemetry span propagation for irpc"
 rust-version = "1.91"
 
 [dependencies]
-irpc = { version = "0.17.0", path = "..", default-features = false, features = ["rpc"] }
+irpc = { version = "0.17.0", path = "..", default-features = false, features = ["span-propagation"] }
 opentelemetry = "0.32"
 tracing = { workspace = true }
 tracing-opentelemetry = "0.33"

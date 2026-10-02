@@ -87,6 +87,8 @@ jobs:
         run: cargo check --locked --no-default-features --features spans --bins --tests --examples
       - name: cargo check (irpc, feature rpc)
         run: cargo check --locked --no-default-features --features rpc --bins --tests --examples
+      - name: cargo check (irpc, feature span-propagation)
+        run: cargo check --locked --no-default-features --features span-propagation --bins --tests --examples
       - name: cargo check (irpc-opentelemetry)
         run: cargo check --locked -p irpc-opentelemetry --bins --tests --examples
 
