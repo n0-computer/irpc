@@ -4,7 +4,7 @@
 use irpc::{
     Client, WithChannels,
     noq::listen,
-    rpc::{ERROR_CODE_INVALID_REQUEST, Handler, read_request},
+    rpc::{ERROR_CODE_DECODE_FAILED, Handler, read_request},
 };
 use n0_future::task::AbortOnDropHandle;
 use noq::ConnectionError;
@@ -61,14 +61,15 @@ async fn bad_request_closes_connection() -> TestResult<()> {
     let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
     let client = Client::<client::EchoProtocol>::boxed(conn.clone());
 
-    client
+    let err = client
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
+    assert!(err.is_invalid_request(), "{err:?}");
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ERROR_CODE_INVALID_REQUEST.into());
+    assert_eq!(close.error_code, ERROR_CODE_DECODE_FAILED.into());
     Ok(())
 }
 

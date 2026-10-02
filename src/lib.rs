@@ -1011,19 +1011,25 @@ impl Error {
                     },
                 ..
             } => true,
-            _ => matches!(self.stream_error(), Some(rpc::StreamError::ConnectionLost)),
+            _ => matches!(
+                self.stream_error(),
+                Some(rpc::StreamError::ConnectionLost(_))
+            ),
         }
     }
 
     /// Returns true if the remote could not decode the request or a message on its channels.
     ///
-    /// For example, the remote does not know the request type. The connection
-    /// is still usable.
+    /// For example, the remote does not know the request type. This is also
+    /// true if the remote closed the connection because of a request that did
+    /// not decode, see [Bad requests](rpc#bad-requests).
     pub fn is_invalid_request(&self) -> bool {
-        matches!(
-            self.stream_error(),
-            Some(rpc::StreamError::Code(code)) if code == rpc::ERROR_CODE_INVALID_REQUEST as u64
-        )
+        let code = match self.stream_error() {
+            Some(rpc::StreamError::Code(code)) => code,
+            Some(rpc::StreamError::ConnectionLost(Some(code))) => code,
+            _ => return false,
+        };
+        code == rpc::ERROR_CODE_DECODE_FAILED as u64
     }
 
     fn stream_error(&self) -> Option<rpc::StreamError> {
