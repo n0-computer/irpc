@@ -27,6 +27,7 @@ n0-error = { workspace = true }
 
 # used in the endpoint handler code when using rpc
 tracing = { workspace = true, optional = true }
+tracing-subscriber = { version = "0.3.23", default-features = false, optional = true }
 # used to ser/de messages when using rpc
 postcard = { workspace = true, features = ["alloc", "use-std"], optional = true }
 # currently only transport when using rpc
@@ -82,7 +83,7 @@ n0-tracing-test = "0.3.0"
 
 [features]
 # enable the remote transport
-rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:tracing", "tokio/io-util", "tokio/rt"]
+rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:tracing", "dep:tracing-subscriber", "tokio/io-util", "tokio/rt"]
 # enable the iroh transport
 iroh = ["rpc", "dep:iroh", "dep:portable-atomic", "dep:getrandom"]
 # add helpers to create noq endpoints, for tests and for rpc on localhost
@@ -198,4 +199,7 @@ allowed_external_types = [
     "futures_core::stream::Stream",
     "futures_lite::future::Boxed",
     "futures_sink::Sink",
+    # `span_propagation::PropagatorLayer` is a tracing layer
+    "tracing_core::subscriber::Subscriber",
+    "tracing_subscriber::layer::Layer",
 ]

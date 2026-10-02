@@ -6,13 +6,20 @@
 //! propagator of `opentelemetry`, and the server sets the parent of the request
 //! span from it.
 //!
-//! Install it once at startup, after the `opentelemetry` setup:
+//! Add its [`layer`] to the tracing subscriber, next to the
+//! `tracing-opentelemetry` layer:
 //!
 //! ```no_run
+//! use tracing_subscriber::{Registry, layer::SubscriberExt};
+//!
 //! opentelemetry::global::set_text_map_propagator(
 //!     opentelemetry_sdk::propagation::TraceContextPropagator::new(),
 //! );
-//! irpc_opentelemetry::install().expect("no other propagator is installed");
+//! let tracer = opentelemetry::global::tracer("app");
+//! let subscriber = Registry::default()
+//!     .with(tracing_opentelemetry::layer().with_tracer(tracer))
+//!     .with(irpc_opentelemetry::layer());
+//! tracing::subscriber::set_global_default(subscriber).expect("no other subscriber is set");
 //! ```
 //!
 //! Spans reach OpenTelemetry through the `tracing-opentelemetry` layer. This
@@ -20,7 +27,7 @@
 //! it re-exports. The application must use the same versions, because both
 //! crates keep their state in statics.
 
-use irpc::span_propagation::{Propagator, PropagatorAlreadySet, SpanContextCarrier};
+use irpc::span_propagation::{Propagator, PropagatorLayer, SpanContextCarrier};
 pub use opentelemetry;
 use opentelemetry::propagation::{Extractor, Injector};
 pub use tracing_opentelemetry;
@@ -48,13 +55,9 @@ impl Propagator for OtelPropagator {
     }
 }
 
-/// Installs [`OtelPropagator`] as the span propagator of irpc.
-///
-/// # Errors
-///
-/// Returns [`PropagatorAlreadySet`] if a propagator is installed already.
-pub fn install() -> Result<(), PropagatorAlreadySet> {
-    irpc::span_propagation::set_propagator(OtelPropagator)
+/// Returns a tracing layer that makes irpc propagate span context with [`OtelPropagator`].
+pub fn layer() -> PropagatorLayer {
+    PropagatorLayer::new(OtelPropagator)
 }
 
 /// Writes headers into a [`SpanContextCarrier`].

@@ -6,7 +6,12 @@
 //!
 //! irpc does not know any tracing backend. A [`Propagator`] writes the context
 //! of a span into the headers on the client, and sets the parent of a span from
-//! the headers on the server. Install one per process with [`set_propagator`].
+//! the headers on the server.
+//!
+//! irpc finds the propagator through the tracing subscriber: add a
+//! [`PropagatorLayer`] to it. The client asks the subscriber of the current
+//! thread, and the server asks the subscriber of the request span. Without the
+//! layer, irpc does not propagate span context.
 //!
 //! The propagator does not change the wire format: a protocol with
 //! `span_propagation` always sends the `Option<SpanContextCarrier>`. Without a
@@ -14,17 +19,13 @@
 //!
 //! The `irpc-opentelemetry` crate has a propagator for OpenTelemetry.
 
-use std::{collections::HashMap, future::Future, sync::OnceLock};
+use std::{collections::HashMap, future::Future};
 
-use n0_error::stack_error;
 use serde::{Deserialize, Serialize};
 
 tokio::task_local! {
     static SPAN_CONTEXT: SpanContextCarrier;
 }
-
-/// The propagator of this process.
-static PROPAGATOR: OnceLock<Box<dyn Propagator>> = OnceLock::new();
 
 /// Text headers that carry the context of a span to the remote.
 ///
@@ -52,12 +53,14 @@ impl SpanContextCarrier {
         self.headers.keys().map(String::as_str)
     }
 
-    /// Returns the context of the current span, if a propagator is installed.
+    /// Returns the context of the current span, if the subscriber has a propagator.
     pub(crate) fn from_current() -> Option<Self> {
-        let propagator = PROPAGATOR.get()?;
-        let mut carrier = Self::default();
-        propagator.inject(&tracing::Span::current(), &mut carrier);
-        Some(carrier)
+        tracing::dispatcher::get_default(|dispatch| {
+            let propagator = dispatch.downcast_ref::<PropagatorLayer>()?;
+            let mut carrier = Self::default();
+            propagator.0.inject(&tracing::Span::current(), &mut carrier);
+            Some(carrier)
+        })
     }
 }
 
@@ -70,21 +73,25 @@ pub trait Propagator: Send + Sync + 'static {
     fn set_parent(&self, span: &tracing::Span, carrier: &SpanContextCarrier);
 }
 
-/// The error of [`set_propagator`] when a propagator is installed already.
-#[stack_error(derive)]
-#[error("a span propagator is already installed")]
-pub struct PropagatorAlreadySet;
+/// A tracing layer that hands out a [`Propagator`] to irpc.
+///
+/// The layer records nothing. irpc finds it with [`tracing::Dispatch::downcast_ref`].
+pub struct PropagatorLayer(Box<dyn Propagator>);
 
-/// Installs the propagator for this process.
-///
-/// # Errors
-///
-/// Returns [`PropagatorAlreadySet`] if a propagator is installed already.
-pub fn set_propagator(propagator: impl Propagator) -> Result<(), PropagatorAlreadySet> {
-    PROPAGATOR
-        .set(Box::new(propagator))
-        .map_err(|_| PropagatorAlreadySet)
+impl PropagatorLayer {
+    /// Creates a layer for `propagator`.
+    pub fn new(propagator: impl Propagator) -> Self {
+        Self(Box::new(propagator))
+    }
 }
+
+impl std::fmt::Debug for PropagatorLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PropagatorLayer").finish_non_exhaustive()
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}
 
 /// Runs `fut` with `carrier` in scope for [`set_span_parent_from_remote`].
 ///
@@ -99,10 +106,12 @@ pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F
 /// Sets the parent of `span` from the span context of the current request.
 ///
 /// The code from `rpc_requests(span_propagation)` calls this. It does nothing
-/// outside of [`scope_remote`] or without a propagator.
+/// outside of [`scope_remote`], or if the subscriber of `span` has no propagator.
 pub fn set_span_parent_from_remote(span: &tracing::Span) {
-    let Some(propagator) = PROPAGATOR.get() else {
-        return;
-    };
-    let _ = SPAN_CONTEXT.try_with(|carrier| propagator.set_parent(span, carrier));
+    span.with_subscriber(|(_id, dispatch)| {
+        let Some(propagator) = dispatch.downcast_ref::<PropagatorLayer>() else {
+            return;
+        };
+        let _ = SPAN_CONTEXT.try_with(|carrier| propagator.0.set_parent(span, carrier));
+    });
 }

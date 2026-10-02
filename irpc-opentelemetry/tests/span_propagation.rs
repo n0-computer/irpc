@@ -42,7 +42,6 @@ mod span_propagation {
         opentelemetry::global::set_text_map_propagator(
             opentelemetry_sdk::propagation::TraceContextPropagator::new(),
         );
-        irpc_opentelemetry::install().expect("no other propagator is installed");
 
         // Use an in-memory exporter so we can inspect exported spans after the test.
         let exporter = InMemorySpanExporter::default();
@@ -58,6 +57,8 @@ mod span_propagation {
         // that impls `LookupSpan`
         let subscriber = Registry::default()
             .with(telemetry)
+            .with(irpc_opentelemetry::layer())
+            .with(irpc_opentelemetry::layer())
             .with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::from_default_env()));
         tracing::subscriber::set_global_default(subscriber).expect("global already set");
 

@@ -84,7 +84,6 @@ fn init_tracing(
     opentelemetry::global::set_text_map_propagator(
         opentelemetry_sdk::propagation::TraceContextPropagator::new(),
     );
-    irpc_opentelemetry::install()?;
 
     // (2) Build the OTLP HTTP/protobuf exporter pointed at the collector
     //     (Jaeger's OTLP ingestor by default). The `reqwest-blocking-client`
@@ -126,11 +125,15 @@ fn init_tracing(
         .with_filter(EnvFilter::new("info"));
     let fmt_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("span_propagation=info"));
-    let subscriber = Registry::default().with(telemetry).with(
-        tracing_subscriber::fmt::layer()
-            .with_target(false)
-            .with_filter(fmt_filter),
-    );
+    // The irpc layer writes the span context into each request.
+    let subscriber = Registry::default()
+        .with(telemetry)
+        .with(irpc_opentelemetry::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_filter(fmt_filter),
+        );
     tracing::subscriber::set_global_default(subscriber)?;
     Ok(provider)
 }
