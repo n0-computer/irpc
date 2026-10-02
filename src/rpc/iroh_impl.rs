@@ -174,7 +174,8 @@ impl<S: Service> ProtocolHandler for IrohProtocol<S> {
         let handler = self.handler.clone();
         let request_id = self.request_id.fetch_add(1, Ordering::AcqRel);
         let fut = handle_connection::<S>(&connection, handler).map_err(AcceptError::from_err);
-        let span = trace_span!("rpc", id = request_id);
+        let remote = connection.remote_id().fmt_short();
+        let span = trace_span!("rpc", id = request_id, remote = %remote);
         fut.instrument(span).await
     }
 }
@@ -219,9 +220,14 @@ impl<S: Service> ProtocolHandler for Iroh0RttProtocol<S> {
         let zrtt_conn = accepting.into_0rtt();
         let handler = self.handler.clone();
         let request_id = self.request_id.fetch_add(1, Ordering::AcqRel);
+        let span = trace_span!("rpc", id = request_id, remote = tracing::field::Empty);
+        // The remote id of a 0-RTT connection can be unknown.
+        if let Ok(remote) = zrtt_conn.remote_id() {
+            span.record("remote", tracing::field::display(remote.fmt_short()));
+        }
         handle_connection::<S>(&zrtt_conn, handler)
             .map_err(AcceptError::from_err)
-            .instrument(trace_span!("rpc", id = request_id))
+            .instrument(span)
             .await?;
         let conn = zrtt_conn
             .handshake_completed()
@@ -244,11 +250,6 @@ impl IncomingRemoteConnection for IncomingZeroRttConnection {
     fn close(&self, error_code: VarInt, reason: &[u8]) {
         self.close(error_code, reason)
     }
-
-    fn remote_label(&self) -> Option<String> {
-        let remote = self.remote_id().ok()?;
-        Some(remote.fmt_short().to_string())
-    }
 }
 
 impl IncomingRemoteConnection for Connection {
@@ -258,10 +259,6 @@ impl IncomingRemoteConnection for Connection {
 
     fn close(&self, error_code: VarInt, reason: &[u8]) {
         self.close(error_code, reason)
-    }
-
-    fn remote_label(&self) -> Option<String> {
-        Some(self.remote_id().fmt_short().to_string())
     }
 }
 
@@ -287,10 +284,14 @@ pub async fn listen<S: Service>(endpoint: iroh::Endpoint, handler: Handler<S>) {
         let handler = handler.clone();
         let fut = async move {
             match incoming.await {
-                Ok(connection) => match handle_connection::<S>(&connection, handler).await {
-                    Err(err) => warn!("connection closed with error: {err:?}"),
-                    Ok(()) => debug!("connection closed"),
-                },
+                Ok(connection) => {
+                    let remote = connection.remote_id().fmt_short();
+                    tracing::Span::current().record("remote", tracing::field::display(remote));
+                    match handle_connection::<S>(&connection, handler).await {
+                        Err(err) => warn!("connection closed with error: {err:?}"),
+                        Ok(()) => debug!("connection closed"),
+                    }
+                }
                 Err(cause) => {
                     warn!("failed to accept connection: {cause:?}");
                 }
