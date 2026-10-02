@@ -87,8 +87,8 @@ jobs:
         run: cargo check --locked --no-default-features --features spans --bins --tests --examples
       - name: cargo check (irpc, feature rpc)
         run: cargo check --locked --no-default-features --features rpc --bins --tests --examples
-      - name: cargo check (irpc, feature tracing-opentelemetry)
-        run: cargo check --locked --no-default-features --features tracing-opentelemetry --bins --tests --examples
+      - name: cargo check (irpc-opentelemetry)
+        run: cargo check --locked -p irpc-opentelemetry --bins --tests --examples
 
   test-release:
     runs-on: ${{ matrix.target.os }}
@@ -144,6 +144,8 @@ jobs:
 
       - name: irpc
         run: cargo docs-rs --locked -p irpc
+      - name: irpc-opentelemetry
+        run: cargo docs-rs --locked -p irpc-opentelemetry
 
   wasm_build:
     name: Build wasm32

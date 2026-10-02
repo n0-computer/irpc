@@ -1,112 +1,108 @@
-//! Span context propagation for remote RPC calls
+//! Span context propagation across remote connections.
 //!
-//! This module provides the `SpanContextCarrier` type for propagating trace context
-//! across remote boundaries. The type is always available when `rpc` feature is enabled,
-//! but actual OpenTelemetry integration requires the `tracing-opentelemetry` feature.
+//! A protocol opts in with the `span_propagation` argument of the
+//! [`rpc_requests`](crate::rpc_requests) macro. Each request then carries a
+//! [`SpanContextCarrier`], a map of text headers, in front of the request.
 //!
-//! The propagated context is scoped to a single request handler via a tokio task-local,
-//! installed by the dispatch loop in `handle_connection`. This isolates concurrent
-//! requests from each other and is robust to thread migration across `.await` points.
+//! irpc does not know any tracing backend. A [`Propagator`] writes the context
+//! of a span into the headers on the client, and sets the parent of a span from
+//! the headers on the server. Install one per process with [`set_propagator`].
+//!
+//! The propagator does not change the wire format: a protocol with
+//! `span_propagation` always sends the `Option<SpanContextCarrier>`. Without a
+//! propagator, its value is `None`.
+//!
+//! The `irpc-opentelemetry` crate has a propagator for OpenTelemetry.
 
-use std::{collections::HashMap, future::Future};
+use std::{collections::HashMap, future::Future, sync::OnceLock};
 
+use n0_error::stack_error;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "tracing-opentelemetry")]
 tokio::task_local! {
-    static SPAN_CONTEXT: opentelemetry::Context;
+    static SPAN_CONTEXT: SpanContextCarrier;
 }
 
-/// Carrier for propagating span context across RPC boundaries using W3C Trace Context format.
+/// The propagator of this process.
+static PROPAGATOR: OnceLock<Box<dyn Propagator>> = OnceLock::new();
+
+/// Text headers that carry the context of a span to the remote.
 ///
-/// This type is always available for serialization purposes. When the
-/// `tracing-opentelemetry` feature is enabled, it can extract/inject actual
-/// OpenTelemetry trace context. Without that feature, it simply serializes as an
-/// empty map.
+/// On the wire, this is a map from string to string. Propagators decide which
+/// headers they use, for example `traceparent` and `tracestate` for W3C trace
+/// context.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SpanContextCarrier {
     headers: HashMap<String, String>,
 }
 
-#[cfg(feature = "tracing-opentelemetry")]
-impl opentelemetry::propagation::Injector for SpanContextCarrier {
-    fn set(&mut self, key: &str, value: String) {
-        self.headers.insert(key.to_string(), value);
-    }
-}
-
-#[cfg(feature = "tracing-opentelemetry")]
-impl opentelemetry::propagation::Extractor for SpanContextCarrier {
-    fn get(&self, key: &str) -> Option<&str> {
-        self.headers.get(key).map(|v| v.as_str())
-    }
-
-    fn keys(&self) -> Vec<&str> {
-        self.headers.keys().map(|k| k.as_str()).collect()
-    }
-}
-
 impl SpanContextCarrier {
-    /// Create a carrier from the current OpenTelemetry context.
-    ///
-    /// When `tracing-opentelemetry` feature is enabled, this extracts the current
-    /// trace context. Without the feature, this returns an empty carrier.
-    #[cfg(feature = "tracing-opentelemetry")]
-    pub fn from_current() -> Self {
-        use opentelemetry::global;
-        use tracing_opentelemetry::OpenTelemetrySpanExt;
+    /// Returns the value of the header `key`.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.headers.get(key).map(String::as_str)
+    }
+
+    /// Sets the header `key` to `value`.
+    pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.headers.insert(key.into(), value.into());
+    }
+
+    /// Returns the keys of all headers.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.headers.keys().map(String::as_str)
+    }
+
+    /// Returns the context of the current span, if a propagator is installed.
+    pub(crate) fn from_current() -> Option<Self> {
+        let propagator = PROPAGATOR.get()?;
         let mut carrier = Self::default();
-        // Get the OTel context from the current tracing span, not from
-        // opentelemetry::Context::current(). The tracing-opentelemetry layer
-        // stores OTel spans inside tracing spans, so the thread-local OTel
-        // context won't have the right span.
-        let ctx = tracing::Span::current().context();
-        global::get_text_map_propagator(|prop| {
-            prop.inject_context(&ctx, &mut carrier);
-        });
-        carrier
-    }
-
-    #[cfg(not(feature = "tracing-opentelemetry"))]
-    pub fn from_current() -> Self {
-        Self::default()
-    }
-
-    /// Extract an OpenTelemetry context from this carrier.
-    #[cfg(feature = "tracing-opentelemetry")]
-    pub fn to_context(&self) -> opentelemetry::Context {
-        use opentelemetry::global;
-        global::get_text_map_propagator(|prop| {
-            prop.extract_with_context(&opentelemetry::Context::current(), self)
-        })
+        propagator.inject(&tracing::Span::current(), &mut carrier);
+        Some(carrier)
     }
 }
 
-/// Run `fut` with `carrier`'s context installed as the per-task scope read by
-/// [`set_span_parent_from_remote`].
+/// Connects span propagation to a tracing backend.
+pub trait Propagator: Send + Sync + 'static {
+    /// Writes the context of `span` into `carrier`.
+    fn inject(&self, span: &tracing::Span, carrier: &mut SpanContextCarrier);
+
+    /// Sets the parent of `span` from the context in `carrier`.
+    fn set_parent(&self, span: &tracing::Span, carrier: &SpanContextCarrier);
+}
+
+/// The error of [`set_propagator`] when a propagator is installed already.
+#[stack_error(derive)]
+#[error("a span propagator is already installed")]
+pub struct PropagatorAlreadySet;
+
+/// Installs the propagator for this process.
 ///
-/// Used by transport implementations (`irpc::rpc`, `irpc::iroh`) to wrap a single
-/// request handler. Most users will not call this directly.
+/// # Errors
+///
+/// Returns [`PropagatorAlreadySet`] if a propagator is installed already.
+pub fn set_propagator(propagator: impl Propagator) -> Result<(), PropagatorAlreadySet> {
+    PROPAGATOR
+        .set(Box::new(propagator))
+        .map_err(|_| PropagatorAlreadySet)
+}
+
+/// Runs `fut` with `carrier` in scope for [`set_span_parent_from_remote`].
+///
+/// The server loop calls this for each request. Most users do not call it.
 pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F) -> F::Output {
-    #[cfg(feature = "tracing-opentelemetry")]
-    if let Some(carrier) = carrier {
-        return SPAN_CONTEXT.scope(carrier.to_context(), fut).await;
+    match carrier {
+        Some(carrier) => SPAN_CONTEXT.scope(carrier, fut).await,
+        None => fut.await,
     }
-    let _ = carrier;
-    fut.await
 }
 
-/// Set the parent of a span from the propagated remote context, if one is in scope.
+/// Sets the parent of `span` from the span context of the current request.
 ///
-/// Called by the code generated by `rpc_requests(span_propagation)`. Looks up the
-/// task-local installed by the dispatch loop; no-op outside that scope.
+/// The code from `rpc_requests(span_propagation)` calls this. It does nothing
+/// outside of [`scope_remote`] or without a propagator.
 pub fn set_span_parent_from_remote(span: &tracing::Span) {
-    #[cfg(feature = "tracing-opentelemetry")]
-    {
-        let _ = SPAN_CONTEXT.try_with(|ctx| {
-            use tracing_opentelemetry::OpenTelemetrySpanExt;
-            let _ = span.set_parent(ctx.clone());
-        });
-    }
-    let _ = span;
+    let Some(propagator) = PROPAGATOR.get() else {
+        return;
+    };
+    let _ = SPAN_CONTEXT.try_with(|carrier| propagator.set_parent(span, carrier));
 }

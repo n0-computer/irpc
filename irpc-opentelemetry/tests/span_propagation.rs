@@ -1,4 +1,3 @@
-#[cfg(feature = "tracing-opentelemetry")]
 mod span_propagation {
     use std::sync::Arc;
 
@@ -43,6 +42,7 @@ mod span_propagation {
         opentelemetry::global::set_text_map_propagator(
             opentelemetry_sdk::propagation::TraceContextPropagator::new(),
         );
+        irpc_opentelemetry::install().expect("no other propagator is installed");
 
         // Use an in-memory exporter so we can inspect exported spans after the test.
         let exporter = InMemorySpanExporter::default();

@@ -140,7 +140,7 @@ pub(crate) fn prepare_write<S: Service>(
 
     if S::SPAN_PROPAGATION {
         // Include span context in wire format
-        let span_ctx = Some(crate::span_propagation::SpanContextCarrier::from_current());
+        let span_ctx = crate::span_propagation::SpanContextCarrier::from_current();
         let payload = (span_ctx, msg);
         if postcard::experimental::serialized_size(&payload)? as u64 > MAX_MESSAGE_SIZE {
             return Err(e!(WriteError::MaxMessageSizeExceeded));

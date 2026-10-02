@@ -220,12 +220,10 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// * `no_rpc` *(optional, no value)*: If set, no implementation of `RemoteService` will be generated and the generated
 ///   code works without the `rpc` feature of `irpc`.
 /// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
-/// * `span_propagation` *(optional, no value)*: If set, enables OpenTelemetry span context propagation
-///   across remote connections. When enabled, span context is included in the wire format as
-///   `(Option<SpanContextCarrier>, Message)`, and the generated `RemoteService` implementation
-///   will set the parent span from the propagated remote context. Requires the `tracing-opentelemetry`
-///   feature to be enabled for actual OpenTelemetry integration; without it, the context is
-///   still serialized but has no effect.
+/// * `span_propagation` *(optional, no value)*: If set, each request carries the span context
+///   of the client, as `(Option<SpanContextCarrier>, Message)` on the wire. The generated
+///   `RemoteService` implementation sets the parent of the request span from it. This needs a
+///   [`span_propagation::Propagator`], for example from the `irpc-opentelemetry` crate.
 ///
 /// ## Variant attributes
 ///
