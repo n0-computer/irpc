@@ -7,7 +7,7 @@ use std::{
     fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
 };
 
-use n0_error::{e, stack_error};
+use n0_error::{AnyError, e, stack_error};
 use n0_future::future::Boxed as BoxFuture;
 use noq::{ConnectionError, VarInt};
 use serde::de::DeserializeOwned;
@@ -117,6 +117,46 @@ pub trait RemoteConnection: Send + Sync + Debug + 'static {
     ///
     /// For connections that were fully authenticated before allowing to send any data, this should return `false`.
     fn zero_rtt_rejected(&self) -> BoxFuture<bool>;
+
+    /// Returns a copy of this connection that runs `hook` on each new connection.
+    ///
+    /// Returns `None` if this connection does not open connections itself.
+    fn with_connect_hook(&self, hook: ConnectHook) -> Option<Box<dyn RemoteConnection>> {
+        let _ = hook;
+        None
+    }
+
+    /// Opens the connection now, if it is not open.
+    fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// A function that a client runs on each new connection, before any request.
+///
+/// Create it with [`Client::on_connect`](crate::Client::on_connect).
+#[derive(Clone)]
+pub struct ConnectHook(pub(crate) Arc<ConnectFn>);
+
+type ConnectFn =
+    dyn Fn(Box<dyn RemoteConnection>) -> BoxFuture<std::result::Result<(), AnyError>> + Send + Sync;
+
+impl Debug for ConnectHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectHook").finish_non_exhaustive()
+    }
+}
+
+impl ConnectHook {
+    /// Runs the hook for `connection`.
+    pub(crate) async fn run(
+        &self,
+        connection: Box<dyn RemoteConnection>,
+    ) -> std::result::Result<(), RequestError> {
+        (self.0)(connection)
+            .await
+            .map_err(|err| e!(RequestError::Other, err))
+    }
 }
 
 /// A connection to a remote service that can be used to send the initial message.

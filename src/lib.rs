@@ -598,6 +598,57 @@ impl<S: Service> Client<S> {
         Self(ClientInner::Remote(Box::new(remote)), PhantomData)
     }
 
+    /// Sets a function that runs on each new connection, before any request.
+    ///
+    /// `hook` gets a client for the new connection. Use it for requests that
+    /// must come first on each connection, for example authentication. Do not
+    /// use the outer client in the hook: it waits for the hook to finish.
+    ///
+    /// If the hook returns an error, the client closes the connection, and the
+    /// request that caused the connect fails with [`RequestError::Other`]. The
+    /// next request connects again and runs the hook again.
+    ///
+    /// All requests of the client and its clones wait while the hook runs. Use
+    /// a timeout in the hook if the remote can be slow.
+    ///
+    /// The hook runs only for clients that open connections themselves: those
+    /// from [`Client::noq`] and [`Client::iroh`]. For a local client, or a
+    /// client with a fixed connection from [`Client::boxed`], it never runs.
+    /// Clones of this client from before the call do not run it either.
+    #[cfg(feature = "rpc")]
+    pub fn on_connect<F, Fut, E>(self, hook: F) -> Self
+    where
+        F: Fn(Client<S>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), E>> + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let ClientInner::Remote(connection) = &self.0 else {
+            return self;
+        };
+        let hook = rpc::ConnectHook(std::sync::Arc::new(move |connection| {
+            let client = Client::<S>(ClientInner::Remote(connection), PhantomData);
+            let fut = hook(client);
+            Box::pin(async move { fut.await.map_err(AnyError::from_std) })
+        }));
+        match connection.with_connect_hook(hook) {
+            Some(connection) => Self(ClientInner::Remote(connection), PhantomData),
+            None => self,
+        }
+    }
+
+    /// Opens the connection to the remote now, and runs the hook of [`Client::on_connect`].
+    ///
+    /// A remote client connects on the first request. Call this to see an
+    /// error of the connect or of the hook early. Does nothing if the client is
+    /// connected, or if it does not open connections itself.
+    #[cfg(feature = "rpc")]
+    pub async fn connect(&self) -> Result<(), RequestError> {
+        match &self.0 {
+            ClientInner::Local(_) => Ok(()),
+            ClientInner::Remote(connection) => connection.connect().await,
+        }
+    }
+
     /// Creates a new client from a `tokio::sync::mpsc::Sender`.
     pub fn local(tx: impl Into<crate::channel::mpsc::Sender<S::Message>>) -> Self {
         let tx: crate::channel::mpsc::Sender<S::Message> = tx.into();

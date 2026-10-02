@@ -1,7 +1,7 @@
 //! This example demonstrates a few things:
 //! * Using irpc with a cloneable server struct instead of with an actor loop
 //! * Manually implementing the connection loop
-//! * Authenticating peers
+//! * Authenticating each connection with a connect hook on the client
 
 use anyhow::Result;
 use iroh::{Endpoint, endpoint::presets, protocol::Router};
@@ -29,8 +29,7 @@ async fn remote() -> Result<()> {
 
     // correct authentication
     let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
-    let api = StorageClient::connect(client_endpoint, server_addr.clone());
-    api.auth("secret").await?;
+    let api = StorageClient::connect(client_endpoint, server_addr.clone(), "secret");
     api.set("hello".to_string(), "world".to_string()).await?;
     api.set("goodbye".to_string(), "world".to_string()).await?;
     let value = api.get("hello".to_string()).await?;
@@ -40,15 +39,9 @@ async fn remote() -> Result<()> {
         println!("list value = {value:?}");
     }
 
-    // invalid authentication
+    // invalid authentication: the hook fails, so each request fails
     let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
-    let api = StorageClient::connect(client_endpoint, server_addr.clone());
-    assert!(api.auth("bad").await.is_err());
-    assert!(api.get("hello".to_string()).await.is_err());
-
-    // no authentication
-    let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
-    let api = StorageClient::connect(client_endpoint, server_addr);
+    let api = StorageClient::connect(client_endpoint, server_addr, "bad");
     assert!(api.get("hello".to_string()).await.is_err());
 
     drop(server_router);
@@ -77,7 +70,7 @@ mod storage {
         rpc_requests,
     };
     // Import the macro
-    use irpc::{iroh::IrohLazyRemoteConnection, rpc::read_request};
+    use irpc::rpc::read_request;
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
@@ -225,20 +218,28 @@ mod storage {
     impl StorageClient {
         pub const ALPN: &[u8] = ALPN;
 
-        pub fn connect(endpoint: Endpoint, addr: impl Into<iroh::EndpointAddr>) -> StorageClient {
-            let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), Self::ALPN.to_vec());
-            StorageClient {
-                inner: Client::boxed(conn),
-            }
-        }
-
-        pub async fn auth(&self, token: &str) -> Result<(), anyhow::Error> {
-            self.inner
-                .rpc(Auth {
-                    token: token.to_string(),
-                })
-                .await?
-                .map_err(|err| anyhow::anyhow!(err))
+        /// Creates a client that authenticates each connection with `token`.
+        ///
+        /// The client connects on the first request, and again after the
+        /// connection fails. The hook sends `Auth` before any other request on
+        /// the new connection.
+        pub fn connect(
+            endpoint: Endpoint,
+            addr: impl Into<iroh::EndpointAddr>,
+            token: &str,
+        ) -> StorageClient {
+            let token = token.to_string();
+            let inner = Client::iroh(endpoint, addr, Self::ALPN).on_connect(move |client| {
+                let token = token.clone();
+                async move {
+                    client
+                        .rpc(Auth { token })
+                        .await
+                        .map_err(std::io::Error::from)?
+                        .map_err(std::io::Error::other)
+                }
+            });
+            StorageClient { inner }
         }
 
         pub async fn get(&self, key: String) -> Result<Option<String>, irpc::Error> {

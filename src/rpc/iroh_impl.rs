@@ -17,7 +17,10 @@ use tracing::{Instrument, debug, error_span, trace_span, warn};
 
 use crate::{
     LocalSender, RequestError, Service,
-    rpc::{Handler, IncomingRemoteConnection, RemoteConnection, RemoteService, handle_connection},
+    rpc::{
+        ConnectHook, Handler, IncomingRemoteConnection, RemoteConnection, RemoteService,
+        handle_connection,
+    },
 };
 
 impl RemoteConnection for Connection {
@@ -76,6 +79,7 @@ struct IrohRemoteConnectionInner {
     addr: iroh::EndpointAddr,
     connection: tokio::sync::Mutex<Option<Connection>>,
     alpn: Vec<u8>,
+    hook: Option<ConnectHook>,
 }
 
 impl IrohLazyRemoteConnection {
@@ -85,7 +89,26 @@ impl IrohLazyRemoteConnection {
             addr,
             connection: Default::default(),
             alpn,
+            hook: None,
         }))
+    }
+}
+
+impl IrohRemoteConnectionInner {
+    /// Connects, and runs the hook on the new connection.
+    async fn connect(&self) -> Result<Connection, RequestError> {
+        let conn = self
+            .endpoint
+            .connect(self.addr.clone(), &self.alpn)
+            .await
+            .map_err(|err| e!(RequestError::Other, err.into()))?;
+        if let Some(hook) = &self.hook
+            && let Err(err) = hook.run(Box::new(conn.clone())).await
+        {
+            conn.close(0u32.into(), b"connect hook failed");
+            return Err(err);
+        }
+        Ok(conn)
     }
 }
 
@@ -98,21 +121,16 @@ impl RemoteConnection for IrohLazyRemoteConnection {
         let this = self.0.clone();
         Box::pin(async move {
             let mut guard = this.connection.lock().await;
-            let pair = match guard.as_mut() {
-                Some(conn) => {
-                    // try to reuse the connection
-                    match conn.open_bi().await {
-                        Ok(pair) => pair,
-                        Err(_) => {
-                            // try with a new connection, just once
-                            *guard = None;
-                            connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
-                                .await?
-                        }
-                    }
+            if let Some(conn) = guard.as_ref() {
+                match conn.open_bi().await {
+                    Ok(pair) => return Ok(pair),
+                    // try with a new connection, just once
+                    Err(_) => *guard = None,
                 }
-                None => connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard).await?,
-            };
+            }
+            let conn = this.connect().await?;
+            let pair = conn.open_bi().await?;
+            *guard = Some(conn);
             Ok(pair)
         })
     }
@@ -120,21 +138,31 @@ impl RemoteConnection for IrohLazyRemoteConnection {
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
         Box::pin(async { false })
     }
-}
 
-async fn connect_and_open_bi(
-    endpoint: &iroh::Endpoint,
-    addr: &iroh::EndpointAddr,
-    alpn: &[u8],
-    mut guard: tokio::sync::MutexGuard<'_, Option<Connection>>,
-) -> Result<(SendStream, RecvStream), RequestError> {
-    let conn = endpoint
-        .connect(addr.clone(), alpn)
-        .await
-        .map_err(|err| e!(RequestError::Other, err.into()))?;
-    let (send, recv) = conn.open_bi().await?;
-    *guard = Some(conn);
-    Ok((send, recv))
+    fn with_connect_hook(&self, hook: ConnectHook) -> Option<Box<dyn RemoteConnection>> {
+        Some(Box::new(Self(Arc::new(IrohRemoteConnectionInner {
+            endpoint: self.0.endpoint.clone(),
+            addr: self.0.addr.clone(),
+            connection: Default::default(),
+            alpn: self.0.alpn.clone(),
+            hook: Some(hook),
+        }))))
+    }
+
+    fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
+        let this = self.0.clone();
+        Box::pin(async move {
+            let mut guard = this.connection.lock().await;
+            if guard
+                .as_ref()
+                .is_some_and(|conn| conn.close_reason().is_none())
+            {
+                return Ok(());
+            }
+            *guard = Some(this.connect().await?);
+            Ok(())
+        })
+    }
 }
 
 /// A [`ProtocolHandler`] for an irpc protocol.

@@ -7,22 +7,8 @@ use tracing::{Instrument, debug, error_span, warn};
 
 use crate::{
     RequestError, Service,
-    rpc::{Handler, IncomingRemoteConnection, RemoteConnection, handle_connection},
+    rpc::{ConnectHook, Handler, IncomingRemoteConnection, RemoteConnection, handle_connection},
 };
-
-/// A connection to a remote service.
-///
-/// Initially this does just have the endpoint and the address. Once a
-/// connection is established, it will be stored.
-#[derive(Debug, Clone)]
-pub(crate) struct NoqLazyRemoteConnection(Arc<NoqLazyRemoteConnectionInner>);
-
-#[derive(Debug)]
-struct NoqLazyRemoteConnectionInner {
-    pub endpoint: noq::Endpoint,
-    pub addr: std::net::SocketAddr,
-    pub connection: tokio::sync::Mutex<Option<noq::Connection>>,
-}
 
 impl RemoteConnection for noq::Connection {
     fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
@@ -44,13 +30,43 @@ impl RemoteConnection for noq::Connection {
     }
 }
 
+/// A connection to a remote service.
+///
+/// Initially this does just have the endpoint and the address. Once a
+/// connection is established, it will be stored.
+#[derive(Debug, Clone)]
+pub(crate) struct NoqLazyRemoteConnection(Arc<NoqLazyRemoteConnectionInner>);
+
+#[derive(Debug)]
+struct NoqLazyRemoteConnectionInner {
+    endpoint: noq::Endpoint,
+    addr: std::net::SocketAddr,
+    connection: tokio::sync::Mutex<Option<noq::Connection>>,
+    hook: Option<ConnectHook>,
+}
+
 impl NoqLazyRemoteConnection {
     pub fn new(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
         Self(Arc::new(NoqLazyRemoteConnectionInner {
             endpoint,
             addr,
             connection: Default::default(),
+            hook: None,
         }))
+    }
+}
+
+impl NoqLazyRemoteConnectionInner {
+    /// Connects, and runs the hook on the new connection.
+    async fn connect(&self) -> Result<noq::Connection, RequestError> {
+        let conn = self.endpoint.connect(self.addr, "localhost")?.await?;
+        if let Some(hook) = &self.hook
+            && let Err(err) = hook.run(Box::new(conn.clone())).await
+        {
+            conn.close(0u32.into(), b"connect hook failed");
+            return Err(err);
+        }
+        Ok(conn)
     }
 }
 
@@ -65,20 +81,16 @@ impl RemoteConnection for NoqLazyRemoteConnection {
         let this = self.0.clone();
         Box::pin(async move {
             let mut guard = this.connection.lock().await;
-            let pair = match guard.as_mut() {
-                Some(conn) => {
-                    // try to reuse the connection
-                    match conn.open_bi().await {
-                        Ok(pair) => pair,
-                        Err(_) => {
-                            // try with a new connection, just once
-                            *guard = None;
-                            connect_and_open_bi(&this.endpoint, &this.addr, guard).await?
-                        }
-                    }
+            if let Some(conn) = guard.as_ref() {
+                match conn.open_bi().await {
+                    Ok(pair) => return Ok(pair),
+                    // try with a new connection, just once
+                    Err(_) => *guard = None,
                 }
-                None => connect_and_open_bi(&this.endpoint, &this.addr, guard).await?,
-            };
+            }
+            let conn = this.connect().await?;
+            let pair = conn.open_bi().await?;
+            *guard = Some(conn);
             Ok(pair)
         })
     }
@@ -86,17 +98,30 @@ impl RemoteConnection for NoqLazyRemoteConnection {
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
         Box::pin(async { false })
     }
-}
 
-async fn connect_and_open_bi(
-    endpoint: &noq::Endpoint,
-    addr: &std::net::SocketAddr,
-    mut guard: tokio::sync::MutexGuard<'_, Option<noq::Connection>>,
-) -> Result<(noq::SendStream, noq::RecvStream), RequestError> {
-    let conn = endpoint.connect(*addr, "localhost")?.await?;
-    let (send, recv) = conn.open_bi().await?;
-    *guard = Some(conn);
-    Ok((send, recv))
+    fn with_connect_hook(&self, hook: ConnectHook) -> Option<Box<dyn RemoteConnection>> {
+        Some(Box::new(Self(Arc::new(NoqLazyRemoteConnectionInner {
+            endpoint: self.0.endpoint.clone(),
+            addr: self.0.addr,
+            connection: Default::default(),
+            hook: Some(hook),
+        }))))
+    }
+
+    fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
+        let this = self.0.clone();
+        Box::pin(async move {
+            let mut guard = this.connection.lock().await;
+            if guard
+                .as_ref()
+                .is_some_and(|conn| conn.close_reason().is_none())
+            {
+                return Ok(());
+            }
+            *guard = Some(this.connect().await?);
+            Ok(())
+        })
+    }
 }
 
 /// Utility function to listen for incoming connections and handle them with the provided handler.
