@@ -23,6 +23,8 @@ use crate::{
     },
 };
 
+impl crate::sealed::Sealed for Connection {}
+
 impl RemoteConnection for Connection {
     fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
         Box::new(self.clone())
@@ -40,6 +42,8 @@ impl RemoteConnection for Connection {
         Box::pin(async { false })
     }
 }
+
+impl crate::sealed::Sealed for OutgoingZeroRttConnection {}
 
 impl RemoteConnection for OutgoingZeroRttConnection {
     fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
@@ -111,6 +115,8 @@ impl IrohRemoteConnectionInner {
         Ok(conn)
     }
 }
+
+impl crate::sealed::Sealed for IrohLazyRemoteConnection {}
 
 impl RemoteConnection for IrohLazyRemoteConnection {
     fn clone_boxed(&self) -> Box<dyn RemoteConnection> {

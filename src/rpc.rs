@@ -104,7 +104,15 @@ impl From<noq::WriteError> for SendError {
 /// can have different connection implementations for normal noq connections,
 /// iroh connections, and possibly noq connections with disabled encryption
 /// for performance.
-pub trait RemoteConnection: Send + Sync + Debug + 'static {
+///
+/// This trait is sealed. irpc implements it for noq and iroh connections, with
+/// and without 0-RTT, and for the lazy connections of [`Client::noq`] and
+/// [`Client::iroh`]. To use a connection that you opened, pass it to [`Client::boxed`].
+///
+/// [`Client::noq`]: crate::Client::noq
+/// [`Client::iroh`]: crate::Client::iroh
+/// [`Client::boxed`]: crate::Client::boxed
+pub trait RemoteConnection: crate::sealed::Sealed + Send + Sync + Debug + 'static {
     /// Boxed clone so the trait is dynable.
     fn clone_boxed(&self) -> Box<dyn RemoteConnection>;
 

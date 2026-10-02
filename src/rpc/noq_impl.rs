@@ -10,6 +10,8 @@ use crate::{
     rpc::{ConnectHook, Handler, IncomingRemoteConnection, RemoteConnection, handle_connection},
 };
 
+impl crate::sealed::Sealed for noq::Connection {}
+
 impl RemoteConnection for noq::Connection {
     fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
         Box::new(self.clone())
@@ -69,6 +71,8 @@ impl NoqLazyRemoteConnectionInner {
         Ok(conn)
     }
 }
+
+impl crate::sealed::Sealed for NoqLazyRemoteConnection {}
 
 impl RemoteConnection for NoqLazyRemoteConnection {
     fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
