@@ -3,6 +3,31 @@
 //! The code in this module works with all connections that use [`noq`]
 //! streams. The [`crate::noq`] module has the transport with dial by socket
 //! address. The [`crate::iroh`] module has the transport with dial by endpoint id.
+//!
+//! # Bad requests
+//!
+//! Each request has its own stream. If the server cannot read a request, it
+//! stops and resets the streams of that request:
+//!
+//! * with [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] if the request is larger
+//!   than [`MAX_MESSAGE_SIZE`],
+//! * with [`ERROR_CODE_INVALID_REQUEST`] if the request does not decode. For
+//!   example, a client of a newer protocol version sent a request type that
+//!   the server does not know.
+//!
+//! The client of that request gets an error, for which
+//! [`Error::is_invalid_request`](crate::Error::is_invalid_request) returns true
+//! in the second case.
+//!
+//! By default, a [`Handler`] then closes the connection with the same code, as
+//! for any other protocol violation. A protocol that adds request types at the
+//! end of its enum can use [`Handler::skip_bad_requests`]: the handler then
+//! reads the next request, so an old server rejects the new requests and keeps
+//! serving the old ones on the same connection.
+//!
+//! [`read_request`] returns a bad request as a [`ReadRequestError`]. A server
+//! with its own loop decides what to do: return the error to close the
+//! connection, or read the next request.
 use std::{
     fmt::Debug,
     future::Future,
@@ -44,9 +69,96 @@ pub const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
 /// Error code on streams if the sender tried to send an message that could not be postcard serialized.
 pub const ERROR_CODE_INVALID_POSTCARD: u32 = 2;
 
+/// Error code on streams if the server could not read a request.
+///
+/// irpc uses the codes 0 to 255. Applications must use codes from 256 upward.
+pub const ERROR_CODE_INVALID_REQUEST: u32 = 3;
+
+/// The state of a stream error that irpc wrapped in an `io::Error`.
+pub(crate) enum StreamError {
+    /// The remote reset or stopped the stream with this code.
+    Code(u64),
+    ConnectionLost,
+}
+
+impl StreamError {
+    /// Returns the state of the noq stream error inside `err`, if there is one.
+    pub(crate) fn from_io(err: &io::Error) -> Option<Self> {
+        let inner = err.get_ref()?;
+        if let Some(err) = inner.downcast_ref::<noq::WriteError>() {
+            return match err {
+                noq::WriteError::Stopped(code) => Some(Self::Code(code.into_inner())),
+                noq::WriteError::ConnectionLost(_) => Some(Self::ConnectionLost),
+                _ => None,
+            };
+        }
+        match read_error(inner)? {
+            noq::ReadError::Reset(code) => Some(Self::Code(code.into_inner())),
+            noq::ReadError::ConnectionLost(_) => Some(Self::ConnectionLost),
+            _ => None,
+        }
+    }
+}
+
+/// Returns the noq read error in `err`, also when it is inside a read helper error.
+fn read_error<'a>(
+    err: &'a (dyn std::error::Error + Send + Sync + 'static),
+) -> Option<&'a noq::ReadError> {
+    if let Some(err) = err.downcast_ref::<noq::ReadError>() {
+        return Some(err);
+    }
+    if let Some(noq::ReadExactError::ReadError(err)) = err.downcast_ref() {
+        return Some(err);
+    }
+    if let Some(noq::ReadToEndError::Read(err)) = err.downcast_ref() {
+        return Some(err);
+    }
+    None
+}
+
+/// Error when reading a request with [`read_request`].
+///
+/// For [`MaxMessageSizeExceeded`](Self::MaxMessageSizeExceeded) and
+/// [`InvalidRequest`](Self::InvalidRequest), irpc reset the streams of the
+/// request, so its client gets an error. The connection is still usable, so a
+/// server can read the next request.
+#[stack_error(derive, add_meta)]
+#[non_exhaustive]
+pub enum ReadRequestError {
+    /// The request is larger than [`MAX_MESSAGE_SIZE`].
+    #[error("Maximum message size exceeded")]
+    MaxMessageSizeExceeded,
+    /// The request does not decode.
+    ///
+    /// For example, a newer client sent a request type that this server does
+    /// not know.
+    #[error("Invalid request")]
+    InvalidRequest {
+        #[error(std_err)]
+        source: io::Error,
+    },
+    /// The connection failed.
+    #[error("Connection failed")]
+    Connection {
+        #[error(std_err)]
+        source: ConnectionError,
+    },
+}
+
+impl ReadRequestError {
+    /// Returns the irpc error code for this error on streams and connections.
+    fn code(&self) -> u32 {
+        match self {
+            Self::MaxMessageSizeExceeded { .. } => ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED,
+            _ => ERROR_CODE_INVALID_REQUEST,
+        }
+    }
+}
+
 /// Error that can occur when writing the initial message when doing a
 /// cross-process RPC.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum WriteError {
     /// Error writing to the stream with noq
     #[error("Error writing to stream")]
@@ -540,6 +652,8 @@ enum Mode {
 /// - [`Handler::raw`]: runs a function on the protocol enum and the streams.
 ///
 /// A handler function returns `Err(CloseConnection)` to close the connection.
+/// A bad request also closes the connection, unless
+/// [`Handler::skip_bad_requests`] is set.
 /// The protocol type cannot be inferred from the message enum, so you may
 /// have to name it: `Handler::<MyProtocol>::concurrent(..)`.
 ///
@@ -570,6 +684,7 @@ enum Mode {
 pub struct Handler<S> {
     f: HandlerFn<S>,
     mode: Mode,
+    skip_bad_requests: bool,
 }
 
 impl<S> Clone for Handler<S> {
@@ -577,6 +692,7 @@ impl<S> Clone for Handler<S> {
         Self {
             f: self.f.clone(),
             mode: self.mode,
+            skip_bad_requests: self.skip_bad_requests,
         }
     }
 }
@@ -585,6 +701,7 @@ impl<S> Debug for Handler<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Handler")
             .field("mode", &self.mode)
+            .field("skip_bad_requests", &self.skip_bad_requests)
             .finish_non_exhaustive()
     }
 }
@@ -604,6 +721,7 @@ impl<S: Service> Handler<S> {
         Self {
             f,
             mode: Mode::Sequential,
+            skip_bad_requests: false,
         }
     }
 
@@ -621,9 +739,21 @@ impl<S: Service> Handler<S> {
         (self.f)(request, rx, tx)
     }
 
+    /// Sets whether a bad request is skipped instead of closing the connection.
+    ///
+    /// By default, a request that is too large or does not decode closes the
+    /// connection. With `true`, only the request fails, and the handler reads
+    /// the next request. Use it for a protocol that adds request types over
+    /// time, see [Bad requests](self#bad-requests).
+    pub fn skip_bad_requests(mut self, skip: bool) -> Self {
+        self.skip_bad_requests = skip;
+        self
+    }
+
     /// Handles the requests of `connection` until the connection ends.
     ///
     /// When the connection ends, this waits for the requests that still run.
+    /// Returns an error if the connection fails, or if a bad request closed it.
     pub async fn handle_connection(
         &self,
         connection: &impl IncomingRemoteConnection,
@@ -637,10 +767,28 @@ impl<S: Service> Handler<S> {
         }
     }
 
+    /// Reads the next request, and closes the connection or skips it on a bad request.
+    async fn read_next(
+        &self,
+        connection: &impl IncomingRemoteConnection,
+    ) -> io::Result<Option<Request<S>>> {
+        loop {
+            match read_request_inner::<S>(connection).await {
+                Ok(request) => return Ok(request),
+                Err(ReadRequestError::Connection { source, .. }) => return Err(source.into()),
+                Err(err) if self.skip_bad_requests => warn!("skipped bad request: {err}"),
+                Err(err) => {
+                    connection.close(err.code().into(), err.to_string().as_bytes());
+                    return Err(io::Error::other(err));
+                }
+            }
+        }
+    }
+
     /// Runs the requests of `connection` one after the other.
     async fn run_sequential(&self, connection: &impl IncomingRemoteConnection) -> io::Result<()> {
         loop {
-            let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
+            let Some((msg, carrier, rx, tx)) = self.read_next(connection).await? else {
                 return Ok(());
             };
             let fut = crate::span_propagation::scope_remote(carrier, (self.f)(msg, rx, tx));
@@ -659,7 +807,7 @@ impl<S: Service> Handler<S> {
     ) -> io::Result<()> {
         let mut futs = FuturesUnorderedBounded::new(max_concurrent);
         // Kept across iterations, so that a partly read request is not cancelled.
-        let mut read = pin!(read_request_inner::<S>(connection));
+        let mut read = pin!(self.read_next(connection));
         let res = loop {
             tokio::select! {
                 biased;
@@ -670,7 +818,7 @@ impl<S: Service> Handler<S> {
                     }
                 }
                 next = &mut read, if futs.len() < max_concurrent => {
-                    read.set(read_request_inner::<S>(connection));
+                    read.set(self.read_next(connection));
                     match next {
                         Err(err) => break Err(err),
                         Ok(None) => break Ok(()),
@@ -792,9 +940,16 @@ fn close_connection(connection: &impl IncomingRemoteConnection, close: CloseConn
 /// Reads a request from a connection and converts it to a message enum.
 ///
 /// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
+///
+/// Returns `None` if the remote closed the connection with code 0, or if this
+/// side closed it.
+///
+/// Returns [`ReadRequestError::MaxMessageSizeExceeded`] or
+/// [`ReadRequestError::InvalidRequest`] for a bad request. The connection is
+/// still open after these errors, see [Bad requests](self#bad-requests).
 pub async fn read_request<S: RemoteService>(
     connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<Option<S::Message>> {
+) -> Result<Option<S::Message>, ReadRequestError> {
     let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
         return Ok(None);
     };
@@ -813,65 +968,74 @@ pub async fn read_request<S: RemoteService>(
 /// silently dropped. Use [`Handler::handle_connection`] (or [`read_request`]) if you need
 /// the propagated context to reach the generated handler spans.
 ///
-/// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
-/// Returns None if the remote closed the connection with error code `0`.
-/// Returns an error for all other failure cases.
+/// Returns `None` in the same cases as [`read_request`].
 pub async fn read_request_raw<S: Service>(
     connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<Option<(S, noq::RecvStream, noq::SendStream)>> {
+) -> Result<Option<(S, noq::RecvStream, noq::SendStream)>, ReadRequestError> {
     Ok(read_request_inner::<S>(connection)
         .await?
         .map(|(msg, _carrier, rx, tx)| (msg, rx, tx)))
 }
+
+/// A request with its span context carrier and its streams.
+type Request<S> = (
+    S,
+    Option<crate::span_propagation::SpanContextCarrier>,
+    noq::RecvStream,
+    noq::SendStream,
+);
 
 /// Internal: read a request and also return the propagated span context carrier.
 ///
 /// The carrier is `Some` iff `S::SPAN_PROPAGATION` is true and the remote sent one.
 async fn read_request_inner<S: Service>(
     connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<
-    Option<(
-        S,
-        Option<crate::span_propagation::SpanContextCarrier>,
-        noq::RecvStream,
-        noq::SendStream,
-    )>,
-> {
-    let (send, mut recv) = match connection.accept_bi().await {
-        Ok((s, r)) => (s, r),
+) -> Result<Option<Request<S>>, ReadRequestError> {
+    let (mut send, mut recv) = match connection.accept_bi().await {
+        Ok(streams) => streams,
         Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
             trace!("remote side closed connection {cause:?}");
             return Ok(None);
         }
-        Err(cause) => {
-            warn!("failed to accept bi stream {cause:?}");
-            return Err(cause.into());
-        }
+        Err(ConnectionError::LocallyClosed) => return Ok(None),
+        Err(cause) => return Err(e!(ReadRequestError::Connection, cause)),
     };
+    match read_request_frame::<S>(&mut recv).await {
+        Ok((carrier, msg)) => Ok(Some((msg, carrier, recv, send))),
+        Err(err) => {
+            recv.stop(err.code().into()).ok();
+            send.reset(err.code().into()).ok();
+            Err(err)
+        }
+    }
+}
+
+/// Reads and decodes a request.
+async fn read_request_frame<S: Service>(
+    recv: &mut noq::RecvStream,
+) -> Result<(Option<crate::span_propagation::SpanContextCarrier>, S), ReadRequestError> {
+    let invalid = |err| e!(ReadRequestError::InvalidRequest, err);
     let size = recv
         .read_varint_u64()
-        .await?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
+        .await
+        .map_err(invalid)?
+        .ok_or_else(|| {
+            invalid(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "failed to read size",
+            ))
+        })?;
     if size > MAX_MESSAGE_SIZE {
-        connection.close(
-            ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
-            b"request exceeded max message size",
-        );
-        return Err(e!(mpsc::RecvError::MaxMessageSizeExceeded).into());
+        return Err(e!(ReadRequestError::MaxMessageSizeExceeded));
     }
     let mut buf = vec![0; size as usize];
     recv.read_exact(&mut buf)
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-
-    let (carrier, msg): (Option<crate::span_propagation::SpanContextCarrier>, S) =
-        if S::SPAN_PROPAGATION {
-            postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        } else {
-            let msg = postcard::from_bytes(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            (None, msg)
-        };
-
-    Ok(Some((msg, carrier, recv, send)))
+        .map_err(|e| invalid(io::Error::new(io::ErrorKind::UnexpectedEof, e)))?;
+    let decode = |e| invalid(io::Error::new(io::ErrorKind::InvalidData, e));
+    if S::SPAN_PROPAGATION {
+        postcard::from_bytes(&buf).map_err(decode)
+    } else {
+        Ok((None, postcard::from_bytes(&buf).map_err(decode)?))
+    }
 }

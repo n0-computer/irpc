@@ -14,6 +14,7 @@ use crate::util::FusedOneshotReceiver;
 /// For rpc communication, there can be any number of errors, so this is a
 /// generic io error.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum RecvError {
     /// The sender has been closed. This is the only error that can occur
     /// for local communication.
