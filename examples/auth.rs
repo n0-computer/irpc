@@ -148,15 +148,12 @@ mod storage {
             // The connection is authenticated. Handle the other requests, at most
             // 16 at a time.
             let this = self.clone();
-            let handler = Handler::<StorageProtocol>::concurrent(16, move |msg| {
-                let this = this.clone();
-                async move { this.handle_authenticated(msg).await }
-            });
-            handler
-                .handle_connection(&conn)
-                .await
-                .map_err(AcceptError::from_err)?;
-            Ok(())
+            Handler::<StorageProtocol>::concurrent(16, move |msg| {
+                this.clone().handle_authenticated(msg)
+            })
+            .handle_connection(&conn)
+            .await
+            .map_err(AcceptError::from_err)
         }
     }
 
@@ -170,7 +167,7 @@ mod storage {
             }
         }
 
-        async fn handle_authenticated(&self, msg: StorageMessage) -> Result<(), CloseConnection> {
+        async fn handle_authenticated(self, msg: StorageMessage) -> Result<(), CloseConnection> {
             match msg {
                 // A second `Auth` on a connection violates the protocol.
                 StorageMessage::Auth(_) => {
