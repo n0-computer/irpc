@@ -240,7 +240,6 @@ mod ping {
         Client, WithChannels,
         channel::oneshot,
         iroh::{Iroh0RttProtocol, IrohProtocol},
-        rpc::RemoteService,
         rpc_requests,
     };
     use serde::{Deserialize, Serialize};
@@ -270,7 +269,7 @@ mod ping {
                 .inner
                 .as_local()
                 .context("can not listen on remote service")?;
-            Ok(Iroh0RttProtocol::new(EchoProtocol::remote_handler(local)))
+            Ok(Iroh0RttProtocol::new(local))
         }
 
         pub fn expose(self) -> Result<IrohProtocol<EchoProtocol>> {
@@ -278,7 +277,7 @@ mod ping {
                 .inner
                 .as_local()
                 .context("can not listen on remote service")?;
-            Ok(IrohProtocol::new(EchoProtocol::remote_handler(local)))
+            Ok(IrohProtocol::new(local))
         }
 
         pub async fn connect(

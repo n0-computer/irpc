@@ -77,7 +77,10 @@ mod storage {
         rpc_requests,
     };
     // Import the macro
-    use irpc::{iroh::IrohLazyRemoteConnection, rpc::read_request};
+    use irpc::{
+        iroh::IrohLazyRemoteConnection,
+        rpc::{CloseConnection, Handler, read_request},
+    };
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
@@ -130,34 +133,27 @@ mod storage {
 
     impl ProtocolHandler for StorageServer {
         async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-            let mut authed = false;
-            while let Some(msg) = read_request::<StorageProtocol>(&conn).await? {
-                match msg {
-                    StorageMessage::Auth(msg) => {
-                        let WithChannels { inner, tx, .. } = msg;
-                        if authed {
-                            conn.close(1u32.into(), b"invalid message");
-                            break;
-                        } else if inner.token != self.auth_token {
-                            conn.close(1u32.into(), b"permission denied");
-                            break;
-                        } else {
-                            authed = true;
-                            tx.send(Ok(())).await.ok();
-                        }
-                    }
-                    msg => {
-                        if !authed {
-                            conn.close(1u32.into(), b"permission denied");
-                            break;
-                        } else {
-                            self.handle_authenticated(msg).await;
-                        }
-                    }
-                }
+            // The first request on a connection must be `Auth` with the right token.
+            let first = read_request::<StorageProtocol>(&conn).await?;
+            let Some(StorageMessage::Auth(WithChannels { inner, tx, .. })) = first else {
+                conn.close(403u32.into(), b"permission denied");
+                return Ok(());
+            };
+            if inner.token != self.auth_token {
+                conn.close(403u32.into(), b"permission denied");
+                return Ok(());
             }
-            conn.closed().await;
-            Ok(())
+            tx.send(Ok(())).await.ok();
+
+            // The connection is authenticated. Handle the other requests, at most
+            // 16 at a time.
+            let this = self.clone();
+            Handler::<StorageProtocol>::concurrent(16, move |msg| {
+                this.clone().handle_authenticated(msg)
+            })
+            .handle_connection(&conn)
+            .await
+            .map_err(AcceptError::from_err)
         }
     }
 
@@ -171,9 +167,12 @@ mod storage {
             }
         }
 
-        async fn handle_authenticated(&self, msg: StorageMessage) {
+        async fn handle_authenticated(self, msg: StorageMessage) -> Result<(), CloseConnection> {
             match msg {
-                StorageMessage::Auth(_) => unreachable!("handled in ProtocolHandler::accept"),
+                // A second `Auth` on a connection violates the protocol.
+                StorageMessage::Auth(_) => {
+                    return Err(CloseConnection::new(400, "already authenticated"));
+                }
                 StorageMessage::Get(get) => {
                     info!("get {:?}", get);
                     let WithChannels { tx, inner, .. } = get;
@@ -215,6 +214,7 @@ mod storage {
                     }
                 }
             }
+            Ok(())
         }
     }
 

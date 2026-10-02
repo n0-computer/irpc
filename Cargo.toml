@@ -120,6 +120,10 @@ name = "storage"
 required-features = ["rpc", "noq_endpoint_setup"]
 
 [[example]]
+name = "combined"
+required-features = ["iroh", "spans", "stream", "derive"]
+
+[[example]]
 name = "0rtt"
 required-features = ["iroh", "spans", "stream", "derive"]
 

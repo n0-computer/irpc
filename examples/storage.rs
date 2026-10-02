@@ -8,7 +8,7 @@ use irpc::{
     Channels, Client, Request, Service, WithChannels,
     channel::{mpsc, none::NoReceiver, oneshot},
     noq::{listen, make_client_endpoint, make_server_endpoint},
-    rpc::RemoteService,
+    rpc::{Handler, RemoteService},
 };
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
@@ -135,7 +135,7 @@ impl StorageApi {
         let Some(local) = self.inner.as_local() else {
             bail!("cannot listen on a remote service");
         };
-        let handler = StorageProtocol::remote_handler(local);
+        let handler = Handler::from_sender(local);
         Ok(AbortOnDropHandle::new(task::spawn(listen(
             endpoint, handler,
         ))))
