@@ -1015,7 +1015,7 @@ impl Error {
         }
     }
 
-    /// Returns true if the remote could not read the request.
+    /// Returns true if the remote could not decode the request or a message on its channels.
     ///
     /// For example, the remote does not know the request type. The connection
     /// is still usable.

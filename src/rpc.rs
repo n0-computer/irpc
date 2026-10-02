@@ -15,6 +15,10 @@
 //!   example, a client of a newer protocol version sent a request type that
 //!   the server does not know.
 //!
+//! A remote channel receiver also stops its stream with
+//! [`ERROR_CODE_INVALID_REQUEST`] if a message does not decode. Its sender then
+//! gets an error on the next send.
+//!
 //! The client of that request gets an error, for which
 //! [`Error::is_invalid_request`](crate::Error::is_invalid_request) returns true
 //! in the second case.
@@ -69,7 +73,10 @@ pub const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
 /// Error code on streams if the sender tried to send an message that could not be postcard serialized.
 pub const ERROR_CODE_INVALID_POSTCARD: u32 = 2;
 
-/// Error code on streams if the server could not read a request.
+/// Error code on streams if the receiver could not decode a message.
+///
+/// A server stops and resets the streams of a request that does not decode. A
+/// remote channel receiver stops its stream if a message does not decode.
 ///
 /// irpc uses the codes 0 to 255. Applications must use codes from 256 upward.
 pub const ERROR_CODE_INVALID_REQUEST: u32 = 3;
@@ -313,8 +320,10 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
                 .read_to_end(size as usize)
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let msg: T = postcard::from_bytes(&rest)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let msg: T = postcard::from_bytes(&rest).map_err(|e| {
+                read.stop(ERROR_CODE_INVALID_REQUEST.into()).ok();
+                io::Error::new(io::ErrorKind::InvalidData, e)
+            })?;
             Ok(msg)
         };
         oneshot::Receiver::from(|| fut)
@@ -419,8 +428,10 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
             read.read_exact(&mut buf)
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-            let msg: T = postcard::from_bytes(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let msg: T = postcard::from_bytes(&buf).map_err(|e| {
+                read.stop(ERROR_CODE_INVALID_REQUEST.into()).ok();
+                io::Error::new(io::ErrorKind::InvalidData, e)
+            })?;
             Ok(Some(msg))
         })
     }

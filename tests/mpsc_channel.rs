@@ -10,6 +10,7 @@ use irpc::{
         SendError,
         mpsc::{self, Receiver, RecvError},
     },
+    rpc::ERROR_CODE_INVALID_REQUEST,
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
@@ -240,5 +241,29 @@ async fn mpsc_serialize_error_recv() -> TestResult<()> {
     assert!(
         matches!(cause, mpsc::RecvError::Io { source, .. } if source.kind() == ErrorKind::InvalidData)
     );
+    Ok(())
+}
+
+/// Checks that a receiver stops the stream with code 3 if a message does not decode.
+#[tokio::test]
+async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let mut recv = Receiver::<NoSer>::from(recv);
+        assert!(recv.recv().await.is_err());
+        // keep the connection, so that the stop reaches the client
+        conn.closed().await;
+        TestResult::Ok(())
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // an odd number does not decode as `NoSer`
+    send.write_length_prefixed(1u64).await?;
+    let code = timeout(Duration::from_secs(5), send.stopped()).await??;
+    assert_eq!(code, Some(ERROR_CODE_INVALID_REQUEST.into()));
+    conn.close(0u32.into(), b"");
+    server.await??;
     Ok(())
 }
