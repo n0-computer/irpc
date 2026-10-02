@@ -949,6 +949,7 @@ impl<M> ClientInner<M> {
 /// Error when opening a request. When cross-process rpc is disabled, this is
 /// an empty enum since local requests can not fail.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum RequestError {
     /// Error in noq during connect
     #[cfg(feature = "rpc")]
@@ -976,6 +977,7 @@ pub enum RequestError {
 
 /// Error type that subsumes all possible errors in this crate, for convenience.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Request error")]
     Request { source: RequestError },
@@ -992,6 +994,63 @@ pub enum Error {
 
 /// Type alias for a result with an irpc error type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[cfg(feature = "rpc")]
+impl Error {
+    /// Returns true if the connection failed or could not be opened.
+    ///
+    /// A new connection may succeed.
+    pub fn is_connection_lost(&self) -> bool {
+        match self {
+            Error::Request { .. } => true,
+            Error::Write {
+                source:
+                    rpc::WriteError::Noq {
+                        source: ::noq::WriteError::ConnectionLost(_),
+                        ..
+                    },
+                ..
+            } => true,
+            _ => matches!(
+                self.stream_error(),
+                Some(rpc::StreamError::ConnectionLost(_))
+            ),
+        }
+    }
+
+    /// Returns true if the remote could not decode the request or a message on its channels.
+    ///
+    /// For example, the remote does not know the request type. This is also
+    /// true if the remote closed the connection because of a request that did
+    /// not decode, see [Bad requests](rpc#bad-requests).
+    pub fn is_invalid_request(&self) -> bool {
+        let code = match self.stream_error() {
+            Some(rpc::StreamError::Code(code)) => code,
+            Some(rpc::StreamError::ConnectionLost(Some(code))) => code,
+            _ => return false,
+        };
+        code == rpc::ERROR_CODE_DECODE_FAILED as u64
+    }
+
+    fn stream_error(&self) -> Option<rpc::StreamError> {
+        let source = match self {
+            Error::Send {
+                source: channel::SendError::Io { source, .. },
+                ..
+            }
+            | Error::MpscRecv {
+                source: channel::mpsc::RecvError::Io { source, .. },
+                ..
+            }
+            | Error::OneshotRecv {
+                source: channel::oneshot::RecvError::Io { source, .. },
+                ..
+            } => source,
+            _ => return None,
+        };
+        rpc::StreamError::from_io(source)
+    }
+}
 
 impl From<Error> for io::Error {
     fn from(e: Error) -> Self {

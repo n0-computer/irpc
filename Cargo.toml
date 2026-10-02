@@ -132,6 +132,10 @@ name = "auth"
 required-features = ["iroh", "spans", "stream", "derive"]
 
 [[example]]
+name = "versioning"
+required-features = ["iroh", "derive"]
+
+[[example]]
 name = "authorized-request"
 required-features = ["iroh", "spans", "stream", "derive"]
 

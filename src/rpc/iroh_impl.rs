@@ -17,7 +17,10 @@ use tracing::{Instrument, debug, error_span, trace_span, warn};
 
 use crate::{
     RequestError, Service,
-    rpc::{CloseConnection, Handler, IncomingRemoteConnection, RemoteConnection, RemoteService},
+    rpc::{
+        CloseConnection, Handler, IncomingRemoteConnection, ReadRequestError, RemoteConnection,
+        RemoteService,
+    },
 };
 
 impl RemoteConnection for Connection {
@@ -137,6 +140,12 @@ async fn connect_and_open_bi(
     Ok((send, recv))
 }
 
+impl From<ReadRequestError> for AcceptError {
+    fn from(err: ReadRequestError) -> Self {
+        AcceptError::from_err(err)
+    }
+}
+
 /// A [`ProtocolHandler`] for an irpc protocol.
 ///
 /// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
@@ -211,7 +220,6 @@ impl<S: Service> ProtocolHandler for IrohProtocol<S> {
 ///
 /// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
 ///
-/// For details about when it is safe to use 0rtt, see <https://www.iroh.computer/blog/0rtt-api>
 /// For details about when it is safe to use 0rtt, see <https://www.iroh.computer/blog/0rtt-api>
 pub struct Iroh0RttProtocol<S> {
     handler: Handler<S>,
