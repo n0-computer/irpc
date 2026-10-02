@@ -142,7 +142,7 @@ async fn sequential_handler_runs_one_request_at_a_time() -> TestResult<()> {
 }
 
 #[tokio::test]
-async fn concurrent_handler_survives_a_request_that_panics() -> TestResult<()> {
+async fn concurrent_handler_propagates_a_panic() -> TestResult<()> {
     #[rpc_requests(message = PanicMessage)]
     #[derive(Debug, Serialize, Deserialize)]
     enum PanicProtocol {
@@ -159,12 +159,14 @@ async fn concurrent_handler_survives_a_request_that_panics() -> TestResult<()> {
         tx.send(()).await.ok();
         Ok(())
     });
-    let _server = AbortOnDropHandle::new(tokio::spawn(listen::<PanicProtocol>(server, handler)));
+    let server = tokio::spawn(listen::<PanicProtocol>(server, handler));
     let client = Client::<PanicProtocol>::noq(client, server_addr);
     client.rpc(MaybePanic(false)).await?;
     assert!(client.rpc(MaybePanic(true)).await.is_err());
-    // The connection and the handler still work.
-    client.rpc(MaybePanic(false)).await?;
+    // The panic reaches the server loop of the connection, and `listen`
+    // panics too. The client does not have to close the connection first.
+    let res = tokio::time::timeout(Duration::from_secs(5), server).await?;
+    assert!(res.is_err_and(|err| err.is_panic()));
     Ok(())
 }
 
