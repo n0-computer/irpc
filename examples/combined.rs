@@ -3,8 +3,7 @@
 //! `AppProtocol` has one variant for `PingProtocol` and one for
 //! `EchoProtocol`. The server reads `AppProtocol` requests. A
 //! [`Handler::raw`] looks at the variant, and [`Handler::call`] passes the
-//! inner request to the handler of that protocol. The server code is the
-//! example from the docs of [`Handler::call`].
+//! inner request to the handler of that protocol.
 //!
 //! The client cannot use `Client::rpc`, because `AppProtocol` has no message
 //! enum. It writes each request with [`RemoteSender::write`]. A crate like

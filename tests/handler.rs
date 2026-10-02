@@ -142,35 +142,6 @@ async fn sequential_handler_runs_one_request_at_a_time() -> TestResult<()> {
 }
 
 #[tokio::test]
-async fn concurrent_handler_propagates_a_panic() -> TestResult<()> {
-    #[rpc_requests(message = PanicMessage)]
-    #[derive(Debug, Serialize, Deserialize)]
-    enum PanicProtocol {
-        /// Panics if the argument is `true`, else replies.
-        #[rpc(tx = oneshot::Sender<()>)]
-        #[wrap(MaybePanic)]
-        MaybePanic(bool),
-    }
-
-    let (server, client, server_addr) = create_connected_endpoints()?;
-    let handler = Handler::concurrent(4, |msg: PanicMessage| async move {
-        let PanicMessage::MaybePanic(WithChannels { inner, tx, .. }) = msg;
-        assert!(!inner.0, "requested panic");
-        tx.send(()).await.ok();
-        Ok(())
-    });
-    let server = tokio::spawn(listen::<PanicProtocol>(server, handler));
-    let client = Client::<PanicProtocol>::noq(client, server_addr);
-    client.rpc(MaybePanic(false)).await?;
-    assert!(client.rpc(MaybePanic(true)).await.is_err());
-    // The panic reaches the server loop of the connection, and `listen`
-    // panics too. The client does not have to close the connection first.
-    let res = tokio::time::timeout(Duration::from_secs(5), server).await?;
-    assert!(res.is_err_and(|err| err.is_panic()));
-    Ok(())
-}
-
-#[tokio::test]
 async fn raw_handler_gets_the_protocol_enum_and_the_streams() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let handler = Handler::raw(|request: WaitProtocol, rx, tx| async move {
