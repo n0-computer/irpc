@@ -14,14 +14,11 @@ use std::{
 };
 
 use n0_error::{e, stack_error};
-use n0_future::{
-    future::Boxed as BoxFuture,
-    task::{JoinError, JoinSet},
-};
+use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
 use noq::{ConnectionError, VarInt};
 use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
-use tracing::{Instrument, debug, error, trace, warn};
+use tracing::{Instrument, debug, trace, warn};
 
 #[cfg(feature = "iroh")]
 pub(crate) mod iroh_impl;
@@ -713,13 +710,73 @@ impl<S: Service> Handler<S> {
         connection: &impl IncomingRemoteConnection,
     ) -> io::Result<()> {
         debug!("connection accepted");
-        // The tasks of concurrent requests. When the set is dropped, the tasks are aborted.
+        match self.mode {
+            Mode::Sequential => self.run_sequential(connection).await,
+            Mode::Concurrent(max_concurrent) => {
+                self.run_concurrent(connection, max_concurrent).await
+            }
+        }
+    }
+
+    /// Runs the requests of `connection` one after the other.
+    async fn run_sequential(&self, connection: &impl IncomingRemoteConnection) -> io::Result<()> {
+        loop {
+            // `None` means that the remote closed the connection gracefully.
+            let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
+                return Ok(());
+            };
+            let fut = (self.f)(msg, rx, tx);
+            let fut = crate::span_propagation::scope_remote(carrier, fut);
+            if let Err(close) = fut.await {
+                close_connection(connection, close);
+                return Ok(());
+            }
+        }
+    }
+
+    /// Runs each request of `connection` in a task, at most `max_concurrent` at a time.
+    async fn run_concurrent(
+        &self,
+        connection: &impl IncomingRemoteConnection,
+        max_concurrent: usize,
+    ) -> io::Result<()> {
+        // The tasks of the running requests. When the set is dropped, its tasks
+        // are aborted.
         let mut tasks = JoinSet::new();
-        let res = read_requests(connection, &self.f, self.mode, &mut tasks).await;
-        // The remote can close the connection right after a request, for example
-        // after `Client::notify`. Let such requests complete.
+        // The loop keeps this future across iterations: a task that ends must
+        // not cancel a request that is only partly read.
+        let mut read = pin!(read_request_inner::<S>(connection));
+        let res = loop {
+            tokio::select! {
+                biased;
+                // A task ended. If its handler asks to close the connection, stop.
+                Some(task) = tasks.join_next(), if !tasks.is_empty() => {
+                    if let Err(close) = task.expect("handler task panicked") {
+                        close_connection(connection, close);
+                        break Ok(());
+                    }
+                }
+                // A request arrived, and fewer than `max_concurrent` tasks run.
+                next = &mut read, if tasks.len() < max_concurrent => {
+                    read.set(read_request_inner::<S>(connection));
+                    match next {
+                        Err(err) => break Err(err),
+                        // The remote closed the connection gracefully.
+                        Ok(None) => break Ok(()),
+                        Ok(Some((msg, carrier, rx, tx))) => {
+                            let fut = crate::span_propagation::scope_remote(carrier, (self.f)(msg, rx, tx));
+                            tasks.spawn(fut.instrument(tracing::Span::current()));
+                        }
+                    }
+                }
+            }
+        };
+        // Wait for all tasks, however the connection ended. If the remote closes
+        // the connection right after a request, for example after
+        // `Client::notify`, that request still completes. The connection is
+        // over, so the loop ignores a `CloseConnection` from these tasks.
         while let Some(task) = tasks.join_next().await {
-            task_result(task);
+            task.expect("handler task panicked").ok();
         }
         res
     }
@@ -754,7 +811,7 @@ impl<S: RemoteService> Handler<S> {
     /// request.
     ///
     /// When the connection ends, the server loop waits for the tasks that still
-    /// run. If a task panics, the server loop logs the panic and continues.
+    /// run. If a task panics, the server loop panics too.
     ///
     /// The server uses the handler for all its connections, so `f` must clone
     /// the state that it needs into its future. The future returns
@@ -834,63 +891,10 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
     fn close(&self, error_code: VarInt, reason: &[u8]);
 }
 
-/// Reads and runs the requests of a connection until the connection ends.
-async fn read_requests<S: Service>(
-    connection: &impl IncomingRemoteConnection,
-    f: &HandlerFn<S>,
-    mode: Mode,
-    tasks: &mut JoinSet<std::result::Result<(), CloseConnection>>,
-) -> io::Result<()> {
-    let max_concurrent = match mode {
-        Mode::Sequential => 1,
-        Mode::Concurrent(max_concurrent) => max_concurrent,
-    };
-    // The loop keeps this future across iterations, so that a task that ends
-    // does not cancel a request that is only partly read.
-    let mut read = pin!(read_request_inner::<S>(connection));
-    loop {
-        let close = tokio::select! {
-            biased;
-            Some(task) = tasks.join_next() => task_result(task),
-            next = &mut read, if tasks.len() < max_concurrent => {
-                read.set(read_request_inner::<S>(connection));
-                let Some((msg, carrier, rx, tx)) = next? else {
-                    return Ok(());
-                };
-                let fut = crate::span_propagation::scope_remote(carrier, f(msg, rx, tx));
-                match mode {
-                    Mode::Sequential => fut.await.err(),
-                    Mode::Concurrent(_) => {
-                        tasks.spawn(fut.instrument(tracing::Span::current()));
-                        None
-                    }
-                }
-            }
-        };
-        if let Some(close) = close {
-            close_connection(connection, close);
-            return Ok(());
-        }
-    }
-}
-
 /// Closes `connection` with the code and the reason from a handler.
 fn close_connection(connection: &impl IncomingRemoteConnection, close: CloseConnection) {
     debug!(code = %close.code, "handler closed the connection");
     connection.close(close.code, &close.reason);
-}
-
-/// Returns the `CloseConnection` of a request task, and logs a task that panicked.
-fn task_result(
-    result: std::result::Result<std::result::Result<(), CloseConnection>, JoinError>,
-) -> Option<CloseConnection> {
-    match result {
-        Ok(res) => res.err(),
-        Err(err) => {
-            error!("request task failed: {err:#}");
-            None
-        }
-    }
 }
 
 /// Reads a request from a connection and converts it to a message enum.
