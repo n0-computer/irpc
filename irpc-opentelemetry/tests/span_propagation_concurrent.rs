@@ -12,8 +12,6 @@
 //! tracing subscriber and tracer provider, which would conflict with the
 //! test in `tests/span_propagation.rs`.
 
-#![cfg(feature = "tracing-opentelemetry")]
-
 use iroh::{Endpoint, endpoint::presets, protocol::Router};
 use irpc::{
     Client, WithChannels,
@@ -52,6 +50,7 @@ async fn span_propagation_concurrent() -> n0_error::Result<()> {
     opentelemetry::global::set_text_map_propagator(
         opentelemetry_sdk::propagation::TraceContextPropagator::new(),
     );
+    irpc_opentelemetry::install().expect("no other propagator is installed");
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
