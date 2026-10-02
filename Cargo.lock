@@ -1544,9 +1544,6 @@ dependencies = [
  "n0-tracing-test",
  "noq",
  "num-traits",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "portable-atomic",
  "postcard",
  "rand 0.10.3",
@@ -1559,7 +1556,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "trybuild",
 ]
@@ -1571,6 +1567,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "irpc-opentelemetry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "iroh",
+ "irpc",
+ "n0-error",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "rand 0.10.3",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
