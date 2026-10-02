@@ -85,7 +85,7 @@ impl SpanContextCarrier {
 /// Run `fut` with `carrier`'s context installed as the per-task scope read by
 /// [`set_span_parent_from_remote`].
 ///
-/// Used by transport implementations (`irpc::rpc`, `irpc-iroh`) to wrap a single
+/// Used by transport implementations (`irpc::rpc`, `irpc::iroh`) to wrap a single
 /// request handler. Most users will not call this directly.
 pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F) -> F::Output {
     #[cfg(feature = "tracing-opentelemetry")]

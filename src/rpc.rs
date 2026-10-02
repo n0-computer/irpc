@@ -1,14 +1,22 @@
-//! Module for cross-process RPC using [`noq`].
+//! Module for cross-process RPC.
+//!
+//! The code in this module works with all connections that use [`noq`]
+//! streams. The [`crate::noq`] module has the transport with dial by socket
+//! address. The [`crate::iroh`] module has the transport with dial by endpoint id.
 use std::{
     fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
 };
 
 use n0_error::{e, stack_error};
-use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
-use noq::{ConnectionError, PathId};
+use n0_future::future::Boxed as BoxFuture;
+use noq::{ConnectionError, VarInt};
 use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
-use tracing::{Instrument, debug, error_span, trace, warn};
+use tracing::{debug, trace, warn};
+
+#[cfg(feature = "iroh")]
+pub(crate) mod iroh_impl;
+pub(crate) mod noq_impl;
 
 use crate::{
     LocalSender, RequestError, RpcMessage, Service,
@@ -96,9 +104,6 @@ impl From<noq::WriteError> for SendError {
 /// can have different connection implementations for normal noq connections,
 /// iroh connections, and possibly noq connections with disabled encryption
 /// for performance.
-///
-/// This is done as a trait instead of an enum, so we don't need an iroh
-/// dependency in the main crate.
 pub trait RemoteConnection: Send + Sync + Debug + 'static {
     /// Boxed clone so the trait is dynable.
     fn clone_boxed(&self) -> Box<dyn RemoteConnection>;
@@ -112,95 +117,6 @@ pub trait RemoteConnection: Send + Sync + Debug + 'static {
     ///
     /// For connections that were fully authenticated before allowing to send any data, this should return `false`.
     fn zero_rtt_rejected(&self) -> BoxFuture<bool>;
-}
-
-/// A connection to a remote service.
-///
-/// Initially this does just have the endpoint and the address. Once a
-/// connection is established, it will be stored.
-#[derive(Debug, Clone)]
-pub(crate) struct NoqLazyRemoteConnection(Arc<NoqLazyRemoteConnectionInner>);
-
-#[derive(Debug)]
-struct NoqLazyRemoteConnectionInner {
-    pub endpoint: noq::Endpoint,
-    pub addr: std::net::SocketAddr,
-    pub connection: tokio::sync::Mutex<Option<noq::Connection>>,
-}
-
-impl RemoteConnection for noq::Connection {
-    fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
-        Box::new(self.clone())
-    }
-
-    fn open_bi(
-        &self,
-    ) -> BoxFuture<std::result::Result<(noq::SendStream, noq::RecvStream), RequestError>> {
-        let conn = self.clone();
-        Box::pin(async move {
-            let pair = conn.open_bi().await?;
-            Ok(pair)
-        })
-    }
-
-    fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
-        Box::pin(async { false })
-    }
-}
-
-impl NoqLazyRemoteConnection {
-    pub fn new(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
-        Self(Arc::new(NoqLazyRemoteConnectionInner {
-            endpoint,
-            addr,
-            connection: Default::default(),
-        }))
-    }
-}
-
-impl RemoteConnection for NoqLazyRemoteConnection {
-    fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
-        Box::new(self.clone())
-    }
-
-    fn open_bi(
-        &self,
-    ) -> BoxFuture<std::result::Result<(noq::SendStream, noq::RecvStream), RequestError>> {
-        let this = self.0.clone();
-        Box::pin(async move {
-            let mut guard = this.connection.lock().await;
-            let pair = match guard.as_mut() {
-                Some(conn) => {
-                    // try to reuse the connection
-                    match conn.open_bi().await {
-                        Ok(pair) => pair,
-                        Err(_) => {
-                            // try with a new connection, just once
-                            *guard = None;
-                            connect_and_open_bi(&this.endpoint, &this.addr, guard).await?
-                        }
-                    }
-                }
-                None => connect_and_open_bi(&this.endpoint, &this.addr, guard).await?,
-            };
-            Ok(pair)
-        })
-    }
-
-    fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
-        Box::pin(async { false })
-    }
-}
-
-async fn connect_and_open_bi(
-    endpoint: &noq::Endpoint,
-    addr: &std::net::SocketAddr,
-    mut guard: tokio::sync::MutexGuard<'_, Option<noq::Connection>>,
-) -> Result<(noq::SendStream, noq::RecvStream), RequestError> {
-    let conn = endpoint.connect(*addr, "localhost")?.await?;
-    let (send, recv) = conn.open_bi().await?;
-    *guard = Some(conn);
-    Ok((send, recv))
 }
 
 /// A connection to a remote service that can be used to send the initial message.
@@ -565,60 +481,41 @@ pub trait RemoteService: Service + Sized {
     }
 }
 
-/// Utility function to listen for incoming connections and handle them with the provided handler.
+/// Abstracts over the connections that a server can read requests from.
 ///
-/// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
-pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: Handler<S>) {
-    let mut request_id = 0u64;
-    let mut tasks = JoinSet::new();
-    loop {
-        let incoming = tokio::select! {
-            Some(res) = tasks.join_next(), if !tasks.is_empty() => {
-                res.expect("irpc connection task panicked");
-                continue;
-            }
-            incoming = endpoint.accept() => {
-                match incoming {
-                    None => break,
-                    Some(incoming) => incoming
-                }
-            }
-        };
-        let handler = handler.clone();
-        let fut = async move {
-            match incoming.await {
-                Ok(connection) => match handle_connection(connection, handler).await {
-                    Err(err) => warn!("connection closed with error: {err:?}"),
-                    Ok(()) => debug!("connection closed"),
-                },
-                Err(cause) => {
-                    warn!("failed to accept connection: {cause:?}");
-                }
-            };
-        };
-        let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
-        tasks.spawn(fut.instrument(span));
-        request_id += 1;
-    }
+/// This is implemented for noq connections, and for iroh connections with and
+/// without 0-RTT. You don't need to implement this trait yourself. It is used by
+/// [`read_request`] and [`handle_connection`] to work with all of these.
+pub trait IncomingRemoteConnection {
+    /// Accepts a single bidirectional stream.
+    fn accept_bi(
+        &self,
+    ) -> impl Future<Output = Result<(noq::SendStream, noq::RecvStream), ConnectionError>> + Send;
+
+    /// Closes the connection.
+    fn close(&self, error_code: VarInt, reason: &[u8]);
+
+    /// Returns a label for the remote side, for use in tracing spans.
+    ///
+    /// Returns `None` if the remote is not known yet, which can happen for
+    /// 0-RTT connections.
+    fn remote_label(&self) -> Option<String>;
 }
 
-/// Handles a quic connection with the provided `handler`.
+/// Handles a single connection with the provided `handler`.
 ///
 /// This function handles requests for a service `S`. The wire format used depends on
 /// `S::SPAN_PROPAGATION` - if true, span context is expected in the wire format.
 pub async fn handle_connection<S: Service>(
-    connection: noq::Connection,
+    connection: &impl IncomingRemoteConnection,
     handler: Handler<S>,
 ) -> io::Result<()> {
-    let remote = connection
-        .path(PathId::ZERO)
-        .and_then(|p| p.remote_address().ok());
-    if let Some(remote) = remote {
+    if let Some(remote) = connection.remote_label() {
         tracing::Span::current().record("remote", tracing::field::display(remote));
     }
     debug!("connection accepted");
     loop {
-        let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(&connection).await? else {
+        let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
             return Ok(());
         };
         crate::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
@@ -629,7 +526,7 @@ pub async fn handle_connection<S: Service>(
 ///
 /// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
 pub async fn read_request<S: RemoteService>(
-    connection: &noq::Connection,
+    connection: &impl IncomingRemoteConnection,
 ) -> std::io::Result<Option<S::Message>> {
     let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
         return Ok(None);
@@ -654,7 +551,7 @@ pub async fn read_request<S: RemoteService>(
 /// Returns None if the remote closed the connection with error code `0`.
 /// Returns an error for all other failure cases.
 pub async fn read_request_raw<S: Service>(
-    connection: &noq::Connection,
+    connection: &impl IncomingRemoteConnection,
 ) -> std::io::Result<Option<(S, noq::RecvStream, noq::SendStream)>> {
     Ok(read_request_inner::<S>(connection)
         .await?
@@ -665,7 +562,7 @@ pub async fn read_request_raw<S: Service>(
 ///
 /// The carrier is `Some` iff `S::SPAN_PROPAGATION` is true and the remote sent one.
 async fn read_request_inner<S: Service>(
-    connection: &noq::Connection,
+    connection: &impl IncomingRemoteConnection,
 ) -> std::io::Result<
     Option<(
         S,

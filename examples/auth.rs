@@ -77,7 +77,7 @@ mod storage {
         rpc_requests,
     };
     // Import the macro
-    use irpc_iroh::{IrohLazyRemoteConnection, read_request};
+    use irpc::{iroh::IrohLazyRemoteConnection, rpc::read_request};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 

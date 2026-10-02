@@ -236,9 +236,12 @@ mod cli {
 mod ping {
     use anyhow::{Context, Result};
     use iroh::Endpoint;
-    use irpc::{Client, WithChannels, channel::oneshot, rpc::RemoteService, rpc_requests};
-    use irpc_iroh::{
-        Iroh0RttProtocol, IrohProtocol, IrohRemoteConnection, IrohZrttRemoteConnection,
+    use irpc::{
+        Client, WithChannels,
+        channel::oneshot,
+        iroh::{Iroh0RttProtocol, IrohProtocol},
+        rpc::RemoteService,
+        rpc_requests,
     };
     use serde::{Deserialize, Serialize};
     use tracing::info;
@@ -287,7 +290,7 @@ mod ping {
                 .await
                 .context("failed to connect to remote service")?;
             Ok(EchoApi {
-                inner: Client::boxed(IrohRemoteConnection::new(conn)),
+                inner: Client::boxed(conn),
             })
         }
 
@@ -303,14 +306,14 @@ mod ping {
                 Ok(conn) => {
                     info!("0-RTT possible from our side");
                     Ok(EchoApi {
-                        inner: Client::boxed(IrohZrttRemoteConnection::new(conn)),
+                        inner: Client::boxed(conn),
                     })
                 }
                 Err(connecting) => {
                     info!("0-RTT not possible from our side");
                     let conn = connecting.await?;
                     Ok(EchoApi {
-                        inner: Client::boxed(IrohRemoteConnection::new(conn)),
+                        inner: Client::boxed(conn),
                     })
                 }
             }

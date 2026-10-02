@@ -35,10 +35,13 @@
 //! ## Transports
 //!
 //! We don't abstract over the send and receive stream. These must always be
-//! noq streams, specifically streams from the [noq].
+//! noq streams, specifically streams from the [noq](::noq).
 //!
 //! This restricts the possible rpc transports to noq (QUIC with dial by
 //! socket address) and iroh (QUIC with dial by endpoint id).
+//!
+//! The [`noq`] module has the noq transport, and the [`iroh`] module has the
+//! iroh transport.
 //!
 //! An upside of this is that the noq streams can be tuned for each rpc
 //! request, e.g. by setting the stream priority or by directly using more
@@ -63,12 +66,14 @@
 //! - `rpc`: Enable the rpc features. Enabled by default.
 //!   By disabling this feature, all rpc related dependencies are removed.
 //!   The remaining dependencies are just serde, tokio and tokio-util.
+//! - `iroh`: Enable the iroh transport in the [`iroh`] module. Enabled by
+//!   default. This feature enables `rpc`.
 //! - `spans`: Enable tracing spans for messages. Enabled by default.
 //!   This is useful even without rpc, to not lose tracing context when message
 //!   passing. This is frequently done manually. This obviously requires
 //!   a dependency on tracing.
-//! - `noq_endpoint_setup`: Easy way to create noq endpoints. This is useful
-//!   both for testing and for rpc on localhost. Enabled by default.
+//! - `noq_endpoint_setup`: Easy way to create noq endpoints, in the [`noq`]
+//!   module. This is useful both for testing and for rpc on localhost.
 //!
 //! # Example
 //!
@@ -329,6 +334,16 @@ pub mod rpc {
 }
 #[cfg(feature = "rpc")]
 pub mod rpc;
+/// RPC over iroh connections, with dial by endpoint id.
+#[cfg(feature = "iroh")]
+pub mod iroh {
+    pub use crate::rpc::iroh_impl::*;
+}
+/// RPC over noq connections, with dial by socket address.
+#[cfg(feature = "rpc")]
+pub mod noq {
+    pub use crate::rpc::noq_impl::*;
+}
 
 mod sealed {
     pub trait Sealed {}
@@ -554,13 +569,30 @@ impl<S: Service> Client<S> {
     /// Create a new client to a remote service using the given noq `endpoint`
     /// and a socket `addr` of the remote service.
     #[cfg(feature = "rpc")]
-    pub fn noq(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
-        Self::boxed(rpc::NoqLazyRemoteConnection::new(endpoint, addr))
+    pub fn noq(endpoint: ::noq::Endpoint, addr: std::net::SocketAddr) -> Self {
+        Self::boxed(rpc::noq_impl::NoqLazyRemoteConnection::new(endpoint, addr))
+    }
+
+    /// Creates a new client to a remote service using the given iroh `endpoint`.
+    ///
+    /// The client connects to `addr` with `alpn` on the first request, and
+    /// connects again if the connection fails.
+    #[cfg(feature = "iroh")]
+    pub fn iroh(
+        endpoint: ::iroh::Endpoint,
+        addr: impl Into<::iroh::EndpointAddr>,
+        alpn: impl AsRef<[u8]>,
+    ) -> Self {
+        let conn = rpc::iroh_impl::IrohLazyRemoteConnection::new(
+            endpoint,
+            addr.into(),
+            alpn.as_ref().to_vec(),
+        );
+        Self::boxed(conn)
     }
 
     /// Create a new client from a `rpc::RemoteConnection` trait object.
-    /// This is used from crates that want to provide other transports than noq,
-    /// such as the iroh transport.
+    /// This is used for transports other than noq, such as the iroh transport.
     #[cfg(feature = "rpc")]
     pub fn boxed(remote: impl rpc::RemoteConnection) -> Self {
         Self(ClientInner::Remote(Box::new(remote)), PhantomData)
@@ -589,7 +621,7 @@ impl<S: Service> Client<S> {
     ///
     /// In the remote case, this involves lazily creating a connection to the
     /// remote side and then creating a new stream on the underlying
-    /// [`noq`] or iroh connection.
+    /// [`noq`](::noq) or iroh connection.
     ///
     /// In both cases, the returned sender is fully self contained.
     #[allow(clippy::type_complexity)]
@@ -923,14 +955,14 @@ pub enum RequestError {
     #[error("Error establishing connection")]
     Connect {
         #[error(std_err)]
-        source: noq::ConnectError,
+        source: ::noq::ConnectError,
     },
     /// Error in noq when the connection already exists, when opening a stream pair
     #[cfg(feature = "rpc")]
     #[error("Error opening stream")]
     Connection {
         #[error(std_err)]
-        source: noq::ConnectionError,
+        source: ::noq::ConnectionError,
     },
     /// Generic error for non-noq transports
     #[cfg(feature = "rpc")]

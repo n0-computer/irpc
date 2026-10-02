@@ -7,8 +7,8 @@ use anyhow::bail;
 use irpc::{
     Channels, Client, Request, Service, WithChannels,
     channel::{mpsc, none::NoReceiver, oneshot},
-    rpc::{RemoteService, listen},
-    util::{make_client_endpoint, make_server_endpoint},
+    noq::{listen, make_client_endpoint, make_server_endpoint},
+    rpc::RemoteService,
 };
 use n0_future::task::{self, AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
