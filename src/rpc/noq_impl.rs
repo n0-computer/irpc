@@ -146,6 +146,8 @@ fn remote_address(connection: &noq::Connection) -> Option<std::net::SocketAddr> 
     connection.path(PathId::ZERO)?.remote_address().ok()
 }
 
+impl crate::sealed::Sealed for noq::Connection {}
+
 impl IncomingRemoteConnection for noq::Connection {
     async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
         self.accept_bi().await

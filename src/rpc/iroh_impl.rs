@@ -242,6 +242,8 @@ impl<S: Service> ProtocolHandler for Iroh0RttProtocol<S> {
     }
 }
 
+impl crate::sealed::Sealed for IncomingZeroRttConnection {}
+
 impl IncomingRemoteConnection for IncomingZeroRttConnection {
     async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
         self.accept_bi().await
@@ -251,6 +253,8 @@ impl IncomingRemoteConnection for IncomingZeroRttConnection {
         self.close(error_code, reason)
     }
 }
+
+impl crate::sealed::Sealed for Connection {}
 
 impl IncomingRemoteConnection for Connection {
     async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {

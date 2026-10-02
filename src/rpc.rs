@@ -484,9 +484,12 @@ pub trait RemoteService: Service + Sized {
 /// Abstracts over the connections that a server can read requests from.
 ///
 /// This is implemented for noq connections, and for iroh connections with and
-/// without 0-RTT. You don't need to implement this trait yourself. It is used by
-/// [`read_request`] and [`handle_connection`] to work with all of these.
-pub trait IncomingRemoteConnection {
+/// without 0-RTT. It is used by [`read_request`] and [`handle_connection`] to
+/// work with all of these.
+///
+/// This trait is sealed: only irpc can implement it. So irpc can add methods to
+/// it without a breaking change.
+pub trait IncomingRemoteConnection: crate::sealed::Sealed {
     /// Accepts a single bidirectional stream.
     fn accept_bi(
         &self,
