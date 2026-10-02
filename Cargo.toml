@@ -83,7 +83,9 @@ n0-tracing-test = "0.3.0"
 
 [features]
 # enable the remote transport
-rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:tracing", "dep:tracing-subscriber", "tokio/io-util", "tokio/rt"]
+rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:tracing", "tokio/io-util"]
+# propagate span context to the remote with a `span_propagation::PropagatorLayer`
+span-propagation = ["rpc", "dep:tracing-subscriber", "tokio/rt"]
 # enable the iroh transport
 iroh = ["rpc", "dep:iroh", "dep:portable-atomic", "dep:getrandom"]
 # add helpers to create noq endpoints, for tests and for rpc on localhost
@@ -141,7 +143,7 @@ required-features = ["iroh", "spans", "stream", "derive"]
 
 [[test]]
 name = "span_propagator"
-required-features = ["noq_endpoint_setup", "derive", "spans"]
+required-features = ["noq_endpoint_setup", "derive", "spans", "span-propagation"]
 
 [workspace]
 resolver = "2"
@@ -199,7 +201,7 @@ allowed_external_types = [
     "futures_core::stream::Stream",
     "futures_lite::future::Boxed",
     "futures_sink::Sink",
-    # `span_propagation::PropagatorLayer` is a tracing layer
+    # `span_propagation::PropagatorLayer` is a tracing layer, with the `span-propagation` feature
     "tracing_core::subscriber::Subscriber",
     "tracing_subscriber::layer::Layer",
 ]

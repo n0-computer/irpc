@@ -9,9 +9,13 @@
 //! the headers on the server.
 //!
 //! irpc finds the propagator through the tracing subscriber: add a
-//! [`PropagatorLayer`] to it. The client asks the subscriber of the current
+//! `PropagatorLayer` to it. The client asks the subscriber of the current
 //! thread, and the server asks the subscriber of the request span. Without the
 //! layer, irpc does not propagate span context.
+//!
+//! The propagator and the layer need the `span-propagation` feature. Without
+//! it, a protocol with `span_propagation` keeps its wire format, but irpc does
+//! not propagate span context.
 //!
 //! The propagator does not change the wire format: a protocol with
 //! `span_propagation` always sends the `Option<SpanContextCarrier>`. Without a
@@ -23,6 +27,7 @@ use std::{collections::HashMap, future::Future};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "span-propagation")]
 tokio::task_local! {
     static SPAN_CONTEXT: SpanContextCarrier;
 }
@@ -55,6 +60,9 @@ impl SpanContextCarrier {
 
     /// Returns the context of the current span, if the subscriber has a propagator.
     pub(crate) fn from_current() -> Option<Self> {
+        #[cfg(not(feature = "span-propagation"))]
+        return None;
+        #[cfg(feature = "span-propagation")]
         tracing::dispatcher::get_default(|dispatch| {
             let propagator = dispatch.downcast_ref::<PropagatorLayer>()?;
             let mut carrier = Self::default();
@@ -65,6 +73,7 @@ impl SpanContextCarrier {
 }
 
 /// Connects span propagation to a tracing backend.
+#[cfg(feature = "span-propagation")]
 pub trait Propagator: Send + Sync + 'static {
     /// Writes the context of `span` into `carrier`.
     fn inject(&self, span: &tracing::Span, carrier: &mut SpanContextCarrier);
@@ -76,8 +85,10 @@ pub trait Propagator: Send + Sync + 'static {
 /// A tracing layer that hands out a [`Propagator`] to irpc.
 ///
 /// The layer records nothing. irpc finds it with [`tracing::Dispatch::downcast_ref`].
+#[cfg(feature = "span-propagation")]
 pub struct PropagatorLayer(Box<dyn Propagator>);
 
+#[cfg(feature = "span-propagation")]
 impl PropagatorLayer {
     /// Creates a layer for `propagator`.
     pub fn new(propagator: impl Propagator) -> Self {
@@ -85,18 +96,25 @@ impl PropagatorLayer {
     }
 }
 
+#[cfg(feature = "span-propagation")]
 impl std::fmt::Debug for PropagatorLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PropagatorLayer").finish_non_exhaustive()
     }
 }
 
+#[cfg(feature = "span-propagation")]
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}
 
 /// Runs `fut` with `carrier` in scope for [`set_span_parent_from_remote`].
 ///
 /// The server loop calls this for each request. Most users do not call it.
 pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F) -> F::Output {
+    #[cfg(not(feature = "span-propagation"))]
+    let _ = carrier;
+    #[cfg(not(feature = "span-propagation"))]
+    return fut.await;
+    #[cfg(feature = "span-propagation")]
     match carrier {
         Some(carrier) => SPAN_CONTEXT.scope(carrier, fut).await,
         None => fut.await,
@@ -106,8 +124,12 @@ pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F
 /// Sets the parent of `span` from the span context of the current request.
 ///
 /// The code from `rpc_requests(span_propagation)` calls this. It does nothing
-/// outside of [`scope_remote`], or if the subscriber of `span` has no propagator.
+/// outside of [`scope_remote`], if the subscriber of `span` has no propagator, or
+/// without the `span-propagation` feature.
 pub fn set_span_parent_from_remote(span: &tracing::Span) {
+    #[cfg(not(feature = "span-propagation"))]
+    let _ = span;
+    #[cfg(feature = "span-propagation")]
     span.with_subscriber(|(_id, dispatch)| {
         let Some(propagator) = dispatch.downcast_ref::<PropagatorLayer>() else {
             return;
