@@ -1,6 +1,4 @@
 //! Checks that a custom [`Propagator`] carries headers from client to server.
-//!
-//! Lives in its own test binary, because the propagator is global.
 
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -16,12 +14,13 @@ use irpc::{
     noq::{listen, make_client_endpoint, make_server_endpoint},
     rpc::{Handler, RemoteService},
     rpc_requests,
-    span_propagation::{Propagator, SpanContextCarrier, set_propagator},
+    span_propagation::{Propagator, PropagatorLayer, SpanContextCarrier},
 };
 use n0_future::task::AbortOnDropHandle;
 use noq::Endpoint;
 use serde::{Deserialize, Serialize};
 use testresult::TestResult;
+use tracing_subscriber::{Registry, layer::SubscriberExt};
 
 fn create_connected_endpoints() -> TestResult<(Endpoint, Endpoint, SocketAddr)> {
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into();
@@ -62,7 +61,9 @@ impl Propagator for TestPropagator {
 #[tokio::test]
 async fn propagator_carries_headers_to_the_server() -> TestResult<()> {
     let propagator = TestPropagator::default();
-    set_propagator(propagator.clone())?;
+    let layer = PropagatorLayer::new(propagator.clone());
+    // The test runtime has one thread, so the server task sees this subscriber too.
+    let _guard = tracing::subscriber::set_default(Registry::default().with(layer));
 
     let (server, client, server_addr) = create_connected_endpoints()?;
     let handler: Handler<EchoProtocol> = Arc::new(|request, rx, tx| {
