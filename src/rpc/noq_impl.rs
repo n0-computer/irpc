@@ -121,10 +121,15 @@ pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: Handler<S>) {
         let handler = handler.clone();
         let fut = async move {
             match incoming.await {
-                Ok(connection) => match handle_connection(&connection, handler).await {
-                    Err(err) => warn!("connection closed with error: {err:?}"),
-                    Ok(()) => debug!("connection closed"),
-                },
+                Ok(connection) => {
+                    if let Some(remote) = remote_address(&connection) {
+                        tracing::Span::current().record("remote", tracing::field::display(remote));
+                    }
+                    match handle_connection(&connection, handler).await {
+                        Err(err) => warn!("connection closed with error: {err:?}"),
+                        Ok(()) => debug!("connection closed"),
+                    }
+                }
                 Err(cause) => {
                     warn!("failed to accept connection: {cause:?}");
                 }
@@ -136,6 +141,13 @@ pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: Handler<S>) {
     }
 }
 
+/// Returns the address of the remote, for the `remote` field of a span.
+fn remote_address(connection: &noq::Connection) -> Option<std::net::SocketAddr> {
+    connection.path(PathId::ZERO)?.remote_address().ok()
+}
+
+impl crate::sealed::Sealed for noq::Connection {}
+
 impl IncomingRemoteConnection for noq::Connection {
     async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
         self.accept_bi().await
@@ -143,11 +155,6 @@ impl IncomingRemoteConnection for noq::Connection {
 
     fn close(&self, error_code: VarInt, reason: &[u8]) {
         self.close(error_code, reason)
-    }
-
-    fn remote_label(&self) -> Option<String> {
-        let remote = self.path(PathId::ZERO)?.remote_address().ok()?;
-        Some(remote.to_string())
     }
 }
 

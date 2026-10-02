@@ -484,9 +484,12 @@ pub trait RemoteService: Service + Sized {
 /// Abstracts over the connections that a server can read requests from.
 ///
 /// This is implemented for noq connections, and for iroh connections with and
-/// without 0-RTT. You don't need to implement this trait yourself. It is used by
-/// [`read_request`] and [`handle_connection`] to work with all of these.
-pub trait IncomingRemoteConnection {
+/// without 0-RTT. It is used by [`read_request`] and [`handle_connection`] to
+/// work with all of these.
+///
+/// This trait is sealed: only irpc can implement it. So irpc can add methods to
+/// it without a breaking change.
+pub trait IncomingRemoteConnection: crate::sealed::Sealed {
     /// Accepts a single bidirectional stream.
     fn accept_bi(
         &self,
@@ -494,12 +497,6 @@ pub trait IncomingRemoteConnection {
 
     /// Closes the connection.
     fn close(&self, error_code: VarInt, reason: &[u8]);
-
-    /// Returns a label for the remote side, for use in tracing spans.
-    ///
-    /// Returns `None` if the remote is not known yet, which can happen for
-    /// 0-RTT connections.
-    fn remote_label(&self) -> Option<String>;
 }
 
 /// Handles a single connection with the provided `handler`.
@@ -510,9 +507,6 @@ pub async fn handle_connection<S: Service>(
     connection: &impl IncomingRemoteConnection,
     handler: Handler<S>,
 ) -> io::Result<()> {
-    if let Some(remote) = connection.remote_label() {
-        tracing::Span::current().record("remote", tracing::field::display(remote));
-    }
     debug!("connection accepted");
     loop {
         let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
