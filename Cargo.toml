@@ -61,6 +61,8 @@ noq = { workspace = true, optional = true, features = ["runtime-tokio"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 # pin lazy_static minimum for -Z minimal-versions compatibility (sharded-slab needs >= 1.4)
 lazy_static = { version = "1.4" }
+# pin num-traits minimum for -Z minimal-versions compatibility (prefix-trie via hickory-proto needs the u128 impls)
+num-traits = { version = "0.2.14" }
 # just convenient for the enum definitions, in the manual example
 derive_more = { version = "2", features = ["from"] }
 # we need full for example main etc.
