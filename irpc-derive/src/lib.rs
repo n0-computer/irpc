@@ -320,7 +320,7 @@ fn generate_remote_service_impl(
                         // Create a span for this specific RPC operation
                         let span = ::irpc::__macro_exports::tracing::info_span!(#span_name);
                         // Set its parent to the propagated remote context if available
-                        ::irpc::span_propagation::set_span_parent_from_remote(&span);
+                        ::irpc::__macro_exports::set_span_parent_from_remote(&span);
                         let _guard = span.enter();
                         #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
                     }

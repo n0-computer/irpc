@@ -104,7 +104,7 @@ struct PropagatorLayer(Box<dyn Propagator>);
 #[cfg(feature = "span-propagation")]
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}
 
-/// Runs `fut` with `carrier` in scope for [`set_span_parent_from_remote`].
+/// Runs `fut` with `carrier` in scope for the request spans.
 ///
 /// The server loop calls this for each request. Most users do not call it.
 ///
@@ -124,10 +124,11 @@ pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F
 
 /// Sets the parent of `span` from the span context of the current request.
 ///
-/// The code from `rpc_requests(span_propagation)` calls this. It does nothing
-/// outside of [`scope_remote`], if the subscriber of `span` has no propagator, or
-/// without the `span-propagation` feature.
-pub fn set_span_parent_from_remote(span: &tracing::Span) {
+/// The code from `rpc_requests(span_propagation)` calls this through
+/// `__macro_exports`. It does nothing outside of [`scope_remote`], if the
+/// subscriber of `span` has no propagator, or without the `span-propagation`
+/// feature.
+pub(crate) fn set_span_parent_from_remote(span: &tracing::Span) {
     #[cfg(not(feature = "span-propagation"))]
     let _ = span;
     #[cfg(feature = "span-propagation")]
