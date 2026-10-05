@@ -8,22 +8,30 @@ irpc calls.
 
 ## Version compatibility
 
-Your application must use the same semver-compatible versions of
-`opentelemetry` and `tracing-opentelemetry` as this crate:
+Your application must use semver-compatible versions of `irpc`,
+`opentelemetry`, and `tracing-opentelemetry` with this crate:
 
-| irpc-opentelemetry | opentelemetry | tracing-opentelemetry |
-|--------------------|---------------|-----------------------|
-| 0.1                | 0.32          | 0.33                  |
+| irpc-opentelemetry | irpc | opentelemetry | tracing-opentelemetry |
+|--------------------|------|---------------|-----------------------|
+| 0.1                | 0.17 | 0.32          | 0.33                  |
 
-Both crates keep their state in statics: the global propagator and the
-`tracing-opentelemetry` layer. With a second copy of either in your dependency
-tree, everything compiles, but irpc silently propagates nothing. To check,
-run `cargo tree -i opentelemetry` and `cargo tree -i tracing-opentelemetry`:
-each should print one version. If cargo reports that the name is ambiguous,
-you have two copies.
+With a second copy of one of them in your dependency tree, everything
+compiles, but no span context reaches the remote:
 
-This crate makes a breaking release whenever it moves to a new version of
-`opentelemetry` or `tracing-opentelemetry`.
+- `opentelemetry` keeps the propagator that you register with
+  `opentelemetry::global::set_text_map_propagator` in a static. A second copy
+  has its own static, with a propagator that does nothing.
+- This crate finds the `tracing-opentelemetry` layer in the subscriber by its
+  type. The layer type of a second copy is a different type.
+- irpc finds the layer of this crate in the subscriber by its type, too. The
+  layer type of a second copy of irpc is a different type.
+
+To check, run `cargo tree -i irpc`, `cargo tree -i opentelemetry`, and
+`cargo tree -i tracing-opentelemetry`: each should print one version. If cargo
+reports that the name is ambiguous, you have two copies.
+
+This crate makes a breaking release whenever it moves to a new major version
+of `irpc`, or a new version of `opentelemetry` or `tracing-opentelemetry`.
 
 ## Usage
 
