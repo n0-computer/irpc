@@ -24,6 +24,10 @@
 //! [`read_request`] returns a bad request as a [`ReadRequestError`]. A server
 //! with its own loop decides what to do: close the connection, or read the
 //! next request.
+//!
+//! A remote channel receiver also stops its stream with
+//! [`ERROR_CODE_DECODE_FAILED`] if a message does not decode. Its sender then
+//! gets an error on the next send.
 use std::{
     fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
 };
@@ -64,7 +68,8 @@ pub const ERROR_CODE_ENCODE_FAILED: u32 = 2;
 /// Error code on streams and connections if the receiver could not decode a message.
 ///
 /// A server stops and resets the streams of a request that does not decode,
-/// and by default closes the connection with this code.
+/// and by default closes the connection with this code. A remote channel
+/// receiver stops its stream if a message does not decode.
 pub const ERROR_CODE_DECODE_FAILED: u32 = 3;
 
 /// Error when reading a request with [`read_request`].
@@ -274,8 +279,10 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
                 .read_to_end(size as usize)
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let msg: T = postcard::from_bytes(&rest)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let msg: T = postcard::from_bytes(&rest).map_err(|e| {
+                read.stop(ERROR_CODE_DECODE_FAILED.into()).ok();
+                io::Error::new(io::ErrorKind::InvalidData, e)
+            })?;
             Ok(msg)
         };
         oneshot::Receiver::from(|| fut)
@@ -380,8 +387,10 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
             read.read_exact(&mut buf)
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
-            let msg: T = postcard::from_bytes(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let msg: T = postcard::from_bytes(&buf).map_err(|e| {
+                read.stop(ERROR_CODE_DECODE_FAILED.into()).ok();
+                io::Error::new(io::ErrorKind::InvalidData, e)
+            })?;
             Ok(Some(msg))
         })
     }
