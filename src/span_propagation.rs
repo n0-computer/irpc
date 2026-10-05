@@ -13,13 +13,10 @@
 //! thread, and the server asks the subscriber of the request span. Without the
 //! layer, irpc does not propagate span context.
 //!
-//! The propagator and the layer need the `span-propagation` feature. Without
-//! it, a protocol with `span_propagation` keeps its wire format, but irpc does
-//! not propagate span context.
-//!
-//! The propagator does not change the wire format: a protocol with
-//! `span_propagation` always sends the `Option<SpanContextCarrier>`. Without a
-//! propagator, its value is `None`.
+//! The propagator and the layer need the `span-propagation` feature. Neither
+//! the feature nor the layer changes the wire format: a protocol with
+//! `span_propagation` always sends an `Option<SpanContextCarrier>`, which is
+//! `None` when irpc does not propagate span context.
 //!
 //! The `irpc-opentelemetry` crate has a propagator for OpenTelemetry.
 
@@ -109,6 +106,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}
 /// Runs `fut` with `carrier` in scope for [`set_span_parent_from_remote`].
 ///
 /// The server loop calls this for each request. Most users do not call it.
+///
+/// The carrier lives in a task-local of `fut`, so concurrent requests do not see
+/// each other's context, and the context moves with `fut` across threads.
 pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F) -> F::Output {
     #[cfg(not(feature = "span-propagation"))]
     let _ = carrier;
