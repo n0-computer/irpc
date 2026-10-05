@@ -29,7 +29,10 @@
 
 use irpc::span_propagation::{Propagator, PropagatorLayer, SpanContextCarrier};
 pub use opentelemetry;
-use opentelemetry::propagation::{Extractor, Injector};
+use opentelemetry::{
+    propagation::{Extractor, Injector},
+    trace::TraceContextExt,
+};
 pub use tracing_opentelemetry;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -51,7 +54,12 @@ impl Propagator for OtelPropagator {
             propagator
                 .extract_with_context(&opentelemetry::Context::current(), &HeadersRef(carrier))
         });
-        let _ = span.set_parent(context);
+        // If the headers have no span, `context` is the current context. Without
+        // context activation in `tracing-opentelemetry`, it has no span either, and
+        // setting it as parent would make `span` a new root.
+        if context.span().span_context().is_valid() {
+            let _ = span.set_parent(context);
+        }
     }
 }
 
