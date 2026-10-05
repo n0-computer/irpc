@@ -3,6 +3,24 @@
 //! The code in this module works with all connections that use [`noq`]
 //! streams. The [`crate::noq`] module has the transport with dial by socket
 //! address. The [`crate::iroh`] module has the transport with dial by endpoint id.
+//!
+//! # Bad requests
+//!
+//! Each request has its own stream. If the server cannot read a request, it
+//! stops and resets the streams of that request:
+//!
+//! * with [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] if the request is larger
+//!   than [`MAX_MESSAGE_SIZE`],
+//! * with [`ERROR_CODE_DECODE_FAILED`] if the request does not decode. For
+//!   example, a client of a newer protocol version sent a request type that
+//!   the server does not know.
+//!
+//! A [`Handler`] then closes the connection with the same code, as for any
+//! other protocol violation.
+//!
+//! [`read_request`] returns a bad request as a [`ReadRequestError`]. A server
+//! with its own loop decides what to do: close the connection, or read the
+//! next request.
 use std::{
     fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
 };
@@ -32,15 +50,73 @@ use crate::{
 /// Default max message size (16 MiB).
 pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 
-/// Error code on streams if the max message size was exceeded.
+/// Error code on streams and connections if a message is larger than [`MAX_MESSAGE_SIZE`].
+///
+/// irpc uses the codes 0 to 255. Applications must use codes from 256 upward.
 pub const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
 
-/// Error code on streams if the sender tried to send an message that could not be postcard serialized.
-pub const ERROR_CODE_INVALID_POSTCARD: u32 = 2;
+/// Error code on streams if the sender could not encode a message.
+pub const ERROR_CODE_ENCODE_FAILED: u32 = 2;
+
+/// Error code on streams and connections if the receiver could not decode a message.
+///
+/// A server stops and resets the streams of a request that does not decode,
+/// and closes the connection with this code.
+pub const ERROR_CODE_DECODE_FAILED: u32 = 3;
+
+/// Error when reading a request with [`read_request`].
+///
+/// For [`MaxMessageSizeExceeded`](Self::MaxMessageSizeExceeded) and
+/// [`InvalidRequest`](Self::InvalidRequest), irpc resets the streams of the
+/// request, so its client gets an error. The connection is still usable, so a
+/// server can read the next request.
+#[stack_error(derive, add_meta)]
+#[non_exhaustive]
+pub enum ReadRequestError {
+    /// The request is larger than [`MAX_MESSAGE_SIZE`].
+    #[error("Maximum message size exceeded")]
+    MaxMessageSizeExceeded,
+    /// The request does not decode.
+    ///
+    /// For example, a newer client sent a request type that this server does
+    /// not know.
+    #[error("Invalid request")]
+    InvalidRequest {
+        #[error(std_err)]
+        source: io::Error,
+    },
+    /// The connection failed.
+    #[error("Connection failed")]
+    Connection {
+        #[error(std_err)]
+        source: ConnectionError,
+    },
+}
+
+impl ReadRequestError {
+    /// Returns the irpc error code for a bad request, or `None` for a connection error.
+    fn error_code(&self) -> Option<u32> {
+        match self {
+            Self::MaxMessageSizeExceeded { .. } => Some(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED),
+            Self::InvalidRequest { .. } => Some(ERROR_CODE_DECODE_FAILED),
+            Self::Connection { .. } => None,
+        }
+    }
+}
+
+impl From<ReadRequestError> for io::Error {
+    fn from(err: ReadRequestError) -> Self {
+        match err {
+            ReadRequestError::Connection { source, .. } => source.into(),
+            err => io::Error::new(io::ErrorKind::InvalidData, err),
+        }
+    }
+}
 
 /// Error that can occur when writing the initial message when doing a
 /// cross-process RPC.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum WriteError {
     /// Error writing to the stream with noq
     #[error("Error writing to stream")]
@@ -233,7 +309,7 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
                 let size = match postcard::experimental::serialized_size(&value) {
                     Ok(size) => size,
                     Err(e) => {
-                        writer.reset(ERROR_CODE_INVALID_POSTCARD.into()).ok();
+                        writer.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
                         return Err(e!(
                             SendError::Io,
                             io::Error::new(io::ErrorKind::InvalidData, e,)
@@ -249,7 +325,7 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
                 // write via a small buffer to avoid allocation for small values
                 let mut buf = SmallVec::<[u8; 128]>::new();
                 if let Err(e) = buf.write_length_prefixed(value) {
-                    writer.reset(ERROR_CODE_INVALID_POSTCARD.into()).ok();
+                    writer.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
                     return Err(e.into());
                 }
                 writer.write_all(&buf).await?;
@@ -327,7 +403,7 @@ impl<T: RpcMessage> NoqSenderInner<T> {
             let size = match postcard::experimental::serialized_size(&value) {
                 Ok(size) => size,
                 Err(e) => {
-                    self.send.reset(ERROR_CODE_INVALID_POSTCARD.into()).ok();
+                    self.send.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
                     return Err(e!(
                         SendError::Io,
                         io::Error::new(io::ErrorKind::InvalidData, e)
@@ -343,7 +419,7 @@ impl<T: RpcMessage> NoqSenderInner<T> {
             let value = value;
             self.buffer.clear();
             if let Err(e) = self.buffer.write_length_prefixed(value) {
-                self.send.reset(ERROR_CODE_INVALID_POSTCARD.into()).ok();
+                self.send.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
                 return Err(e.into());
             }
             self.send.write_all(&self.buffer).await?;
@@ -493,6 +569,12 @@ impl HandlerError {
     /// all other requests on the connection, including streams that a handler moved
     /// into a spawned task.
     ///
+    /// irpc uses the codes 0 to 255, so use codes from 256 upward. irpc closes
+    /// a connection with code 0 for a normal close, which [`Handler::from_sender`]
+    /// also uses when its receiver is gone. For a bad request, irpc closes the
+    /// connection with [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] or
+    /// [`ERROR_CODE_DECODE_FAILED`].
+    ///
     /// # Examples
     ///
     /// ```
@@ -542,6 +624,7 @@ impl HandlerError {
 /// A handler function can return `Err(HandlerError)` to close the connection.
 /// In all other cases, handle errors internally and return `Ok(())` from
 /// the handler function to read the next request from the connection.
+/// A bad request also closes the connection.
 ///
 /// Often, the protocol type cannot be inferred from the message enum,
 /// so you may have to name it: `Handler::<MyProtocol>::sequential(..)`.
@@ -610,13 +693,15 @@ impl<S: Service> Handler<S> {
     }
 
     /// Handles the requests of `connection` until the connection ends.
+    ///
+    /// Returns an error if the connection fails, or if a bad request closed it.
     pub async fn handle_connection(
         &self,
         connection: &impl IncomingRemoteConnection,
     ) -> io::Result<()> {
         debug!("connection accepted");
         loop {
-            let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
+            let Some((msg, carrier, rx, tx)) = read_next::<S>(connection).await? else {
                 return Ok(());
             };
             let fut = (self.f)(msg, rx, tx);
@@ -632,6 +717,18 @@ impl<S: Service> Handler<S> {
             }
         }
     }
+}
+
+/// Reads the next request, and closes the connection on a bad request.
+async fn read_next<S: Service>(
+    connection: &impl IncomingRemoteConnection,
+) -> io::Result<Option<Request<S>>> {
+    read_request_inner::<S>(connection).await.map_err(|err| {
+        if let Some(code) = err.error_code() {
+            connection.close(code.into(), err.to_string().as_bytes());
+        }
+        err.into()
+    })
 }
 
 impl<S: RemoteService> Handler<S> {
@@ -706,9 +803,16 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 /// Reads a request from a connection and converts it to a message enum.
 ///
 /// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
+///
+/// Returns `None` if the remote closed the connection with code 0, or if this
+/// side closed it.
+///
+/// Returns [`ReadRequestError::MaxMessageSizeExceeded`] or
+/// [`ReadRequestError::InvalidRequest`] for a bad request. The connection is
+/// still open after these errors, see [Bad requests](self#bad-requests).
 pub async fn read_request<S: RemoteService>(
     connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<Option<S::Message>> {
+) -> Result<Option<S::Message>, ReadRequestError> {
     let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
         return Ok(None);
     };
@@ -728,65 +832,102 @@ pub async fn read_request<S: RemoteService>(
 /// silently dropped. Use [`Handler::handle_connection`] (or [`read_request`]) if you need
 /// the propagated context to reach the generated handler spans.
 ///
-/// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
-/// Returns None if the remote closed the connection with error code `0`.
-/// Returns an error for all other failure cases.
+/// Returns `None` in the same cases as [`read_request`].
 pub async fn read_request_raw<S: Service>(
     connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<Option<(S, noq::RecvStream, noq::SendStream)>> {
+) -> Result<Option<(S, noq::RecvStream, noq::SendStream)>, ReadRequestError> {
     Ok(read_request_inner::<S>(connection)
         .await?
         .map(|(msg, _carrier, rx, tx)| (msg, rx, tx)))
 }
+
+/// A request with its span context carrier and its streams.
+type Request<S> = (
+    S,
+    Option<crate::span_propagation::SpanContextCarrier>,
+    noq::RecvStream,
+    noq::SendStream,
+);
 
 /// Internal: read a request and also return the propagated span context carrier.
 ///
 /// The carrier is `Some` iff `S::SPAN_PROPAGATION` is true and the remote sent one.
 async fn read_request_inner<S: Service>(
     connection: &impl IncomingRemoteConnection,
-) -> std::io::Result<
-    Option<(
-        S,
-        Option<crate::span_propagation::SpanContextCarrier>,
-        noq::RecvStream,
-        noq::SendStream,
-    )>,
-> {
-    let (send, mut recv) = match connection.accept_bi().await {
-        Ok((s, r)) => (s, r),
+) -> Result<Option<Request<S>>, ReadRequestError> {
+    let (mut send, mut recv) = match connection.accept_bi().await {
+        Ok(streams) => streams,
         Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
             trace!("remote side closed connection {cause:?}");
             return Ok(None);
         }
-        Err(cause) => {
-            warn!("failed to accept bi stream {cause:?}");
-            return Err(cause.into());
+        Err(ConnectionError::LocallyClosed) => return Ok(None),
+        Err(cause) => return Err(e!(ReadRequestError::Connection, cause)),
+    };
+    match read_request_frame::<S>(&mut recv).await {
+        Ok((carrier, msg)) => Ok(Some((msg, carrier, recv, send))),
+        Err(err) => {
+            if let Some(code) = err.error_code() {
+                recv.stop(code.into()).ok();
+                send.reset(code.into()).ok();
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Reads and decodes a request.
+async fn read_request_frame<S: Service>(
+    recv: &mut noq::RecvStream,
+) -> Result<(Option<crate::span_propagation::SpanContextCarrier>, S), ReadRequestError> {
+    let invalid = |err| e!(ReadRequestError::InvalidRequest, err);
+    let read_failed = |err: io::Error| {
+        let lost = err.get_ref().and_then(|inner| match read_error(inner) {
+            Some(noq::ReadError::ConnectionLost(lost)) => Some(lost.clone()),
+            _ => None,
+        });
+        match lost {
+            Some(lost) => e!(ReadRequestError::Connection, lost),
+            None => invalid(err),
         }
     };
     let size = recv
         .read_varint_u64()
-        .await?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
+        .await
+        .map_err(read_failed)?
+        .ok_or_else(|| {
+            invalid(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "failed to read size",
+            ))
+        })?;
     if size > MAX_MESSAGE_SIZE {
-        connection.close(
-            ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
-            b"request exceeded max message size",
-        );
-        return Err(e!(mpsc::RecvError::MaxMessageSizeExceeded).into());
+        return Err(e!(ReadRequestError::MaxMessageSizeExceeded));
     }
     let mut buf = vec![0; size as usize];
     recv.read_exact(&mut buf)
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
+        .map_err(|e| read_failed(io::Error::new(io::ErrorKind::UnexpectedEof, e)))?;
+    let decode = |e| invalid(io::Error::new(io::ErrorKind::InvalidData, e));
+    if S::SPAN_PROPAGATION {
+        postcard::from_bytes(&buf).map_err(decode)
+    } else {
+        Ok((None, postcard::from_bytes(&buf).map_err(decode)?))
+    }
+}
 
-    let (carrier, msg): (Option<crate::span_propagation::SpanContextCarrier>, S) =
-        if S::SPAN_PROPAGATION {
-            postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        } else {
-            let msg = postcard::from_bytes(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            (None, msg)
-        };
-
-    Ok(Some((msg, carrier, recv, send)))
+/// Returns the noq read error in `err`, also when it is inside a read helper error.
+fn read_error<'a>(
+    err: &'a (dyn std::error::Error + Send + Sync + 'static),
+) -> Option<&'a noq::ReadError> {
+    if let Some(err) = err.downcast_ref::<noq::ReadError>() {
+        return Some(err);
+    }
+    if let Some(noq::ReadExactError::ReadError(err)) = err.downcast_ref() {
+        return Some(err);
+    }
+    if let Some(noq::ReadToEndError::Read(err)) = err.downcast_ref() {
+        return Some(err);
+    }
+    None
 }

@@ -14,6 +14,7 @@ use super::SendError;
 /// For rpc communication, there can be any number of errors, so this is a
 /// generic io error.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum RecvError {
     /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
     ///
