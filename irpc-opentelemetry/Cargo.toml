@@ -15,6 +15,7 @@ irpc = { version = "0.17.0", path = "..", default-features = false, features = [
 opentelemetry = "0.32"
 tracing = { workspace = true }
 tracing-opentelemetry = "0.33"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }
@@ -34,6 +35,10 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 [package.metadata.cargo_check_external_types]
 allowed_external_types = [
     "irpc::*",
+    # `layer` returns a tracing layer
+    "tracing_core::subscriber::Subscriber",
+    "tracing_subscriber::layer::Layer",
+    "tracing_subscriber::registry::LookupSpan",
 ]
 
 [package.metadata.release]
