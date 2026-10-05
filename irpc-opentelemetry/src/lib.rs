@@ -22,10 +22,14 @@
 //! tracing::subscriber::set_global_default(subscriber).expect("no other subscriber is set");
 //! ```
 //!
-//! Spans reach OpenTelemetry through the `tracing-opentelemetry` layer. The
-//! application must use semver-compatible versions of `opentelemetry` and
-//! `tracing-opentelemetry` with this crate: both keep their state in statics,
-//! and with a second copy of either, irpc silently propagates nothing.
+//! Spans reach OpenTelemetry through the `tracing-opentelemetry` layer.
+//!
+//! The application must use semver-compatible versions of `irpc`,
+//! `opentelemetry`, and `tracing-opentelemetry` with this crate. With a second
+//! copy of one of them, everything compiles, but no span context reaches the
+//! remote: `opentelemetry` keeps the registered propagator in a static, and
+//! this crate and irpc find their layers in the subscriber by type, so they
+//! do not see the static or the layer types of another copy.
 
 use irpc::span_propagation::{Propagator, PropagatorLayer, SpanContextCarrier};
 use opentelemetry::{
