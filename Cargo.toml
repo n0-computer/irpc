@@ -195,12 +195,15 @@ allowed_external_types = [
     "tokio::sync::mpsc::bounded::Sender",
     "tokio::sync::oneshot::Receiver",
     "tokio::sync::oneshot::Sender",
-    "tracing::span::Span",
 
     # stable-ish non-1.0 crates that we accept in the public API
     "futures_core::stream::Stream",
     "futures_lite::future::Boxed",
     "futures_sink::Sink",
+    # `WithChannels::span`, with the `spans` feature, and `span_propagation::Propagator`.
+    # tracing 0.1 has had no breaking release since 2019. Support for a later
+    # version would come with its own feature, for example `tracing-02`.
+    "tracing::span::Span",
     # `span_propagation::layer` returns a tracing layer, with the `span-propagation` feature
     "tracing_core::subscriber::Subscriber",
     "tracing_subscriber::layer::Layer",

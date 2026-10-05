@@ -360,6 +360,12 @@ pub mod __macro_exports {
     pub use serde;
     #[cfg(any(feature = "rpc", feature = "spans"))]
     pub use tracing;
+
+    /// Sets the parent of `span` from the span context of the current request.
+    #[cfg(feature = "rpc")]
+    pub fn set_span_parent_from_remote(span: &tracing::Span) {
+        crate::span_propagation::set_span_parent_from_remote(span)
+    }
 }
 
 /// Requirements for a RPC message
@@ -417,6 +423,7 @@ pub trait Channels<S: Service>: Send + 'static {
 }
 
 /// A wrapper for a message with channels to send and receive it.
+///
 /// This expands the protocol message to a full message that includes the
 /// active and unserializable channels.
 ///
@@ -425,6 +432,10 @@ pub trait Channels<S: Service>: Send + 'static {
 ///
 /// When the `spans` feature is enabled, this also includes a tracing
 /// span to carry the tracing context during message passing.
+///
+/// The struct is non-exhaustive, so that later versions can add fields. Create
+/// it with its `From` impls.
+#[non_exhaustive]
 pub struct WithChannels<I: Channels<S>, S: Service> {
     /// The inner message.
     pub inner: I,
