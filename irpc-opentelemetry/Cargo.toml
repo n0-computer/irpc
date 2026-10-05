@@ -34,9 +34,6 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 [package.metadata.cargo_check_external_types]
 allowed_external_types = [
     "irpc::*",
-    # Re-exported. This crate is 0.x and follows the version of opentelemetry.
-    "opentelemetry",
-    "tracing_opentelemetry",
 ]
 
 [package.metadata.release]
