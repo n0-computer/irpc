@@ -8,8 +8,8 @@
 //! of a span into the headers on the client, and sets the parent of a span from
 //! the headers on the server.
 //!
-//! irpc finds the propagator through the tracing subscriber: add a
-//! `PropagatorLayer` to it. The client asks the subscriber of the current
+//! irpc finds the propagator through the tracing subscriber: add the [`layer`]
+//! for it to the subscriber. The client asks the subscriber of the current
 //! thread, and the server asks the subscriber of the request span. Without the
 //! layer, irpc does not propagate span context.
 //!
@@ -79,26 +79,27 @@ pub trait Propagator: Send + Sync + 'static {
     fn set_parent(&self, span: &tracing::Span, carrier: &SpanContextCarrier);
 }
 
-/// A tracing layer that hands out a [`Propagator`] to irpc.
+/// Returns a tracing layer that makes irpc propagate span context with `propagator`.
 ///
 /// The layer records nothing. irpc finds it with [`tracing::Dispatch::downcast_ref`].
+///
+/// The layer has a per-layer filter that disables all spans and events. Without
+/// it, the layer would enable all levels for the subscriber when other layers
+/// use per-layer filters, and every `debug!` and `trace!` would reach them.
+/// Another layer must enable the request spans, for example the layer of the
+/// tracing backend.
 #[cfg(feature = "span-propagation")]
-pub struct PropagatorLayer(Box<dyn Propagator>);
-
-#[cfg(feature = "span-propagation")]
-impl PropagatorLayer {
-    /// Creates a layer for `propagator`.
-    pub fn new(propagator: impl Propagator) -> Self {
-        Self(Box::new(propagator))
-    }
+pub fn layer<S>(propagator: impl Propagator) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use tracing_subscriber::Layer;
+    PropagatorLayer(Box::new(propagator)).with_filter(tracing::level_filters::LevelFilter::OFF)
 }
 
+/// The layer from [`layer`], without its filter.
 #[cfg(feature = "span-propagation")]
-impl std::fmt::Debug for PropagatorLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PropagatorLayer").finish_non_exhaustive()
-    }
-}
+struct PropagatorLayer(Box<dyn Propagator>);
 
 #[cfg(feature = "span-propagation")]
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}

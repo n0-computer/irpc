@@ -1,4 +1,4 @@
-//! Checks that a custom [`Propagator`] carries headers from client to server.
+//! Checks a custom [`Propagator`] and its tracing layer.
 
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -14,13 +14,14 @@ use irpc::{
     noq::{listen, make_client_endpoint, make_server_endpoint},
     rpc::{Handler, RemoteService},
     rpc_requests,
-    span_propagation::{Propagator, PropagatorLayer, SpanContextCarrier},
+    span_propagation::{Propagator, SpanContextCarrier},
 };
 use n0_future::task::AbortOnDropHandle;
 use noq::Endpoint;
 use serde::{Deserialize, Serialize};
 use testresult::TestResult;
-use tracing_subscriber::{Registry, layer::SubscriberExt};
+use tracing::{Subscriber, level_filters::LevelFilter};
+use tracing_subscriber::{Layer, Registry, layer::SubscriberExt};
 
 fn create_connected_endpoints() -> TestResult<(Endpoint, Endpoint, SocketAddr)> {
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into();
@@ -61,9 +62,11 @@ impl Propagator for TestPropagator {
 #[tokio::test]
 async fn propagator_carries_headers_to_the_server() -> TestResult<()> {
     let propagator = TestPropagator::default();
-    let layer = PropagatorLayer::new(propagator.clone());
+    let layer = irpc::span_propagation::layer(propagator.clone());
+    // The irpc layer enables no spans, so the filter enables the request spans.
     // The test runtime has one thread, so the server task sees this subscriber too.
-    let _guard = tracing::subscriber::set_default(Registry::default().with(layer));
+    let subscriber = Registry::default().with(LevelFilter::INFO).with(layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
 
     let (server, client, server_addr) = create_connected_endpoints()?;
     let handler: Handler<EchoProtocol> = Arc::new(|request, rx, tx| {
@@ -82,4 +85,13 @@ async fn propagator_carries_headers_to_the_server() -> TestResult<()> {
     let received = propagator.received.lock().expect("poisoned").clone();
     assert_eq!(received, ["0", "1"]);
     Ok(())
+}
+
+/// The layer must not raise the max level when other layers use per-layer filters.
+#[test]
+fn layer_keeps_the_max_level() {
+    let subscriber = Registry::default()
+        .with(tracing_subscriber::fmt::layer().with_filter(LevelFilter::INFO))
+        .with(irpc::span_propagation::layer(TestPropagator::default()));
+    assert_eq!(subscriber.max_level_hint(), Some(LevelFilter::INFO));
 }

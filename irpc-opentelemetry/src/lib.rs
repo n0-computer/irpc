@@ -31,12 +31,14 @@
 //! this crate and irpc find their layers in the subscriber by type, so they
 //! do not see the static or the layer types of another copy.
 
-use irpc::span_propagation::{Propagator, PropagatorLayer, SpanContextCarrier};
+use irpc::span_propagation::{Propagator, SpanContextCarrier};
 use opentelemetry::{
     propagation::{Extractor, Injector},
     trace::TraceContextExt,
 };
+use tracing::Subscriber;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_subscriber::{Layer, registry::LookupSpan};
 
 /// A [`Propagator`] that uses the global text map propagator of `opentelemetry`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -66,8 +68,11 @@ impl Propagator for OtelPropagator {
 }
 
 /// Returns a tracing layer that makes irpc propagate span context with [`OtelPropagator`].
-pub fn layer() -> PropagatorLayer {
-    PropagatorLayer::new(OtelPropagator)
+pub fn layer<S>() -> impl Layer<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    irpc::span_propagation::layer(OtelPropagator)
 }
 
 /// Writes headers into a [`SpanContextCarrier`].
