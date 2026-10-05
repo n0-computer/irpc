@@ -21,8 +21,9 @@ anyhow = { workspace = true }
 clap = { version = "4.5.41", features = ["derive"] }
 # Tests and examples need a crypto provider, which iroh's default features supply.
 iroh = { workspace = true, default-features = true }
-irpc = { version = "0.17.0", path = "..", features = ["iroh", "derive", "spans"] }
+irpc = { version = "0.17.0", path = "..", features = ["iroh", "derive", "spans", "noq_endpoint_setup"] }
 n0-error = { workspace = true }
+n0-future = { workspace = true }
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 rand = "0.10.3"

@@ -1578,6 +1578,7 @@ dependencies = [
  "iroh",
  "irpc",
  "n0-error",
+ "n0-future",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
