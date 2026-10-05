@@ -12,8 +12,6 @@
 //! tracing subscriber and tracer provider, which would conflict with the
 //! test in `tests/span_propagation.rs`.
 
-#![cfg(feature = "tracing-opentelemetry")]
-
 use std::sync::Arc;
 
 use iroh::{Endpoint, endpoint::presets, protocol::Router};
@@ -63,6 +61,7 @@ async fn span_propagation_concurrent() -> n0_error::Result<()> {
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
     let subscriber = Registry::default()
         .with(telemetry)
+        .with(irpc_opentelemetry::layer())
         .with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::from_default_env()));
     tracing::subscriber::set_global_default(subscriber).expect("global already set");
 
