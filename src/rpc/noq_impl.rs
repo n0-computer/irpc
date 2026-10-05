@@ -7,7 +7,7 @@ use tracing::{Instrument, debug, error_span, warn};
 
 use crate::{
     RequestError, Service,
-    rpc::{Handler, IncomingRemoteConnection, RemoteConnection, handle_connection},
+    rpc::{Handler, IncomingRemoteConnection, RemoteConnection},
 };
 
 /// A connection to a remote service.
@@ -102,7 +102,8 @@ async fn connect_and_open_bi(
 /// Utility function to listen for incoming connections and handle them with the provided handler.
 ///
 /// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
-pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: Handler<S>) {
+pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: impl Into<Handler<S>>) {
+    let handler = handler.into();
     let mut request_id = 0u64;
     let mut tasks = JoinSet::new();
     loop {
@@ -125,7 +126,7 @@ pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: Handler<S>) {
                     if let Some(remote) = remote_address(&connection) {
                         tracing::Span::current().record("remote", tracing::field::display(remote));
                     }
-                    match handle_connection(&connection, handler).await {
+                    match handler.handle_connection(&connection).await {
                         Err(err) => warn!("connection closed with error: {err:?}"),
                         Ok(()) => debug!("connection closed"),
                     }

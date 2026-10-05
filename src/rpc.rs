@@ -449,13 +449,205 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
     }
 }
 
-/// Type alias for a handler fn for remote requests
-pub type Handler<R> = Arc<
-    dyn Fn(R, noq::RecvStream, noq::SendStream) -> BoxFuture<std::result::Result<(), SendError>>
+/// The function inside a [`Handler`].
+type HandlerFn<S> = Arc<
+    dyn Fn(
+            S,
+            noq::RecvStream,
+            noq::SendStream,
+        ) -> BoxFuture<std::result::Result<(), CloseConnection>>
         + Send
         + Sync
         + 'static,
 >;
+
+/// A request from a handler to close its connection.
+///
+/// The server loop closes the connection with `code` and `reason`, and reads
+/// no more requests from it.
+///
+/// irpc itself closes connections with code `0` for a normal close, which
+/// [`Handler::from_sender`] also uses when its receiver is gone, and with
+/// [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] when a request is too large.
+///
+/// # Examples
+///
+/// ```
+/// use irpc::{
+///     channel::oneshot,
+///     rpc::{CloseConnection, Handler},
+///     rpc_requests,
+/// };
+/// use serde::{Deserialize, Serialize};
+///
+/// #[rpc_requests(message = AuthMessage)]
+/// #[derive(Debug, Serialize, Deserialize)]
+/// enum AuthProtocol {
+///     #[rpc(tx = oneshot::Sender<()>)]
+///     #[wrap(Auth)]
+///     Auth(String),
+/// }
+///
+/// let handler = Handler::<AuthProtocol>::sequential(|msg| async move {
+///     let AuthMessage::Auth(msg) = msg;
+///     if msg.inner.0 != "secret" {
+///         Err(CloseConnection::new(401, "permission denied"))
+///     } else {
+///         msg.tx.send(()).await.ok();
+///         Ok(())
+///     }
+/// });
+/// ```
+#[derive(Debug, Clone)]
+pub struct CloseConnection {
+    code: VarInt,
+    reason: Vec<u8>,
+}
+
+impl CloseConnection {
+    /// Creates a request to close the connection with `code` and `reason`.
+    pub fn new(code: u32, reason: impl AsRef<[u8]>) -> Self {
+        Self {
+            code: VarInt::from_u32(code),
+            reason: reason.as_ref().to_vec(),
+        }
+    }
+}
+
+/// Handles the requests that a server reads from a connection.
+///
+/// A server uses one handler for all its connections. Create one with:
+///
+/// - [`Handler::from_sender`]: sends each request to a [`LocalSender`].
+/// - [`Handler::sequential`]: runs a function on each request, one at a time.
+/// - [`Handler::raw`]: runs a function on the protocol enum and the streams.
+///
+/// A handler function returns `Err(CloseConnection)` to close the connection.
+/// The protocol type cannot be inferred from the message enum, so you may
+/// have to name it: `Handler::<MyProtocol>::sequential(..)`.
+///
+/// # Examples
+///
+/// ```
+/// use irpc::{WithChannels, channel::oneshot, rpc::Handler, rpc_requests};
+/// use serde::{Deserialize, Serialize};
+///
+/// #[rpc_requests(message = EchoMessage)]
+/// #[derive(Debug, Serialize, Deserialize)]
+/// enum EchoProtocol {
+///     #[rpc(tx = oneshot::Sender<String>)]
+///     #[wrap(Echo)]
+///     Echo(String),
+/// }
+///
+/// let handler: Handler<EchoProtocol> = Handler::sequential(|msg| async move {
+///     match msg {
+///         EchoMessage::Echo(msg) => {
+///             let WithChannels { inner, tx, .. } = msg;
+///             tx.send(inner.0).await.ok();
+///         }
+///     }
+///     Ok(())
+/// });
+/// ```
+#[derive(derive_more::Debug)]
+pub struct Handler<S> {
+    #[debug(skip)]
+    f: HandlerFn<S>,
+}
+
+impl<S> Clone for Handler<S> {
+    fn clone(&self) -> Self {
+        Self { f: self.f.clone() }
+    }
+}
+
+impl<S: Service> Handler<S> {
+    /// Creates a handler that runs `f` on the protocol enum and the streams of each request.
+    ///
+    /// The requests of a connection run one after the other. If `f` needs the
+    /// message enum, call [`RemoteService::with_remote_channels`] inside its
+    /// future: the remote span context is only set while the future runs.
+    pub fn raw<F, Fut>(f: F) -> Self
+    where
+        F: Fn(S, noq::RecvStream, noq::SendStream) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static,
+    {
+        let f: HandlerFn<S> = Arc::new(move |msg, rx, tx| Box::pin(f(msg, rx, tx)));
+        Self { f }
+    }
+
+    /// Runs this handler on one request.
+    ///
+    /// Use it in a [`Handler::raw`] to pass a request to another handler.
+    pub fn call(
+        &self,
+        request: S,
+        rx: noq::RecvStream,
+        tx: noq::SendStream,
+    ) -> impl Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static {
+        (self.f)(request, rx, tx)
+    }
+
+    /// Handles the requests of `connection` until the connection ends.
+    pub async fn handle_connection(
+        &self,
+        connection: &impl IncomingRemoteConnection,
+    ) -> io::Result<()> {
+        debug!("connection accepted");
+        loop {
+            let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
+                return Ok(());
+            };
+            let fut = crate::span_propagation::scope_remote(carrier, (self.f)(msg, rx, tx));
+            if let Err(close) = fut.await {
+                close_connection(connection, close);
+                return Ok(());
+            }
+        }
+    }
+}
+
+impl<S: RemoteService> Handler<S> {
+    /// Creates a handler that sends each request to `local_sender`.
+    ///
+    /// A full channel applies backpressure to the connection.
+    pub fn from_sender(local_sender: impl Into<LocalSender<S>>) -> Self {
+        let local_sender = local_sender.into();
+        Self::sequential(move |msg| {
+            let local_sender = local_sender.clone();
+            async move {
+                local_sender.send_raw(msg).await.map_err(|err| {
+                    // The receiver is gone. Close as a dropped connection does.
+                    warn!("handler stopped: {err:#}");
+                    CloseConnection::new(0, b"")
+                })
+            }
+        })
+    }
+
+    /// Creates a handler that runs `f` on each request, one at a time per connection.
+    pub fn sequential<F, Fut>(f: F) -> Self
+    where
+        F: Fn(S::Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static,
+    {
+        let f = Arc::new(f);
+        Self::raw(move |msg, rx, tx| {
+            let f = f.clone();
+            async move {
+                // Inside the future: the remote span context is only set while it runs.
+                f(S::with_remote_channels(msg, rx, tx)).await
+            }
+        })
+    }
+}
+
+impl<S: RemoteService> From<LocalSender<S>> for Handler<S> {
+    fn from(local_sender: LocalSender<S>) -> Self {
+        Self::from_sender(local_sender)
+    }
+}
 
 /// Extension trait to [`Service`] to create a [`Service::Message`] from a [`Service`]
 /// and a pair of QUIC streams.
@@ -465,27 +657,13 @@ pub trait RemoteService: Service + Sized {
     /// Returns the message enum for this request by combining `self` (the protocol enum)
     /// with a pair of QUIC streams for `tx` and `rx` channels.
     fn with_remote_channels(self, rx: noq::RecvStream, tx: noq::SendStream) -> Self::Message;
-
-    /// Creates a [`Handler`] that forwards all messages to a [`LocalSender`].
-    fn remote_handler(local_sender: LocalSender<Self>) -> Handler<Self> {
-        Arc::new(move |msg, rx, tx| {
-            // `with_remote_channels` reads the task-local span context installed by
-            // the dispatch loop, so it must run inside the future (which is polled
-            // within that scope) rather than eagerly here.
-            let local_sender = local_sender.clone();
-            Box::pin(async move {
-                let msg = Self::with_remote_channels(msg, rx, tx);
-                local_sender.send_raw(msg).await
-            })
-        })
-    }
 }
 
 /// Abstracts over the connections that a server can read requests from.
 ///
 /// This is implemented for noq connections, and for iroh connections with and
-/// without 0-RTT. It is used by [`read_request`] and [`handle_connection`] to
-/// work with all of these.
+/// without 0-RTT. It is used by [`read_request`] and [`Handler::handle_connection`]
+/// to work with all of these.
 ///
 /// This trait is sealed: only irpc can implement it. So irpc can add methods to
 /// it without a breaking change.
@@ -499,21 +677,10 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
     fn close(&self, error_code: VarInt, reason: &[u8]);
 }
 
-/// Handles a single connection with the provided `handler`.
-///
-/// This function handles requests for a service `S`. The wire format used depends on
-/// `S::SPAN_PROPAGATION` - if true, span context is expected in the wire format.
-pub async fn handle_connection<S: Service>(
-    connection: &impl IncomingRemoteConnection,
-    handler: Handler<S>,
-) -> io::Result<()> {
-    debug!("connection accepted");
-    loop {
-        let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
-            return Ok(());
-        };
-        crate::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
-    }
+/// Closes `connection` with the code and the reason from a handler.
+fn close_connection(connection: &impl IncomingRemoteConnection, close: CloseConnection) {
+    debug!(code = %close.code, "handler closed the connection");
+    connection.close(close.code, &close.reason);
 }
 
 /// Reads a request from a connection and converts it to a message enum.
@@ -538,7 +705,7 @@ pub async fn read_request<S: RemoteService>(
 /// This accepts a bi-directional stream from the connection and reads and parses the request.
 ///
 /// When `S::SPAN_PROPAGATION` is true, any propagated span context on the wire is
-/// silently dropped. Use [`handle_connection`] (or [`read_request`]) if you need
+/// silently dropped. Use [`Handler::handle_connection`] (or [`read_request`]) if you need
 /// the propagated context to reach the generated handler spans.
 ///
 /// Returns the parsed request and the stream pair if reading and parsing the request succeeded.

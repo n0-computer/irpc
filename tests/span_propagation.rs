@@ -1,13 +1,12 @@
 #[cfg(feature = "tracing-opentelemetry")]
 mod span_propagation {
-    use std::sync::Arc;
 
     use iroh::{Endpoint, endpoint::presets, protocol::Router};
     use irpc::{
         Client, Service, WithChannels,
         channel::oneshot,
         iroh::{IrohLazyRemoteConnection, IrohProtocol},
-        rpc::RemoteService,
+        rpc::Handler,
         rpc_requests,
     };
     use n0_error::{Result, StdResultExt};
@@ -73,29 +72,25 @@ mod span_propagation {
 
         async fn listen() -> Result<Router> {
             let endpoint = Endpoint::bind(presets::N0).await?;
-            let protocol = IrohProtocol::<Proto>::new(Arc::new(|req, rx, tx| {
-                Box::pin(
-                    async move {
-                        info!("handle request {req:?}");
-                        let msg: Message =
-                            <Proto as RemoteService>::with_remote_channels(req, rx, tx);
-                        info!("handle request {msg:?}");
-                        match msg {
-                            Message::Get(msg) => {
-                                let WithChannels {
-                                    inner, tx, span, ..
-                                } = msg;
-                                info!("handle request {inner:?} with span {span:?}");
-                                let _guard = span.enter();
-                                info!("handle request {inner:?}, entered span");
-                                tx.send(inner.0.to_uppercase()).await.ok();
-                            }
+            let handler = Handler::sequential(|msg: Message| {
+                async move {
+                    info!("handle request {msg:?}");
+                    match msg {
+                        Message::Get(msg) => {
+                            let WithChannels {
+                                inner, tx, span, ..
+                            } = msg;
+                            info!("handle request {inner:?} with span {span:?}");
+                            let _guard = span.enter();
+                            info!("handle request {inner:?}, entered span");
+                            tx.send(inner.0.to_uppercase()).await.ok();
                         }
-                        Ok(())
                     }
-                    .instrument(info_span!("server-handler")),
-                )
-            }));
+                    Ok(())
+                }
+                .instrument(info_span!("server-handler"))
+            });
+            let protocol = IrohProtocol::<Proto>::new(handler);
             let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
             info!("endpoint id: {}", router.endpoint().id());
             Ok(router)

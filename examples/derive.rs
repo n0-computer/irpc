@@ -8,7 +8,6 @@ use irpc::{
     Client, WithChannels,
     channel::{mpsc, oneshot},
     noq::{make_client_endpoint, make_server_endpoint},
-    rpc::RemoteService,
     rpc_requests,
 };
 // Import the macro
@@ -130,10 +129,7 @@ impl StorageApi {
             .inner
             .as_local()
             .context("cannot listen on remote API")?;
-        let join_handle = task::spawn(irpc::noq::listen(
-            endpoint,
-            StorageProtocol::remote_handler(local),
-        ));
+        let join_handle = task::spawn(irpc::noq::listen(endpoint, local));
         Ok(AbortOnDropHandle::new(join_handle))
     }
 
