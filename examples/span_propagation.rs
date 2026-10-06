@@ -24,12 +24,12 @@
 //! After opening a trace, click "Trace Logs" in the view selector at the top right
 //! to open a log view that assembles logs from both client and server.
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use iroh::{Endpoint, EndpointId, endpoint::presets, protocol::Router};
-use irpc::{WithChannels, channel::oneshot, iroh::IrohProtocol, rpc::RemoteService, rpc_requests};
+use irpc::{WithChannels, channel::oneshot, iroh::IrohProtocol, rpc::Handler, rpc_requests};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
@@ -148,38 +148,35 @@ async fn server(otlp_endpoint: &str) -> Result<()> {
     // on `rpc_requests` above.
     let endpoint = Endpoint::bind(presets::N0).await?;
     let provider = init_tracing("example-server", endpoint.id(), otlp_endpoint)?;
-    let protocol = IrohProtocol::<Proto>::new(Arc::new(|req, rx, tx| {
-        Box::pin(async move {
-            let msg: Message = <Proto as RemoteService>::with_remote_channels(req, rx, tx);
-            match msg {
-                Message::Get(msg) => {
-                    // `WithChannels` carries a `span` field that the derive
-                    // macro builds as `info_span!("Get")` with its parent set
-                    // from the propagated remote context, so the handler's
-                    // work shows up under the originating client trace.
-                    let WithChannels {
-                        inner, tx, span, ..
-                    } = msg;
-                    // Hand the response off to a separate task to show that
-                    // `.instrument(span)` keeps work hooked into the same
-                    // trace even after the handler future returns.
-                    tokio::spawn(
-                        async move {
-                            info!(?inner, "handling request");
-                            // Simulate async work.
-                            tokio::time::sleep(Duration::from_millis(rand::random_range(20..200)))
-                                .await;
-                            let res = inner.0.to_uppercase();
-                            info!(?res, "generated response");
-                            tx.send(res).await.ok();
-                            info!("response sent");
-                        }
-                        .instrument(span),
-                    );
-                }
+    let protocol = IrohProtocol::<Proto>::new(Handler::sequential(|msg: Message| async move {
+        match msg {
+            Message::Get(msg) => {
+                // `WithChannels` carries a `span` field that the derive
+                // macro builds as `info_span!("Get")` with its parent set
+                // from the propagated remote context, so the handler's
+                // work shows up under the originating client trace.
+                let WithChannels {
+                    inner, tx, span, ..
+                } = msg;
+                // Hand the response off to a separate task to show that
+                // `.instrument(span)` keeps work hooked into the same
+                // trace even after the handler future returns.
+                tokio::spawn(
+                    async move {
+                        info!(?inner, "handling request");
+                        // Simulate async work.
+                        tokio::time::sleep(Duration::from_millis(rand::random_range(20..200)))
+                            .await;
+                        let res = inner.0.to_uppercase();
+                        info!(?res, "generated response");
+                        tx.send(res).await.ok();
+                        info!("response sent");
+                    }
+                    .instrument(span),
+                );
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }));
     let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
 

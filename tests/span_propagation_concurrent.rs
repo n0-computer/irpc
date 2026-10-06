@@ -14,14 +14,12 @@
 
 #![cfg(feature = "tracing-opentelemetry")]
 
-use std::sync::Arc;
-
 use iroh::{Endpoint, endpoint::presets, protocol::Router};
 use irpc::{
     Client, WithChannels,
     channel::oneshot,
     iroh::{IrohLazyRemoteConnection, IrohProtocol},
-    rpc::RemoteService,
+    rpc::{Handler, RemoteService},
     rpc_requests,
 };
 use n0_error::StdResultExt;
@@ -77,21 +75,19 @@ async fn span_propagation_concurrent() -> n0_error::Result<()> {
     const ALPN: &[u8] = b"test-concurrent";
 
     let endpoint = Endpoint::bind(presets::N0).await?;
-    let protocol = IrohProtocol::<Proto>::new(Arc::new(|req, rx, tx| {
-        Box::pin(async move {
-            // Yield before constructing the WithChannels so the handler is
-            // very likely to resume on a different worker thread.
-            tokio::task::yield_now().await;
-            let msg: Message = <Proto as RemoteService>::with_remote_channels(req, rx, tx);
-            match msg {
-                Message::Get(msg) => {
-                    let WithChannels { inner, tx, .. } = msg;
-                    tokio::task::yield_now().await;
-                    tx.send(inner.0.to_uppercase()).await.ok();
-                }
+    let protocol = IrohProtocol::<Proto>::new(Handler::raw(|req, rx, tx| async move {
+        // Yield before constructing the WithChannels so the handler is
+        // very likely to resume on a different worker thread.
+        tokio::task::yield_now().await;
+        let msg: Message = <Proto as RemoteService>::with_remote_channels(req, rx, tx);
+        match msg {
+            Message::Get(msg) => {
+                let WithChannels { inner, tx, .. } = msg;
+                tokio::task::yield_now().await;
+                tx.send(inner.0.to_uppercase()).await.ok();
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }));
     let server = Router::builder(endpoint).accept(ALPN, protocol).spawn();
 

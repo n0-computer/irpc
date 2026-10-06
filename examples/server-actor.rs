@@ -41,7 +41,7 @@ mod proto {
         let client = Client::<FooProtocol>::local(tx);
 
         let endpoint = Endpoint::bind(presets::N0).await?;
-        let protocol = IrohProtocol::with_sender(client.as_local().unwrap());
+        let protocol = IrohProtocol::new(client.as_local().unwrap());
         let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
         println!("endpoint id: {}", router.endpoint().id());
 
