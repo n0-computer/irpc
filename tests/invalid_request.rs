@@ -73,6 +73,23 @@ async fn bad_request_closes_connection() -> TestResult<()> {
 }
 
 #[tokio::test]
+async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let handler = echo_handler().skip_bad_requests(true);
+    let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, handler)));
+    let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
+    // A client on this one connection, so the second request shows that it still works.
+    let client = Client::<client::EchoProtocol>::boxed(conn);
+
+    client
+        .rpc(client::Shout("a".into()))
+        .await
+        .expect_err("server does not know the request");
+    assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
+    Ok(())
+}
+
+#[tokio::test]
 async fn read_request_returns_bad_request() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {

@@ -15,8 +15,11 @@
 //!   example, a client of a newer protocol version sent a request type that
 //!   the server does not know.
 //!
-//! A [`Handler`] then closes the connection with the same code, as for any
-//! other protocol violation.
+//! By default, a [`Handler`] then closes the connection with the same code, as
+//! for any other protocol violation. A protocol that adds request types at the
+//! end of its enum can use [`Handler::skip_bad_requests`]: the handler then
+//! reads the next request, so an old server rejects the new requests and keeps
+//! serving the old ones on the same connection.
 //!
 //! [`read_request`] returns a bad request as a [`ReadRequestError`]. A server
 //! with its own loop decides what to do: close the connection, or read the
@@ -61,7 +64,7 @@ pub const ERROR_CODE_ENCODE_FAILED: u32 = 2;
 /// Error code on streams and connections if the receiver could not decode a message.
 ///
 /// A server stops and resets the streams of a request that does not decode,
-/// and closes the connection with this code.
+/// and by default closes the connection with this code.
 pub const ERROR_CODE_DECODE_FAILED: u32 = 3;
 
 /// Error when reading a request with [`read_request`].
@@ -624,7 +627,8 @@ impl HandlerError {
 /// A handler function can return `Err(HandlerError)` to close the connection.
 /// In all other cases, handle errors internally and return `Ok(())` from
 /// the handler function to read the next request from the connection.
-/// A bad request also closes the connection.
+/// A bad request also closes the connection, unless
+/// [`Handler::skip_bad_requests`] is set.
 ///
 /// Often, the protocol type cannot be inferred from the message enum,
 /// so you may have to name it: `Handler::<MyProtocol>::sequential(..)`.
@@ -657,11 +661,15 @@ impl HandlerError {
 pub struct Handler<S> {
     #[debug(skip)]
     f: HandlerFn<S>,
+    skip_bad_requests: bool,
 }
 
 impl<S> Clone for Handler<S> {
     fn clone(&self) -> Self {
-        Self { f: self.f.clone() }
+        Self {
+            f: self.f.clone(),
+            skip_bad_requests: self.skip_bad_requests,
+        }
     }
 }
 
@@ -677,7 +685,10 @@ impl<S: Service> Handler<S> {
         Fut: Future<Output = std::result::Result<(), HandlerError>> + Send + 'static,
     {
         let f: HandlerFn<S> = Arc::new(move |msg, rx, tx| Box::pin(f(msg, rx, tx)));
-        Self { f }
+        Self {
+            f,
+            skip_bad_requests: false,
+        }
     }
 
     /// Runs this handler on one request.
@@ -692,6 +703,17 @@ impl<S: Service> Handler<S> {
         (self.f)(request, rx, tx)
     }
 
+    /// Sets whether a bad request is skipped instead of closing the connection.
+    ///
+    /// By default, a request that is too large or does not decode closes the
+    /// connection. With `true`, only the request fails, and the handler reads
+    /// the next request. Use it for a protocol that adds request types over
+    /// time, see [Bad requests](self#bad-requests).
+    pub fn skip_bad_requests(mut self, skip: bool) -> Self {
+        self.skip_bad_requests = skip;
+        self
+    }
+
     /// Handles the requests of `connection` until the connection ends.
     ///
     /// Returns an error if the connection fails, or if a bad request closed it.
@@ -701,7 +723,7 @@ impl<S: Service> Handler<S> {
     ) -> io::Result<()> {
         debug!("connection accepted");
         loop {
-            let Some((msg, carrier, rx, tx)) = read_next::<S>(connection).await? else {
+            let Some((msg, carrier, rx, tx)) = self.read_next(connection).await? else {
                 return Ok(());
             };
             let fut = (self.f)(msg, rx, tx);
@@ -717,18 +739,26 @@ impl<S: Service> Handler<S> {
             }
         }
     }
-}
 
-/// Reads the next request, and closes the connection on a bad request.
-async fn read_next<S: Service>(
-    connection: &impl IncomingRemoteConnection,
-) -> io::Result<Option<Request<S>>> {
-    read_request_inner::<S>(connection).await.map_err(|err| {
-        if let Some(code) = err.error_code() {
-            connection.close(code.into(), err.to_string().as_bytes());
+    /// Reads the next request, and closes the connection or skips it on a bad request.
+    async fn read_next(
+        &self,
+        connection: &impl IncomingRemoteConnection,
+    ) -> io::Result<Option<Request<S>>> {
+        loop {
+            match read_request_inner::<S>(connection).await {
+                Ok(request) => return Ok(request),
+                Err(ReadRequestError::Connection { source, .. }) => return Err(source.into()),
+                Err(err) if self.skip_bad_requests => debug!("skipped bad request: {err:#}"),
+                Err(err) => {
+                    if let Some(code) = err.error_code() {
+                        connection.close(code.into(), err.to_string().as_bytes());
+                    }
+                    return Err(err.into());
+                }
+            }
         }
-        err.into()
-    })
+    }
 }
 
 impl<S: RemoteService> Handler<S> {
