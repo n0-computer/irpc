@@ -451,65 +451,82 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
 
 /// The function inside a [`Handler`].
 type HandlerFn<S> = Arc<
-    dyn Fn(
-            S,
-            noq::RecvStream,
-            noq::SendStream,
-        ) -> BoxFuture<std::result::Result<(), CloseConnection>>
+    dyn Fn(S, noq::RecvStream, noq::SendStream) -> BoxFuture<std::result::Result<(), HandlerError>>
         + Send
         + Sync
         + 'static,
 >;
 
-/// A request from a handler to close its connection.
+/// The error that a handler function returns to close the connection.
 ///
-/// The server loop closes the connection with `code` and `reason`, and reads
-/// no more requests from it.
-///
-/// irpc itself closes connections with code `0` for a normal close, which
-/// [`Handler::from_sender`] also uses when its receiver is gone, and with
-/// [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] when a request is too large.
-///
-/// # Examples
-///
-/// ```
-/// use irpc::{
-///     channel::oneshot,
-///     rpc::{CloseConnection, Handler},
-///     rpc_requests,
-/// };
-/// use serde::{Deserialize, Serialize};
-///
-/// #[rpc_requests(message = AuthMessage)]
-/// #[derive(Debug, Serialize, Deserialize)]
-/// enum AuthProtocol {
-///     #[rpc(tx = oneshot::Sender<()>)]
-///     #[wrap(Auth)]
-///     Auth(String),
-/// }
-///
-/// let handler = Handler::<AuthProtocol>::sequential(|msg| async move {
-///     let AuthMessage::Auth(msg) = msg;
-///     if msg.inner.0 != "secret" {
-///         Err(CloseConnection::new(401, "permission denied"))
-///     } else {
-///         msg.tx.send(()).await.ok();
-///         Ok(())
-///     }
-/// });
-/// ```
-#[derive(Debug, Clone)]
-pub struct CloseConnection {
-    code: VarInt,
-    reason: Vec<u8>,
+/// Currently the only constructor is [`Self::close_connection`]. The server
+/// then closes the connection.
+#[derive(Debug)]
+pub struct HandlerError {
+    inner: HandlerErrorInner,
 }
 
-impl CloseConnection {
-    /// Creates a request to close the connection with `code` and `reason`.
-    pub fn new(code: u32, reason: impl AsRef<[u8]>) -> Self {
+#[derive(Debug)]
+enum HandlerErrorInner {
+    CloseConnection { code: VarInt, reason: Vec<u8> },
+}
+
+impl std::error::Error for HandlerError {}
+
+impl std::fmt::Display for HandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.inner {
+            HandlerErrorInner::CloseConnection { code, reason } => write!(
+                f,
+                "handler asked to close the connection with code {code}: {}",
+                String::from_utf8_lossy(reason)
+            ),
+        }
+    }
+}
+
+impl HandlerError {
+    /// Creates a [`HandlerError`] that closes the connection with `code` and `reason`.
+    ///
+    /// When a handler function returns this error, the server closes the connection
+    /// immediately and reads no more requests from it. This also ends the streams of
+    /// all other requests on the connection, including streams that a handler moved
+    /// into a spawned task.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use irpc::{
+    ///     channel::oneshot,
+    ///     rpc::{Handler, HandlerError},
+    ///     rpc_requests,
+    /// };
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[rpc_requests(message = AuthMessage)]
+    /// #[derive(Debug, Serialize, Deserialize)]
+    /// enum AuthProtocol {
+    ///     #[rpc(tx = oneshot::Sender<()>)]
+    ///     #[wrap(Auth)]
+    ///     Auth(String),
+    /// }
+    ///
+    /// let handler = Handler::<AuthProtocol>::sequential(|msg| async move {
+    ///     let AuthMessage::Auth(msg) = msg;
+    ///     if msg.inner.0 != "secret" {
+    ///         Err(HandlerError::close_connection(401, "permission denied"))
+    ///     } else {
+    ///         msg.tx.send(()).await.ok();
+    ///         Ok(())
+    ///     }
+    /// });
+    /// ```
+    pub fn close_connection(code: u32, reason: impl AsRef<[u8]>) -> Self {
         Self {
-            code: VarInt::from_u32(code),
-            reason: reason.as_ref().to_vec(),
+            inner: HandlerErrorInner::CloseConnection {
+                code: VarInt::from_u32(code),
+                reason: reason.as_ref().to_vec(),
+            },
         }
     }
 }
@@ -522,9 +539,12 @@ impl CloseConnection {
 /// - [`Handler::sequential`]: runs a function on each request, one at a time.
 /// - [`Handler::raw`]: runs a function on the protocol enum and the streams.
 ///
-/// A handler function returns `Err(CloseConnection)` to close the connection.
-/// The protocol type cannot be inferred from the message enum, so you may
-/// have to name it: `Handler::<MyProtocol>::sequential(..)`.
+/// A handler function can return `Err(HandlerError)` to close the connection.
+/// In all other cases, handle errors internally and return `Ok(())` from
+/// the handler function to read the next request from the connection.
+///
+/// Often, the protocol type cannot be inferred from the message enum,
+/// so you may have to name it: `Handler::<MyProtocol>::sequential(..)`.
 ///
 /// # Examples
 ///
@@ -571,7 +591,7 @@ impl<S: Service> Handler<S> {
     pub fn raw<F, Fut>(f: F) -> Self
     where
         F: Fn(S, noq::RecvStream, noq::SendStream) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static,
+        Fut: Future<Output = std::result::Result<(), HandlerError>> + Send + 'static,
     {
         let f: HandlerFn<S> = Arc::new(move |msg, rx, tx| Box::pin(f(msg, rx, tx)));
         Self { f }
@@ -585,7 +605,7 @@ impl<S: Service> Handler<S> {
         request: S,
         rx: noq::RecvStream,
         tx: noq::SendStream,
-    ) -> impl Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static {
+    ) -> impl Future<Output = std::result::Result<(), HandlerError>> + Send + 'static {
         (self.f)(request, rx, tx)
     }
 
@@ -599,10 +619,16 @@ impl<S: Service> Handler<S> {
             let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
                 return Ok(());
             };
-            let fut = crate::span_propagation::scope_remote(carrier, (self.f)(msg, rx, tx));
-            if let Err(close) = fut.await {
-                close_connection(connection, close);
-                return Ok(());
+            let fut = (self.f)(msg, rx, tx);
+            let fut = crate::span_propagation::scope_remote(carrier, fut);
+            if let Err(err) = fut.await {
+                match err.inner {
+                    HandlerErrorInner::CloseConnection { code, reason } => {
+                        debug!(%code, "handler closed the connection");
+                        connection.close(code, &reason);
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -620,7 +646,7 @@ impl<S: RemoteService> Handler<S> {
                 local_sender.send_raw(msg).await.map_err(|err| {
                     // The receiver is gone. Close as a dropped connection does.
                     warn!("handler stopped: {err:#}");
-                    CloseConnection::new(0, b"")
+                    HandlerError::close_connection(0, b"")
                 })
             }
         })
@@ -630,7 +656,7 @@ impl<S: RemoteService> Handler<S> {
     pub fn sequential<F, Fut>(f: F) -> Self
     where
         F: Fn(S::Message) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = std::result::Result<(), CloseConnection>> + Send + 'static,
+        Fut: Future<Output = std::result::Result<(), HandlerError>> + Send + 'static,
     {
         let f = Arc::new(f);
         Self::raw(move |msg, rx, tx| {
@@ -675,12 +701,6 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 
     /// Closes the connection.
     fn close(&self, error_code: VarInt, reason: &[u8]);
-}
-
-/// Closes `connection` with the code and the reason from a handler.
-fn close_connection(connection: &impl IncomingRemoteConnection, close: CloseConnection) {
-    debug!(code = %close.code, "handler closed the connection");
-    connection.close(close.code, &close.reason);
 }
 
 /// Reads a request from a connection and converts it to a message enum.
