@@ -4,11 +4,17 @@
 //! streams. The [`crate::noq`] module has the transport with dial by socket
 //! address. The [`crate::iroh`] module has the transport with dial by endpoint id.
 use std::{
-    fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
+    fmt::Debug,
+    future::Future,
+    io,
+    marker::PhantomData,
+    ops::DerefMut,
+    pin::{Pin, pin},
+    sync::Arc,
 };
 
 use n0_error::{e, stack_error};
-use n0_future::future::Boxed as BoxFuture;
+use n0_future::{FuturesUnorderedBounded, StreamExt, future::Boxed as BoxFuture};
 use noq::{ConnectionError, VarInt};
 use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
@@ -531,11 +537,22 @@ impl HandlerError {
     }
 }
 
+/// How the server loop runs the requests of one connection.
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    /// Runs each request in the loop, before the loop reads the next request.
+    Sequential,
+    /// Runs at most this many requests of a connection at the same time.
+    Concurrent(usize),
+}
+
 /// Handles the requests that a server reads from a connection.
 ///
 /// A server uses one handler for all its connections. Create one with:
 ///
 /// - [`Handler::from_sender`]: sends each request to a [`LocalSender`].
+/// - [`Handler::concurrent`]: runs a function on each request, with a limit
+///   of concurrent requests per connection.
 /// - [`Handler::sequential`]: runs a function on each request, one at a time.
 /// - [`Handler::raw`]: runs a function on the protocol enum and the streams.
 ///
@@ -560,7 +577,7 @@ impl HandlerError {
 ///     Echo(String),
 /// }
 ///
-/// let handler: Handler<EchoProtocol> = Handler::sequential(|msg| async move {
+/// let handler: Handler<EchoProtocol> = Handler::concurrent(16, |msg| async move {
 ///     match msg {
 ///         EchoMessage::Echo(msg) => {
 ///             let WithChannels { inner, tx, .. } = msg;
@@ -574,11 +591,15 @@ impl HandlerError {
 pub struct Handler<S> {
     #[debug(skip)]
     f: HandlerFn<S>,
+    mode: Mode,
 }
 
 impl<S> Clone for Handler<S> {
     fn clone(&self) -> Self {
-        Self { f: self.f.clone() }
+        Self {
+            f: self.f.clone(),
+            mode: self.mode,
+        }
     }
 }
 
@@ -594,12 +615,17 @@ impl<S: Service> Handler<S> {
         Fut: Future<Output = std::result::Result<(), HandlerError>> + Send + 'static,
     {
         let f: HandlerFn<S> = Arc::new(move |msg, rx, tx| Box::pin(f(msg, rx, tx)));
-        Self { f }
+        Self {
+            f,
+            mode: Mode::Sequential,
+        }
     }
 
     /// Runs this handler on one request.
     ///
-    /// Use it in a [`Handler::raw`] to pass a request to another handler.
+    /// Use it in a [`Handler::raw`] to pass a request to another handler. The
+    /// request runs in the current task, so the limit of a
+    /// [`Handler::concurrent`] does not apply.
     pub fn call(
         &self,
         request: S,
@@ -610,11 +636,23 @@ impl<S: Service> Handler<S> {
     }
 
     /// Handles the requests of `connection` until the connection ends.
+    ///
+    /// When the connection ends, this waits for the requests that still run.
     pub async fn handle_connection(
         &self,
         connection: &impl IncomingRemoteConnection,
     ) -> io::Result<()> {
         debug!("connection accepted");
+        match self.mode {
+            Mode::Sequential => self.run_sequential(connection).await,
+            Mode::Concurrent(max_concurrent) => {
+                self.run_concurrent(connection, max_concurrent).await
+            }
+        }
+    }
+
+    /// Runs the requests of `connection` one after the other.
+    async fn run_sequential(&self, connection: &impl IncomingRemoteConnection) -> io::Result<()> {
         loop {
             let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
                 return Ok(());
@@ -622,15 +660,51 @@ impl<S: Service> Handler<S> {
             let fut = (self.f)(msg, rx, tx);
             let fut = crate::span_propagation::scope_remote(carrier, fut);
             if let Err(err) = fut.await {
-                match err.inner {
-                    HandlerErrorInner::CloseConnection { code, reason } => {
-                        debug!(%code, "handler closed the connection");
-                        connection.close(code, &reason);
-                        return Ok(());
+                close_connection(connection, err);
+                return Ok(());
+            }
+        }
+    }
+
+    /// Runs the requests of `connection` at the same time, at most `max_concurrent` of them.
+    async fn run_concurrent(
+        &self,
+        connection: &impl IncomingRemoteConnection,
+        max_concurrent: usize,
+    ) -> io::Result<()> {
+        let mut futs = FuturesUnorderedBounded::new(max_concurrent);
+        // Kept across iterations, so that a partly read request is not cancelled.
+        let mut read = pin!(read_request_inner::<S>(connection));
+        let res = loop {
+            tokio::select! {
+                biased;
+                Some(res) = futs.next(), if !futs.is_empty() => {
+                    if let Err(err) = res {
+                        close_connection(connection, err);
+                        break Ok(());
+                    }
+                }
+                next = &mut read, if futs.len() < max_concurrent => {
+                    read.set(read_request_inner::<S>(connection));
+                    match next {
+                        Err(err) => break Err(err),
+                        Ok(None) => break Ok(()),
+                        Ok(Some((msg, carrier, rx, tx))) => {
+                            let fut = crate::span_propagation::scope_remote(carrier, (self.f)(msg, rx, tx));
+                            futs.push(fut);
+                        }
                     }
                 }
             }
+        };
+        // Complete the running requests, also after a graceful close: the remote
+        // can close right after a `Client::notify`.
+        while let Some(res) = futs.next().await {
+            if let Err(err) = res {
+                close_connection(connection, err);
+            }
         }
+        res
     }
 }
 
@@ -650,6 +724,27 @@ impl<S: RemoteService> Handler<S> {
                 })
             }
         })
+    }
+
+    /// Creates a handler that runs `f` on each request, at most `max_concurrent` at a time.
+    ///
+    /// The limit applies per connection. The requests run in the task of the
+    /// connection, so a request that blocks delays the others. Spawn a task in
+    /// `f` for such work.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_concurrent` is zero.
+    pub fn concurrent<F, Fut>(max_concurrent: usize, f: F) -> Self
+    where
+        F: Fn(S::Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<(), HandlerError>> + Send + 'static,
+    {
+        assert!(max_concurrent > 0, "max_concurrent must not be zero");
+        Self {
+            mode: Mode::Concurrent(max_concurrent),
+            ..Self::sequential(f)
+        }
     }
 
     /// Creates a handler that runs `f` on each request, one at a time per connection.
@@ -701,6 +796,16 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 
     /// Closes the connection.
     fn close(&self, error_code: VarInt, reason: &[u8]);
+}
+
+/// Closes `connection` as the error of a handler asks.
+fn close_connection(connection: &impl IncomingRemoteConnection, err: HandlerError) {
+    match err.inner {
+        HandlerErrorInner::CloseConnection { code, reason } => {
+            debug!(%code, "handler closed the connection");
+            connection.close(code, &reason);
+        }
+    }
 }
 
 /// Reads a request from a connection and converts it to a message enum.
