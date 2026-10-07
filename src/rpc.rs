@@ -34,6 +34,18 @@
 //! A remote channel receiver also stops its stream with
 //! [`ERROR_CODE_DECODE_FAILED`] if a message does not decode. Its sender then
 //! gets an error on the next send.
+//!
+//! # Error codes
+//!
+//! irpc reserves the codes 0 to 15 for streams and connections. Code 0 means
+//! no error, for example a normal close. irpc also uses
+//! [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`], [`ERROR_CODE_ENCODE_FAILED`], and
+//! [`ERROR_CODE_DECODE_FAILED`], and can add more codes in this range in a
+//! later version.
+//!
+//! An application should use codes from 16 upward, so that a peer can tell its
+//! codes apart from the codes of irpc. irpc does not check this. A code below
+//! 16 works, but a later version of irpc can give it a different meaning.
 use std::{
     fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
 };
@@ -65,7 +77,7 @@ pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 
 /// Error code on streams and connections if a message is larger than [`MAX_MESSAGE_SIZE`].
 ///
-/// irpc uses the codes 0 to 255. Applications must use codes from 256 upward.
+/// See [Error codes](self#error-codes) for the codes that irpc reserves.
 pub const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
 
 /// Error code on streams if the sender could not encode a message.
@@ -587,11 +599,11 @@ impl HandlerError {
     /// all other requests on the connection, including streams that a handler moved
     /// into a spawned task.
     ///
-    /// irpc uses the codes 0 to 255, so use codes from 256 upward. irpc closes
-    /// a connection with code 0 for a normal close, which [`Handler::from_sender`]
-    /// also uses when its receiver is gone. For a bad request, irpc closes the
-    /// connection with [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] or
-    /// [`ERROR_CODE_DECODE_FAILED`].
+    /// The code should be 16 or higher, see [Error codes](self#error-codes). irpc
+    /// closes a connection with code 0 for a normal close, which
+    /// [`Handler::from_sender`] also uses when its receiver is gone. For a bad
+    /// request, irpc closes the connection with
+    /// [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] or [`ERROR_CODE_DECODE_FAILED`].
     ///
     /// # Examples
     ///
