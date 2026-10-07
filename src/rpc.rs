@@ -13,7 +13,8 @@
 //!   than [`MAX_MESSAGE_SIZE`],
 //! * with [`ERROR_CODE_DECODE_FAILED`] if the request does not decode. For
 //!   example, a client of a newer protocol version sent a request type that
-//!   the server does not know.
+//!   the server does not know. A stream that ends before its request is
+//!   complete is also a request that does not decode.
 //!
 //! By default, a [`Handler`] then closes the connection with the same code, as
 //! for any other protocol violation. A protocol that adds request types at the
@@ -25,11 +26,11 @@
 //! with its own loop decides what to do: close the connection, or read the
 //! next request.
 //!
-//! A stream that ends or fails before its request is complete is not a bad
-//! request. The client abandoned the request, for example because it dropped
-//! the future of [`Client::rpc`](crate::Client::rpc) while it wrote a large
-//! request. The server resets its side of the stream with code 0, and reads
-//! the next request.
+//! A client that drops a request before it wrote all of it resets the stream
+//! with [`ERROR_CODE_ABORTED`]. For example, it dropped the future of
+//! [`Client::rpc`](crate::Client::rpc) while it wrote a large request. The
+//! server skips a request whose stream was reset. It resets its side of the
+//! stream with code 0, and reads the next request.
 //!
 //! A remote channel receiver also stops its stream with
 //! [`ERROR_CODE_DECODE_FAILED`] if a message does not decode. Its sender then
@@ -39,9 +40,9 @@
 //!
 //! irpc reserves the codes 0 to 15 for streams and connections. Code 0 means
 //! no error, for example a normal close. irpc also uses
-//! [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`], [`ERROR_CODE_ENCODE_FAILED`], and
-//! [`ERROR_CODE_DECODE_FAILED`], and can add more codes in this range in a
-//! later version.
+//! [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`], [`ERROR_CODE_ENCODE_FAILED`],
+//! [`ERROR_CODE_DECODE_FAILED`], and [`ERROR_CODE_ABORTED`], and can add more
+//! codes in this range in a later version.
 //!
 //! An application should use codes from 16 upward, so that a peer can tell its
 //! codes apart from the codes of irpc. irpc does not check this. A code below
@@ -90,6 +91,11 @@ pub const ERROR_CODE_ENCODE_FAILED: u32 = 2;
 /// receiver stops its stream if a message does not decode.
 pub const ERROR_CODE_DECODE_FAILED: u32 = 3;
 
+/// Error code on a request stream if the client drops the request before it is written.
+///
+/// The server skips such a request, see [Bad requests](self#bad-requests).
+pub const ERROR_CODE_ABORTED: u32 = 4;
+
 /// Error when reading a request with [`read_request`].
 ///
 /// For [`MaxMessageSizeExceeded`](Self::MaxMessageSizeExceeded) and
@@ -105,7 +111,7 @@ pub enum ReadRequestError {
     /// The request does not decode.
     ///
     /// For example, a newer client sent a request type that this server does
-    /// not know.
+    /// not know, or the stream ended before the request was complete.
     #[error("Invalid request")]
     InvalidRequest {
         #[error(std_err)]
@@ -222,12 +228,33 @@ pub trait RemoteConnection: Send + Sync + Debug + 'static {
 }
 
 /// A connection to a remote service that can be used to send the initial message.
+///
+/// If it drops before the message is written, it resets the stream with
+/// [`ERROR_CODE_ABORTED`].
 #[derive(Debug)]
-pub struct RemoteSender<S>(
-    noq::SendStream,
-    noq::RecvStream,
-    std::marker::PhantomData<S>,
-);
+pub struct RemoteSender<S>(ResetOnDrop, noq::RecvStream, std::marker::PhantomData<S>);
+
+/// A send stream that resets with [`ERROR_CODE_ABORTED`] if it drops before [`Self::into_inner`].
+#[derive(Debug)]
+struct ResetOnDrop(Option<noq::SendStream>);
+
+impl ResetOnDrop {
+    fn get_mut(&mut self) -> &mut noq::SendStream {
+        self.0.as_mut().expect("only `into_inner` takes the stream")
+    }
+
+    fn into_inner(mut self) -> noq::SendStream {
+        self.0.take().expect("only `into_inner` takes the stream")
+    }
+}
+
+impl Drop for ResetOnDrop {
+    fn drop(&mut self) {
+        if let Some(send) = &mut self.0 {
+            send.reset(ERROR_CODE_ABORTED.into()).ok();
+        }
+    }
+}
 
 /// Serialize a message for sending over the wire.
 ///
@@ -261,7 +288,7 @@ pub(crate) fn prepare_write<S: Service>(
 
 impl<S: Service> RemoteSender<S> {
     pub fn new(send: noq::SendStream, recv: noq::RecvStream) -> Self {
-        Self(send, recv, PhantomData)
+        Self(ResetOnDrop(Some(send)), recv, PhantomData)
     }
 
     pub async fn write(
@@ -277,8 +304,8 @@ impl<S: Service> RemoteSender<S> {
         buf: &[u8],
     ) -> std::result::Result<(noq::SendStream, noq::RecvStream), WriteError> {
         let RemoteSender(mut send, recv, _) = self;
-        send.write_all(buf).await?;
-        Ok((send, recv))
+        send.get_mut().write_all(buf).await?;
+        Ok((send.into_inner(), recv))
     }
 }
 
@@ -928,7 +955,7 @@ async fn read_request_inner<S: Service>(
             Ok(Some((carrier, msg))) => return Ok(Some((msg, carrier, recv, send))),
             // If the connection ended, the next `accept_bi` returns why.
             Ok(None) => {
-                debug!("skipped request: stream ended before the request was complete");
+                debug!("skipped request: stream failed before the request was complete");
                 // A drop finishes the stream, which looks like an empty response.
                 send.reset(0u32.into()).ok();
             }
@@ -945,34 +972,41 @@ async fn read_request_inner<S: Service>(
 
 /// Reads and decodes a request.
 ///
-/// Returns `None` if the stream ends or fails before the request is complete.
-/// This is not a bad request: the client abandoned it, or the connection ended.
+/// Returns `None` if the stream fails before the request is complete: the
+/// client reset it, or the connection ended.
 async fn read_request_frame<S: Service>(
     recv: &mut noq::RecvStream,
 ) -> Result<Option<(Option<crate::span_propagation::SpanContextCarrier>, S)>, ReadRequestError> {
+    let invalid = |err| e!(ReadRequestError::InvalidRequest, err);
     let size = match recv.read_varint_u64().await {
         Ok(Some(size)) => size,
-        Ok(None) => return Ok(None),
-        // The varint is longer than a u64.
-        Err(err) if err.kind() == io::ErrorKind::InvalidData => {
-            return Err(e!(ReadRequestError::InvalidRequest, err));
+        Ok(None) => {
+            return Err(invalid(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "stream ended before the request",
+            )));
         }
-        // The stream failed, or it ended inside the varint.
-        Err(_) => return Ok(None),
+        // Any reset, not only `ERROR_CODE_ABORTED`: the update sender of a request
+        // resets the stream if an update does not encode. noq drops unread data on
+        // a reset, so this reset can arrive before the request.
+        Err(err) if err.get_ref().is_some_and(|err| err.is::<noq::ReadError>()) => {
+            return Ok(None);
+        }
+        // The varint is longer than a u64, or the stream ended inside it.
+        Err(err) => return Err(invalid(err)),
     };
     if size > MAX_MESSAGE_SIZE {
         return Err(e!(ReadRequestError::MaxMessageSizeExceeded));
     }
     let mut buf = vec![0; size as usize];
-    if recv.read_exact(&mut buf).await.is_err() {
-        return Ok(None);
+    match recv.read_exact(&mut buf).await {
+        Ok(()) => {}
+        Err(noq::ReadExactError::ReadError(_)) => return Ok(None),
+        Err(err @ noq::ReadExactError::FinishedEarly(_)) => {
+            return Err(invalid(io::Error::new(io::ErrorKind::UnexpectedEof, err)));
+        }
     }
-    let decode = |err| {
-        e!(
-            ReadRequestError::InvalidRequest,
-            io::Error::new(io::ErrorKind::InvalidData, err)
-        )
-    };
+    let decode = |err| invalid(io::Error::new(io::ErrorKind::InvalidData, err));
     let request = if S::SPAN_PROPAGATION {
         postcard::from_bytes(&buf).map_err(decode)?
     } else {
