@@ -6,8 +6,8 @@
 //!
 //! # Bad requests
 //!
-//! Each request has its own stream. If the server cannot read a request, it
-//! stops and resets the streams of that request:
+//! Each request has its own stream. If a request is bad, the server stops and
+//! resets the streams of that request:
 //!
 //! * with [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] if the request is larger
 //!   than [`MAX_MESSAGE_SIZE`],
@@ -24,6 +24,12 @@
 //! [`read_request`] returns a bad request as a [`ReadRequestError`]. A server
 //! with its own loop decides what to do: close the connection, or read the
 //! next request.
+//!
+//! A stream that ends or fails before its request is complete is not a bad
+//! request. The client abandoned the request, for example because it dropped
+//! the future of [`Client::rpc`](crate::Client::rpc) while it wrote a large
+//! request. The server resets its side of the stream with code 0, and reads
+//! the next request.
 //!
 //! A remote channel receiver also stops its stream with
 //! [`ERROR_CODE_DECODE_FAILED`] if a message does not decode. Its sender then
@@ -844,7 +850,7 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 /// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
 ///
 /// Returns `None` if the remote closed the connection with code 0, or if this
-/// side closed it.
+/// side closed it. Skips a request that the client abandoned.
 ///
 /// Returns [`ReadRequestError::MaxMessageSizeExceeded`] or
 /// [`ReadRequestError::InvalidRequest`] for a bad request. The connection is
@@ -894,79 +900,71 @@ type Request<S> = (
 async fn read_request_inner<S: Service>(
     connection: &impl IncomingRemoteConnection,
 ) -> Result<Option<Request<S>>, ReadRequestError> {
-    let (mut send, mut recv) = match connection.accept_bi().await {
-        Ok(streams) => streams,
-        Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
-            trace!("remote side closed connection {cause:?}");
-            return Ok(None);
-        }
-        Err(ConnectionError::LocallyClosed) => return Ok(None),
-        Err(cause) => return Err(e!(ReadRequestError::Connection, cause)),
-    };
-    match read_request_frame::<S>(&mut recv).await {
-        Ok((carrier, msg)) => Ok(Some((msg, carrier, recv, send))),
-        Err(err) => {
-            if let Some(code) = err.error_code() {
-                recv.stop(code.into()).ok();
-                send.reset(code.into()).ok();
+    loop {
+        let (mut send, mut recv) = match connection.accept_bi().await {
+            Ok(streams) => streams,
+            Err(ConnectionError::ApplicationClosed(cause))
+                if cause.error_code.into_inner() == 0 =>
+            {
+                trace!("remote side closed connection {cause:?}");
+                return Ok(None);
             }
-            Err(err)
+            Err(ConnectionError::LocallyClosed) => return Ok(None),
+            Err(cause) => return Err(e!(ReadRequestError::Connection, cause)),
+        };
+        match read_request_frame::<S>(&mut recv).await {
+            Ok(Some((carrier, msg))) => return Ok(Some((msg, carrier, recv, send))),
+            // If the connection ended, the next `accept_bi` returns why.
+            Ok(None) => {
+                debug!("skipped request: stream ended before the request was complete");
+                // A drop finishes the stream, which looks like an empty response.
+                send.reset(0u32.into()).ok();
+            }
+            Err(err) => {
+                if let Some(code) = err.error_code() {
+                    recv.stop(code.into()).ok();
+                    send.reset(code.into()).ok();
+                }
+                return Err(err);
+            }
         }
     }
 }
 
 /// Reads and decodes a request.
+///
+/// Returns `None` if the stream ends or fails before the request is complete.
+/// This is not a bad request: the client abandoned it, or the connection ended.
 async fn read_request_frame<S: Service>(
     recv: &mut noq::RecvStream,
-) -> Result<(Option<crate::span_propagation::SpanContextCarrier>, S), ReadRequestError> {
-    let invalid = |err| e!(ReadRequestError::InvalidRequest, err);
-    let read_failed = |err: io::Error| {
-        let lost = err.get_ref().and_then(|inner| match read_error(inner) {
-            Some(noq::ReadError::ConnectionLost(lost)) => Some(lost.clone()),
-            _ => None,
-        });
-        match lost {
-            Some(lost) => e!(ReadRequestError::Connection, lost),
-            None => invalid(err),
+) -> Result<Option<(Option<crate::span_propagation::SpanContextCarrier>, S)>, ReadRequestError> {
+    let size = match recv.read_varint_u64().await {
+        Ok(Some(size)) => size,
+        Ok(None) => return Ok(None),
+        // The varint is longer than a u64.
+        Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+            return Err(e!(ReadRequestError::InvalidRequest, err));
         }
+        // The stream failed, or it ended inside the varint.
+        Err(_) => return Ok(None),
     };
-    let size = recv
-        .read_varint_u64()
-        .await
-        .map_err(read_failed)?
-        .ok_or_else(|| {
-            invalid(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "failed to read size",
-            ))
-        })?;
     if size > MAX_MESSAGE_SIZE {
         return Err(e!(ReadRequestError::MaxMessageSizeExceeded));
     }
     let mut buf = vec![0; size as usize];
-    recv.read_exact(&mut buf)
-        .await
-        .map_err(|e| read_failed(io::Error::new(io::ErrorKind::UnexpectedEof, e)))?;
-    let decode = |e| invalid(io::Error::new(io::ErrorKind::InvalidData, e));
-    if S::SPAN_PROPAGATION {
-        postcard::from_bytes(&buf).map_err(decode)
+    if recv.read_exact(&mut buf).await.is_err() {
+        return Ok(None);
+    }
+    let decode = |err| {
+        e!(
+            ReadRequestError::InvalidRequest,
+            io::Error::new(io::ErrorKind::InvalidData, err)
+        )
+    };
+    let request = if S::SPAN_PROPAGATION {
+        postcard::from_bytes(&buf).map_err(decode)?
     } else {
-        Ok((None, postcard::from_bytes(&buf).map_err(decode)?))
-    }
-}
-
-/// Returns the noq read error in `err`, also when it is inside a read helper error.
-fn read_error<'a>(
-    err: &'a (dyn std::error::Error + Send + Sync + 'static),
-) -> Option<&'a noq::ReadError> {
-    if let Some(err) = err.downcast_ref::<noq::ReadError>() {
-        return Some(err);
-    }
-    if let Some(noq::ReadExactError::ReadError(err)) = err.downcast_ref() {
-        return Some(err);
-    }
-    if let Some(noq::ReadToEndError::Read(err)) = err.downcast_ref() {
-        return Some(err);
-    }
-    None
+        (None, postcard::from_bytes(&buf).map_err(decode)?)
+    };
+    Ok(Some(request))
 }

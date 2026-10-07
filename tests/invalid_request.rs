@@ -6,7 +6,7 @@ use irpc::{
     noq::listen,
     rpc::{ERROR_CODE_DECODE_FAILED, Handler, ReadRequestError, read_request},
 };
-use n0_future::task::AbortOnDropHandle;
+use n0_future::{future::poll_once, task::AbortOnDropHandle};
 use noq::ConnectionError;
 use testresult::TestResult;
 
@@ -85,6 +85,42 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
+    assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
+    Ok(())
+}
+
+#[tokio::test]
+async fn dropped_rpc_keeps_connection() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, echo_handler())));
+    let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
+    let client = Client::<client::EchoProtocol>::boxed(conn);
+
+    // The request is larger than the flow control window, so one poll cannot
+    // write all of it. The drop then finishes the stream before the request ends.
+    let mut rpc = Box::pin(client.rpc(client::Echo("a".repeat(8 * 1024 * 1024))));
+    assert!(poll_once(&mut rpc).await.is_none(), "the write is not done");
+    drop(rpc);
+    assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
+    Ok(())
+}
+
+#[tokio::test]
+async fn reset_request_keeps_connection() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, echo_handler())));
+    let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
+    let client = Client::<client::EchoProtocol>::boxed(conn.clone());
+
+    let (mut send, mut recv) = conn.open_bi().await?;
+    // The size prefix says 100 bytes, but only 3 follow.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    send.reset(1000u32.into())?;
+    // The server resets its side too, so this is not an empty response.
+    assert_eq!(
+        recv.read(&mut [0]).await,
+        Err(noq::ReadError::Reset(0u32.into()))
+    );
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     Ok(())
 }
