@@ -4,7 +4,10 @@
 use irpc::{
     Client, WithChannels,
     noq::listen,
-    rpc::{ERROR_CODE_DECODE_FAILED, Handler, ReadRequestError, read_request},
+    rpc::{
+        ERROR_CODE_DECODE_FAILED, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, Handler, MAX_MESSAGE_SIZE,
+        ReadRequestError, read_request,
+    },
 };
 use n0_future::{future::poll_once, task::AbortOnDropHandle};
 use noq::ConnectionError;
@@ -69,6 +72,26 @@ async fn bad_request_closes_connection() -> TestResult<()> {
         panic!("server closes the connection");
     };
     assert_eq!(close.error_code, ERROR_CODE_DECODE_FAILED.into());
+    Ok(())
+}
+
+#[tokio::test]
+async fn too_large_request_closes_connection() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, echo_handler())));
+    let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
+
+    // An irpc client does not send a request this large, so write only its size prefix.
+    let (mut send, _recv) = conn.open_bi().await?;
+    send.write_all(&postcard::to_stdvec(&(MAX_MESSAGE_SIZE + 1))?)
+        .await?;
+    let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
+        panic!("server closes the connection");
+    };
+    assert_eq!(
+        close.error_code,
+        ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()
+    );
     Ok(())
 }
 
