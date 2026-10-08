@@ -98,8 +98,9 @@ pub const ERROR_CODE_ABORTED: u32 = 4;
 
 /// Error when reading a request with [`read_request`].
 ///
-/// For [`MaxMessageSizeExceeded`](Self::MaxMessageSizeExceeded) and
-/// [`InvalidRequest`](Self::InvalidRequest), irpc resets the streams of the
+/// For [`MaxMessageSizeExceeded`](Self::MaxMessageSizeExceeded),
+/// [`InvalidRequest`](Self::InvalidRequest), and
+/// [`DecodeFailed`](Self::DecodeFailed), irpc resets the streams of the
 /// request, so its client gets an error. The connection is still usable, so a
 /// server can read the next request.
 #[stack_error(derive, add_meta)]
@@ -108,14 +109,22 @@ pub enum ReadRequestError {
     /// The request is larger than [`MAX_MESSAGE_SIZE`].
     #[error("Maximum message size exceeded")]
     MaxMessageSizeExceeded,
-    /// The request does not decode.
+    /// The request is not framed correctly.
     ///
-    /// For example, a newer client sent a request type that this server does
-    /// not know, or the stream ended before the request was complete.
+    /// For example, the stream ended before the request was complete.
     #[error("Invalid request")]
     InvalidRequest {
         #[error(std_err)]
         source: io::Error,
+    },
+    /// The request does not decode.
+    ///
+    /// For example, a newer client sent a request type that this server does
+    /// not know.
+    #[error("Request does not decode")]
+    DecodeFailed {
+        #[error(std_err)]
+        source: postcard::Error,
     },
     /// The connection failed.
     #[error("Connection failed")]
@@ -130,7 +139,9 @@ impl ReadRequestError {
     fn error_code(&self) -> Option<u32> {
         match self {
             Self::MaxMessageSizeExceeded { .. } => Some(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED),
-            Self::InvalidRequest { .. } => Some(ERROR_CODE_DECODE_FAILED),
+            Self::InvalidRequest { .. } | Self::DecodeFailed { .. } => {
+                Some(ERROR_CODE_DECODE_FAILED)
+            }
             Self::Connection { .. } => None,
         }
     }
@@ -891,9 +902,10 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 /// Returns `None` if the remote closed the connection with code 0, or if this
 /// side closed it. Skips a request that the client abandoned.
 ///
-/// Returns [`ReadRequestError::MaxMessageSizeExceeded`] or
-/// [`ReadRequestError::InvalidRequest`] for a bad request. The connection is
-/// still open after these errors, see [Bad requests](self#bad-requests).
+/// Returns [`ReadRequestError::MaxMessageSizeExceeded`],
+/// [`ReadRequestError::InvalidRequest`], or [`ReadRequestError::DecodeFailed`]
+/// for a bad request. The connection is still open after these errors, see
+/// [Bad requests](self#bad-requests).
 pub async fn read_request<S: RemoteService>(
     connection: &impl IncomingRemoteConnection,
 ) -> Result<Option<S::Message>, ReadRequestError> {
@@ -955,6 +967,7 @@ async fn read_request_inner<S: Service>(
             ReadFrame::Request(carrier, msg) => return Ok(Some((msg, carrier, recv, send))),
             ReadFrame::MaxMessageSizeExceeded => e!(ReadRequestError::MaxMessageSizeExceeded),
             ReadFrame::InvalidRequest(source) => e!(ReadRequestError::InvalidRequest, source),
+            ReadFrame::DecodeFailed(source) => e!(ReadRequestError::DecodeFailed, source),
             ReadFrame::Reset => {
                 debug!("skipped request: the client reset its stream");
                 // A drop finishes the stream, which looks like an empty response.
@@ -978,8 +991,10 @@ enum ReadFrame<S> {
     Request(Option<crate::span_propagation::SpanContextCarrier>, S),
     /// The request is larger than [`MAX_MESSAGE_SIZE`].
     MaxMessageSizeExceeded,
-    /// The request does not decode, or the stream ended before it was complete.
+    /// The stream ended before the request was complete, or the size prefix is too long.
     InvalidRequest(io::Error),
+    /// The request does not decode.
+    DecodeFailed(postcard::Error),
     /// The client reset the stream before the request was complete.
     Reset,
     /// The connection was lost before the request was complete.
@@ -1041,6 +1056,6 @@ async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame
     };
     match decoded {
         Ok((carrier, msg)) => ReadFrame::Request(carrier, msg),
-        Err(err) => ReadFrame::InvalidRequest(io::Error::new(io::ErrorKind::InvalidData, err)),
+        Err(err) => ReadFrame::DecodeFailed(err),
     }
 }

@@ -199,6 +199,27 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn read_request_returns_truncated_request() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let connecting = client_endpoint.connect(server_addr, "localhost")?;
+    let accepting = async { server.accept().await.expect("endpoint is open").await };
+    let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+
+    let (mut send, _recv) = client_conn.open_bi().await?;
+    // The size prefix says 100 bytes, but only 3 follow.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    send.finish()?;
+    let err = read_request::<server::EchoProtocol>(&server_conn)
+        .await
+        .expect_err("the request is not complete");
+    assert!(
+        matches!(err, ReadRequestError::InvalidRequest { .. }),
+        "{err:?}"
+    );
+    Ok(())
+}
+
 /// A close in the middle of a request ends `read_request` as a close between requests does.
 #[tokio::test]
 async fn close_during_request_returns_none() -> TestResult<()> {
@@ -233,7 +254,7 @@ async fn read_request_returns_bad_request() -> TestResult<()> {
             .await
             .expect_err("server does not know the request");
         assert!(
-            matches!(err, ReadRequestError::InvalidRequest { .. }),
+            matches!(err, ReadRequestError::DecodeFailed { .. }),
             "{err:?}"
         );
         // The connection is still open, so the server reads the next request.
