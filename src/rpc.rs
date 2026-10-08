@@ -813,14 +813,14 @@ impl<S: Service> Handler<S> {
         loop {
             match read_request_inner::<S>(connection).await {
                 Ok(request) => return Ok(request),
-                Err(ReadRequestError::Connection { source, .. }) => return Err(source.into()),
-                Err(err) if self.skip_bad_requests => debug!("skipped bad request: {err:#}"),
-                Err(err) => {
-                    if let Some(code) = err.error_code() {
+                Err(err) => match err.error_code() {
+                    None => return Err(err.into()), // A connection error.
+                    Some(_) if self.skip_bad_requests => debug!("skipped bad request: {err:#}"),
+                    Some(code) => {
                         connection.close(code.into(), err.to_string().as_bytes());
+                        return Err(err.into());
                     }
-                    return Err(err.into());
-                }
+                },
             }
         }
     }
