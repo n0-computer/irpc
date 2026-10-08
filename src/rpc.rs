@@ -951,66 +951,96 @@ async fn read_request_inner<S: Service>(
             Err(ConnectionError::LocallyClosed) => return Ok(None),
             Err(cause) => return Err(e!(ReadRequestError::Connection, cause)),
         };
-        match read_request_frame::<S>(&mut recv).await {
-            Ok(Some((carrier, msg))) => return Ok(Some((msg, carrier, recv, send))),
-            // If the connection ended, the next `accept_bi` returns why.
-            Ok(None) => {
-                debug!("skipped request: stream failed before the request was complete");
+        let err = match read_request_frame::<S>(&mut recv).await {
+            ReadFrame::Request(carrier, msg) => return Ok(Some((msg, carrier, recv, send))),
+            ReadFrame::MaxMessageSizeExceeded => e!(ReadRequestError::MaxMessageSizeExceeded),
+            ReadFrame::InvalidRequest(source) => e!(ReadRequestError::InvalidRequest, source),
+            ReadFrame::Reset => {
+                debug!("skipped request: the client reset its stream");
                 // A drop finishes the stream, which looks like an empty response.
                 send.reset(0u32.into()).ok();
+                continue;
             }
-            Err(err) => {
-                if let Some(code) = err.error_code() {
-                    recv.stop(code.into()).ok();
-                    send.reset(code.into()).ok();
-                }
-                return Err(err);
-            }
+            // The next `accept_bi` returns why.
+            ReadFrame::ConnectionLost => continue,
+        };
+        if let Some(code) = err.error_code() {
+            recv.stop(code.into()).ok();
+            send.reset(code.into()).ok();
+        }
+        return Err(err);
+    }
+}
+
+/// What the server reads from the stream of a request.
+enum ReadFrame<S> {
+    /// A complete request.
+    Request(Option<crate::span_propagation::SpanContextCarrier>, S),
+    /// The request is larger than [`MAX_MESSAGE_SIZE`].
+    MaxMessageSizeExceeded,
+    /// The request does not decode, or the stream ended before it was complete.
+    InvalidRequest(io::Error),
+    /// The client reset the stream before the request was complete.
+    Reset,
+    /// The connection was lost before the request was complete.
+    ConnectionLost,
+}
+
+impl<S> ReadFrame<S> {
+    /// Returns the frame for a stream that failed before the request was complete.
+    fn from_read_err(err: &noq::ReadError) -> Self {
+        match err {
+            // Any reset, not only `ERROR_CODE_ABORTED`: the update sender of a
+            // request resets the stream if an update does not encode. noq drops
+            // unread data on a reset, so this reset can arrive before the request.
+            noq::ReadError::Reset(_) => Self::Reset,
+            noq::ReadError::ConnectionLost(_) => Self::ConnectionLost,
+            // A server cannot get these: irpc stops a request stream only after
+            // its read failed, and only a client gets `ZeroRttRejected`.
+            noq::ReadError::ClosedStream | noq::ReadError::ZeroRttRejected => Self::Reset,
         }
     }
 }
 
 /// Reads and decodes a request.
-///
-/// Returns `None` if the stream fails before the request is complete: the
-/// client reset it, or the connection ended.
-async fn read_request_frame<S: Service>(
-    recv: &mut noq::RecvStream,
-) -> Result<Option<(Option<crate::span_propagation::SpanContextCarrier>, S)>, ReadRequestError> {
-    let invalid = |err| e!(ReadRequestError::InvalidRequest, err);
+async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame<S> {
     let size = match recv.read_varint_u64().await {
         Ok(Some(size)) => size,
         Ok(None) => {
-            return Err(invalid(io::Error::new(
+            return ReadFrame::InvalidRequest(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "stream ended before the request",
-            )));
+            ));
         }
-        // Any reset, not only `ERROR_CODE_ABORTED`: the update sender of a request
-        // resets the stream if an update does not encode. noq drops unread data on
-        // a reset, so this reset can arrive before the request.
-        Err(err) if err.get_ref().is_some_and(|err| err.is::<noq::ReadError>()) => {
-            return Ok(None);
+        Err(err) => {
+            let read_err = err
+                .get_ref()
+                .and_then(|err| err.downcast_ref::<noq::ReadError>());
+            return match read_err {
+                Some(read_err) => ReadFrame::from_read_err(read_err),
+                // The varint is longer than a u64, or the stream ended inside it.
+                None => ReadFrame::InvalidRequest(err),
+            };
         }
-        // The varint is longer than a u64, or the stream ended inside it.
-        Err(err) => return Err(invalid(err)),
     };
     if size > MAX_MESSAGE_SIZE {
-        return Err(e!(ReadRequestError::MaxMessageSizeExceeded));
+        return ReadFrame::MaxMessageSizeExceeded;
     }
     let mut buf = vec![0; size as usize];
     match recv.read_exact(&mut buf).await {
         Ok(()) => {}
-        Err(noq::ReadExactError::ReadError(_)) => return Ok(None),
+        Err(noq::ReadExactError::ReadError(err)) => return ReadFrame::from_read_err(&err),
         Err(err @ noq::ReadExactError::FinishedEarly(_)) => {
-            return Err(invalid(io::Error::new(io::ErrorKind::UnexpectedEof, err)));
+            return ReadFrame::InvalidRequest(io::Error::new(io::ErrorKind::UnexpectedEof, err));
         }
     }
-    let decode = |err| invalid(io::Error::new(io::ErrorKind::InvalidData, err));
-    let request = if S::SPAN_PROPAGATION {
-        postcard::from_bytes(&buf).map_err(decode)?
+    let decoded = if S::SPAN_PROPAGATION {
+        postcard::from_bytes(&buf)
     } else {
-        (None, postcard::from_bytes(&buf).map_err(decode)?)
+        postcard::from_bytes(&buf).map(|msg| (None, msg))
     };
-    Ok(Some(request))
+    match decoded {
+        Ok((carrier, msg)) => ReadFrame::Request(carrier, msg),
+        Err(err) => ReadFrame::InvalidRequest(io::Error::new(io::ErrorKind::InvalidData, err)),
+    }
 }

@@ -1,7 +1,7 @@
 #![cfg(all(feature = "noq_endpoint_setup", feature = "derive"))]
 //! Checks what a server does with a bad request.
 
-use std::time::Duration;
+use std::{pin::pin, time::Duration};
 
 use irpc::{
     Client, WithChannels,
@@ -196,6 +196,31 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     conn.close(0u32.into(), b"");
     server.await??;
+    Ok(())
+}
+
+/// A close in the middle of a request ends `read_request` as a close between requests does.
+#[tokio::test]
+async fn close_during_request_returns_none() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let connecting = client_endpoint.connect(server_addr, "localhost")?;
+    let accepting = async { server.accept().await.expect("endpoint is open").await };
+    let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+
+    let (mut send, _recv) = client_conn.open_bi().await?;
+    // The size prefix says 100 bytes, but only 3 follow.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    let mut read = pin!(read_request::<server::EchoProtocol>(&server_conn));
+    while server_conn.stats().frame_rx.stream == 0 {
+        assert!(poll_once(&mut read).await.is_none());
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        poll_once(&mut read).await.is_none(),
+        "server waits for the rest of the request"
+    );
+    client_conn.close(0u32.into(), b"");
+    assert!(read.await?.is_none());
     Ok(())
 }
 
