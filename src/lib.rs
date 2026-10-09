@@ -870,45 +870,6 @@ impl<S: Service> Client<S> {
             Ok(recv)
         }
     }
-
-    /// Deprecated: use [`Self::notify`] instead, it handles 0rtt automatically.
-    #[deprecated(note = "use `notify` instead, it handles 0rtt automatically")]
-    pub fn notify_0rtt<Req>(&self, msg: Req) -> impl Future<Output = Result<()>> + Send + 'static
-    where
-        S: From<Req>,
-        S::Message: From<WithChannels<Req, S>>,
-        Req: Channels<S, Tx = NoSender, Rx = NoReceiver>,
-    {
-        self.notify(msg)
-    }
-
-    /// Deprecated: use [`Self::rpc`] instead, it handles 0rtt automatically.
-    #[deprecated(note = "use `rpc` instead, it handles 0rtt automatically")]
-    pub fn rpc_0rtt<Req, Res>(&self, msg: Req) -> impl Future<Output = Result<Res>> + Send + 'static
-    where
-        S: From<Req>,
-        S::Message: From<WithChannels<Req, S>>,
-        Req: Channels<S, Tx = oneshot::Sender<Res>, Rx = NoReceiver>,
-        Res: RpcMessage,
-    {
-        self.rpc(msg)
-    }
-
-    /// Deprecated: use [`Self::server_streaming`] instead, it handles 0rtt automatically.
-    #[deprecated(note = "use `server_streaming` instead, it handles 0rtt automatically")]
-    pub fn server_streaming_0rtt<Req, Res>(
-        &self,
-        msg: Req,
-        local_response_cap: usize,
-    ) -> impl Future<Output = Result<mpsc::Receiver<Res>>> + Send + 'static
-    where
-        S: From<Req>,
-        S::Message: From<WithChannels<Req, S>>,
-        Req: Channels<S, Tx = mpsc::Sender<Res>, Rx = NoReceiver>,
-        Res: RpcMessage,
-    {
-        self.server_streaming(msg, local_response_cap)
-    }
 }
 
 #[derive(Debug)]
