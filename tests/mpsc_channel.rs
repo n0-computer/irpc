@@ -152,6 +152,54 @@ async fn mpsc_receiver_dropped() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that after the remote receiver is dropped, every send on every clone
+/// of a `Sender` gets `ReceiverClosed`, also on clones that did not see the stop.
+#[tokio::test]
+async fn mpsc_receiver_dropped_clones() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        drop(Receiver::<Vec<u8>>::from(recv));
+        // keep the connection, so that the stop reaches the client
+        conn.closed().await;
+        TestResult::Ok(())
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send1 = mpsc::Sender::<Vec<u8>>::from(send);
+    let send2 = send1.clone();
+    // send on the first clone until the stop arrives
+    let err = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Err(err) = send1.send(vec![1, 2, 3]).await {
+                break err;
+            }
+        }
+    })
+    .await?;
+    assert!(
+        matches!(err, SendError::ReceiverClosed { .. }),
+        "expected ReceiverClosed, got {err:?}"
+    );
+    // later sends on the same clone, and sends on a clone that never saw the stop
+    assert!(matches!(
+        send1.send(vec![1]).await,
+        Err(SendError::ReceiverClosed { .. })
+    ));
+    assert!(matches!(
+        send2.send(vec![1]).await,
+        Err(SendError::ReceiverClosed { .. })
+    ));
+    assert!(matches!(
+        send2.try_send(vec![1]).await,
+        Err(SendError::ReceiverClosed { .. })
+    ));
+    conn.close(0u32.into(), b"");
+    server.await??;
+    Ok(())
+}
+
 async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
     let conn = server
         .accept()
