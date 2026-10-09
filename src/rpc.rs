@@ -28,7 +28,7 @@
 //!
 //! A client that drops a request before it wrote all of it resets the stream
 //! with [`ERROR_CODE_ABORTED`]. For example, it dropped the future of
-//! [`Client::rpc`](crate::Client::rpc) while it wrote a large request. The
+//! [`Client::rpc`] while it wrote a large request. The
 //! server skips a request whose stream was reset. It resets its side of the
 //! stream with code 0, and reads the next request.
 //!
@@ -47,6 +47,8 @@
 //! An application should use codes from 16 upward, so that a peer can tell its
 //! codes apart from the codes of irpc. irpc does not check this. A code below
 //! 16 works, but a later version of irpc can give it a different meaning.
+//!
+//! [`Client::rpc`]: crate::Client::rpc
 use std::{
     fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
 };
@@ -78,7 +80,9 @@ pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 
 /// Error code on streams and connections if a message is larger than [`MAX_MESSAGE_SIZE`].
 ///
-/// See [Error codes](self#error-codes) for the codes that irpc reserves.
+/// See [Error codes] for the codes that irpc reserves.
+///
+/// [Error codes]: self#error-codes
 pub const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
 
 /// Error code on streams if the sender could not encode a message.
@@ -93,16 +97,20 @@ pub const ERROR_CODE_DECODE_FAILED: u32 = 3;
 
 /// Error code on a request stream if the client drops the request before it is written.
 ///
-/// The server skips such a request, see [Bad requests](self#bad-requests).
+/// The server skips such a request, see [Bad requests].
+///
+/// [Bad requests]: self#bad-requests
 pub const ERROR_CODE_ABORTED: u32 = 4;
 
 /// Error when reading a request with [`read_request`].
 ///
-/// For [`MaxMessageSizeExceeded`](Self::MaxMessageSizeExceeded),
-/// [`InvalidRequest`](Self::InvalidRequest), and
-/// [`DecodeFailed`](Self::DecodeFailed), irpc resets the streams of the
-/// request, so its client gets an error. The connection is still usable, so a
-/// server can read the next request.
+/// For [`MaxMessageSizeExceeded`], [`InvalidRequest`], and [`DecodeFailed`],
+/// irpc resets the streams of the request, so its client gets an error. The
+/// connection is still usable, so a server can read the next request.
+///
+/// [`MaxMessageSizeExceeded`]: Self::MaxMessageSizeExceeded
+/// [`InvalidRequest`]: Self::InvalidRequest
+/// [`DecodeFailed`]: Self::DecodeFailed
 #[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum ReadRequestError {
@@ -465,33 +473,41 @@ struct NoqSenderInner<T> {
 }
 
 impl<T: RpcMessage> NoqSenderInner<T> {
+    /// Encodes `value` into the buffer.
+    ///
+    /// Resets the stream if `value` is too large or does not encode, so the
+    /// receiver gets an error instead of the end of the stream.
+    fn encode(&mut self, value: T) -> Result<(), SendError> {
+        let size = match postcard::experimental::serialized_size(&value) {
+            Ok(size) => size,
+            Err(e) => {
+                self.send.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
+                return Err(e!(
+                    SendError::Io,
+                    io::Error::new(io::ErrorKind::InvalidData, e)
+                ));
+            }
+        };
+        if size as u64 > MAX_MESSAGE_SIZE {
+            self.send
+                .reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into())
+                .ok();
+            return Err(e!(SendError::MaxMessageSizeExceeded));
+        }
+        self.buffer.clear();
+        if let Err(e) = self.buffer.write_length_prefixed(value) {
+            self.send.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
     fn send(
         &mut self,
         value: T,
     ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + Sync + '_>> {
         Box::pin(async {
-            let size = match postcard::experimental::serialized_size(&value) {
-                Ok(size) => size,
-                Err(e) => {
-                    self.send.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
-                    return Err(e!(
-                        SendError::Io,
-                        io::Error::new(io::ErrorKind::InvalidData, e)
-                    ));
-                }
-            };
-            if size as u64 > MAX_MESSAGE_SIZE {
-                self.send
-                    .reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into())
-                    .ok();
-                return Err(e!(SendError::MaxMessageSizeExceeded));
-            }
-            let value = value;
-            self.buffer.clear();
-            if let Err(e) = self.buffer.write_length_prefixed(value) {
-                self.send.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
-                return Err(e.into());
-            }
+            self.encode(value)?;
             self.send.write_all(&self.buffer).await?;
             self.buffer.clear();
             Ok(())
@@ -503,13 +519,8 @@ impl<T: RpcMessage> NoqSenderInner<T> {
         value: T,
     ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + Sync + '_>> {
         Box::pin(async {
-            if postcard::experimental::serialized_size(&value)? as u64 > MAX_MESSAGE_SIZE {
-                return Err(e!(SendError::MaxMessageSizeExceeded));
-            }
             // todo: move the non-async part out of the box. Will require a new return type.
-            let value = value;
-            self.buffer.clear();
-            self.buffer.write_length_prefixed(value)?;
+            self.encode(value)?;
             let Some(n) = now_or_never(self.send.write(&self.buffer)) else {
                 return Ok(false);
             };
@@ -547,13 +558,15 @@ impl CloseReason {
     }
 }
 
-impl<T> Default for NoqSenderState<T> {
-    fn default() -> Self {
-        Self::Closed(CloseReason::Other)
-    }
-}
-
 impl<T> NoqSenderState<T> {
+    /// Takes the state for a send, and leaves the sender closed until the send puts it back.
+    ///
+    /// A cancelled send never puts it back, so the sender stays closed: the
+    /// stream can hold part of a message.
+    fn take_for_send(&mut self) -> Self {
+        std::mem::replace(self, Self::Closed(CloseReason::Other))
+    }
+
     /// Returns the state after a send, so that later sends fail with the same kind of error.
     fn after_send<R>(sender: NoqSenderInner<T>, res: &Result<R, SendError>) -> Self {
         match res {
@@ -576,7 +589,7 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>> {
         Box::pin(async {
             let mut guard = self.0.lock().await;
-            let sender = std::mem::take(guard.deref_mut());
+            let sender = guard.take_for_send();
             match sender {
                 NoqSenderState::Open(mut sender) => {
                     let res = sender.send(value).await;
@@ -597,7 +610,7 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
     ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + '_>> {
         Box::pin(async {
             let mut guard = self.0.lock().await;
-            let sender = std::mem::take(guard.deref_mut());
+            let sender = guard.take_for_send();
             match sender {
                 NoqSenderState::Open(mut sender) => {
                     let res = sender.try_send(value).await;
@@ -671,7 +684,7 @@ impl HandlerError {
     /// all other requests on the connection, including streams that a handler moved
     /// into a spawned task.
     ///
-    /// The code should be 16 or higher, see [Error codes](self#error-codes). irpc
+    /// The code should be 16 or higher, see [Error codes]. irpc
     /// closes a connection with code 0 for a normal close, which
     /// [`Handler::from_sender`] also uses when its receiver is gone. For a bad
     /// request, irpc closes the connection with
@@ -705,6 +718,8 @@ impl HandlerError {
     ///     }
     /// });
     /// ```
+    ///
+    /// [Error codes]: self#error-codes
     pub fn close_connection(code: u32, reason: impl AsRef<[u8]>) -> Self {
         Self {
             inner: HandlerErrorInner::CloseConnection {
@@ -807,7 +822,9 @@ impl<S: Service> Handler<S> {
     /// By default, a request that is too large or does not decode closes the
     /// connection. With `true`, only the request fails, and the handler reads
     /// the next request. Use it for a protocol that adds request types over
-    /// time, see [Bad requests](self#bad-requests).
+    /// time, see [Bad requests].
+    ///
+    /// [Bad requests]: self#bad-requests
     pub fn skip_bad_requests(mut self, skip: bool) -> Self {
         self.skip_bad_requests = skip;
         self
@@ -939,7 +956,9 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 /// Returns [`ReadRequestError::MaxMessageSizeExceeded`],
 /// [`ReadRequestError::InvalidRequest`], or [`ReadRequestError::DecodeFailed`]
 /// for a bad request. The connection is still open after these errors, see
-/// [Bad requests](self#bad-requests).
+/// [Bad requests].
+///
+/// [Bad requests]: self#bad-requests
 pub async fn read_request<S: RemoteService>(
     connection: &impl IncomingRemoteConnection,
 ) -> Result<Option<S::Message>, ReadRequestError> {

@@ -298,6 +298,27 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that `try_send` resets the stream for a message that is too large, as `send` does.
+#[tokio::test]
+async fn mpsc_max_message_size_try_send() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    let Err(cause) = send.try_send(vec![0u8; 1024 * 1024 * 32]).await else {
+        panic!("client should have failed due to max message size");
+    };
+    assert!(matches!(cause, SendError::MaxMessageSizeExceeded { .. }));
+    let Err(cause) = server.await? else {
+        panic!("server should have failed due to max message size");
+    };
+    assert!(
+        matches!(cause, mpsc::RecvError::Io { source, .. } if source.kind() == ErrorKind::ConnectionReset)
+    );
+    Ok(())
+}
+
 /// Checks that the max message size is enforced on receiver side.
 #[tokio::test]
 async fn mpsc_max_message_size_recv() -> TestResult<()> {
