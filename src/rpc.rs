@@ -28,7 +28,7 @@
 //!
 //! A client that drops a request before it wrote all of it resets the stream
 //! with [`ERROR_CODE_ABORTED`]. For example, it dropped the future of
-//! [`Client::rpc`](crate::Client::rpc) while it wrote a large request. The
+//! [`Client::rpc`] while it wrote a large request. The
 //! server skips a request whose stream was reset. It resets its side of the
 //! stream with code 0, and reads the next request.
 //!
@@ -47,6 +47,8 @@
 //! An application should use codes from 16 upward, so that a peer can tell its
 //! codes apart from the codes of irpc. irpc does not check this. A code below
 //! 16 works, but a later version of irpc can give it a different meaning.
+//!
+//! [`Client::rpc`]: crate::Client::rpc
 use std::{
     fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
 };
@@ -78,7 +80,9 @@ pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 
 /// Error code on streams and connections if a message is larger than [`MAX_MESSAGE_SIZE`].
 ///
-/// See [Error codes](self#error-codes) for the codes that irpc reserves.
+/// See [Error codes] for the codes that irpc reserves.
+///
+/// [Error codes]: self#error-codes
 pub const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
 
 /// Error code on streams if the sender could not encode a message.
@@ -93,16 +97,20 @@ pub const ERROR_CODE_DECODE_FAILED: u32 = 3;
 
 /// Error code on a request stream if the client drops the request before it is written.
 ///
-/// The server skips such a request, see [Bad requests](self#bad-requests).
+/// The server skips such a request, see [Bad requests].
+///
+/// [Bad requests]: self#bad-requests
 pub const ERROR_CODE_ABORTED: u32 = 4;
 
 /// Error when reading a request with [`read_request`].
 ///
-/// For [`MaxMessageSizeExceeded`](Self::MaxMessageSizeExceeded),
-/// [`InvalidRequest`](Self::InvalidRequest), and
-/// [`DecodeFailed`](Self::DecodeFailed), irpc resets the streams of the
-/// request, so its client gets an error. The connection is still usable, so a
-/// server can read the next request.
+/// For [`MaxMessageSizeExceeded`], [`InvalidRequest`], and [`DecodeFailed`],
+/// irpc resets the streams of the request, so its client gets an error. The
+/// connection is still usable, so a server can read the next request.
+///
+/// [`MaxMessageSizeExceeded`]: Self::MaxMessageSizeExceeded
+/// [`InvalidRequest`]: Self::InvalidRequest
+/// [`DecodeFailed`]: Self::DecodeFailed
 #[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum ReadRequestError {
@@ -676,7 +684,7 @@ impl HandlerError {
     /// all other requests on the connection, including streams that a handler moved
     /// into a spawned task.
     ///
-    /// The code should be 16 or higher, see [Error codes](self#error-codes). irpc
+    /// The code should be 16 or higher, see [Error codes]. irpc
     /// closes a connection with code 0 for a normal close, which
     /// [`Handler::from_sender`] also uses when its receiver is gone. For a bad
     /// request, irpc closes the connection with
@@ -710,6 +718,8 @@ impl HandlerError {
     ///     }
     /// });
     /// ```
+    ///
+    /// [Error codes]: self#error-codes
     pub fn close_connection(code: u32, reason: impl AsRef<[u8]>) -> Self {
         Self {
             inner: HandlerErrorInner::CloseConnection {
@@ -812,7 +822,9 @@ impl<S: Service> Handler<S> {
     /// By default, a request that is too large or does not decode closes the
     /// connection. With `true`, only the request fails, and the handler reads
     /// the next request. Use it for a protocol that adds request types over
-    /// time, see [Bad requests](self#bad-requests).
+    /// time, see [Bad requests].
+    ///
+    /// [Bad requests]: self#bad-requests
     pub fn skip_bad_requests(mut self, skip: bool) -> Self {
         self.skip_bad_requests = skip;
         self
@@ -944,7 +956,9 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 /// Returns [`ReadRequestError::MaxMessageSizeExceeded`],
 /// [`ReadRequestError::InvalidRequest`], or [`ReadRequestError::DecodeFailed`]
 /// for a bad request. The connection is still open after these errors, see
-/// [Bad requests](self#bad-requests).
+/// [Bad requests].
+///
+/// [Bad requests]: self#bad-requests
 pub async fn read_request<S: RemoteService>(
     connection: &impl IncomingRemoteConnection,
 ) -> Result<Option<S::Message>, ReadRequestError> {
