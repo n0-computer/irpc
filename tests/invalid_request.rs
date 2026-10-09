@@ -5,6 +5,7 @@ use std::{pin::pin, time::Duration};
 
 use irpc::{
     Client, WithChannels,
+    channel::{SendError, oneshot},
     noq::listen,
     rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, read_request},
 };
@@ -60,6 +61,9 @@ mod client {
         #[rpc(tx = oneshot::Sender<String>)]
         #[wrap(Shout)]
         Shout(String),
+        #[rpc(tx = oneshot::Sender<()>, rx = mpsc::Receiver<u32>)]
+        #[wrap(ShoutStream)]
+        ShoutStream(String),
     }
 }
 
@@ -87,7 +91,7 @@ async fn bad_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::DecodeFailed.into());
+    assert_eq!(close.error_code, ErrorCode::BadRequest.into());
     Ok(())
 }
 
@@ -104,7 +108,7 @@ async fn too_large_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::MaxMessageSizeExceeded.into());
+    assert_eq!(close.error_code, ErrorCode::BadRequest.into());
     Ok(())
 }
 
@@ -117,11 +121,50 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
     // A client on this one connection, so the second request shows that it still works.
     let client = Client::<client::EchoProtocol>::boxed(conn);
 
-    client
+    let err = client
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
+    assert!(
+        matches!(
+            err,
+            irpc::Error::OneshotRecv {
+                source: oneshot::RecvError::BadRequest { .. },
+                ..
+            }
+        ),
+        "{err:?}"
+    );
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
+    Ok(())
+}
+
+/// The sender of the updates of a bad request gets `BadRequest`, as the receiver of its response does.
+#[tokio::test]
+async fn bad_request_update_sender() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let handler = echo_handler().skip_bad_requests(true);
+    let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, handler)));
+    let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
+    let client = Client::<client::EchoProtocol>::boxed(conn);
+
+    let (tx, rx) = client
+        .client_streaming(client::ShoutStream("a".into()), 1)
+        .await?;
+    let err = rx.await.expect_err("server does not know the request");
+    assert!(
+        matches!(err, oneshot::RecvError::BadRequest { .. }),
+        "{err:?}"
+    );
+    let err = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Err(err) = tx.send(1).await {
+                break err;
+            }
+        }
+    })
+    .await?;
+    assert!(matches!(err, SendError::BadRequest { .. }), "{err:?}");
     Ok(())
 }
 
@@ -154,7 +197,7 @@ async fn truncated_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::DecodeFailed.into());
+    assert_eq!(close.error_code, ErrorCode::BadRequest.into());
     Ok(())
 }
 
@@ -180,7 +223,7 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
     let client = Client::<client::EchoProtocol>::boxed(conn.clone());
 
-    let (tx, _rx) = client
+    let (tx, rx) = client
         .client_streaming(client::Upload("a".into()), 1)
         .await?;
     // The update does not encode, so the sender resets with `ErrorCode::EncodeFailed`.
@@ -188,6 +231,12 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
         .await
         .expect_err("odd numbers do not encode");
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
+    // The server skipped the upload and ended its side of the stream.
+    let err = rx.await.expect_err("server skips the upload");
+    assert!(
+        matches!(err, oneshot::RecvError::SenderClosed { .. }),
+        "{err:?}"
+    );
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
