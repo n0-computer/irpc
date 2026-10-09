@@ -1,6 +1,6 @@
 #![cfg(feature = "noq_endpoint_setup")]
 
-use std::io::{self, ErrorKind};
+use std::io;
 
 use irpc::{
     channel::{
@@ -69,9 +69,7 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(
-        matches!(cause, RecvError::Io { source, .. } if source.kind() == ErrorKind::ConnectionReset)
-    );
+    assert!(matches!(cause, RecvError::MaxMessageSizeExceeded { .. }));
     Ok(())
 }
 
@@ -121,16 +119,11 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
     let Err(cause) = send.send(NoSer(1)).await else {
         panic!("client should have failed due to serialization error");
     };
-    assert!(
-        matches!(cause, SendError::Io { source, .. } if source.kind() == ErrorKind::InvalidData)
-    );
+    assert!(matches!(cause, SendError::EncodeFailed { .. }), "{cause:?}");
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    println!("Server error: {cause:?}");
-    assert!(
-        matches!(cause, RecvError::Io { source, .. } if source.kind() == ErrorKind::ConnectionReset)
-    );
+    assert!(matches!(cause, RecvError::EncodeFailed { .. }), "{cause:?}");
     Ok(())
 }
 
@@ -147,8 +140,6 @@ async fn oneshot_serialize_error_recv() -> TestResult<()> {
         panic!("server should have failed due to serialization error");
     };
     println!("Server error: {cause:?}");
-    assert!(
-        matches!(cause, RecvError::Io { source, .. } if source.kind() == ErrorKind::InvalidData)
-    );
+    assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
     Ok(())
 }

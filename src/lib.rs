@@ -988,7 +988,7 @@ pub enum Error {
     #[error("Oneshot recv error")]
     OneshotRecv { source: channel::oneshot::RecvError },
     #[cfg(feature = "rpc")]
-    #[error("Recv error")]
+    #[error("Write error")]
     Write { source: rpc::WriteError },
 }
 

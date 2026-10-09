@@ -8,21 +8,46 @@ use n0_error::{e, stack_error};
 
 use super::SendError;
 
-/// Error when receiving a oneshot or mpsc message. For local communication,
-/// the only thing that can go wrong is that the sender has been closed.
+/// Error when receiving an mpsc message.
 ///
-/// For rpc communication, there can be any number of errors, so this is a
-/// generic io error.
+/// A local channel has no errors: `recv` returns `Ok(None)` when all senders
+/// are gone. A remote channel does the same when its sender closes the stream.
+///
+/// For a remote channel, the sender is on the other side of the connection:
+/// the server for a response, and the client for the updates of a request.
+/// After an error, the channel is closed.
 #[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub enum RecvError {
     /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
     ///
+    /// Either this receiver found it, or the sender reported it.
+    ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
     #[error("Maximum message size exceeded")]
     MaxMessageSizeExceeded,
-    /// An io error occurred. This can occur for remote communication,
-    /// due to a network error or deserialization error.
+    /// The sender could not encode a message.
+    #[error("Sender could not encode the message")]
+    EncodeFailed,
+    /// The message does not decode.
+    #[cfg(feature = "rpc")]
+    #[error("Message does not decode")]
+    DecodeFailed {
+        #[error(std_err)]
+        source: postcard::Error,
+    },
+    /// The server rejected the request.
+    ///
+    /// This is about the request, not about a message on this channel, see
+    /// [Bad requests]. If the server also closes the connection, the close can
+    /// arrive first, and the receiver gets [`Self::Io`] instead.
+    ///
+    /// [Bad requests]: crate::rpc#bad-requests
+    #[error("Bad request")]
+    BadRequest,
+    /// An io error, for example because the connection was lost.
+    ///
+    /// A stream that ends in the middle of a message also gives an io error.
     #[error("Io error")]
     Io {
         #[error(std_err)]
@@ -34,9 +59,7 @@ impl From<RecvError> for io::Error {
     fn from(e: RecvError) -> Self {
         match e {
             RecvError::Io { source, .. } => source,
-            RecvError::MaxMessageSizeExceeded { .. } => {
-                io::Error::new(io::ErrorKind::InvalidData, e)
-            }
+            _ => io::Error::new(io::ErrorKind::InvalidData, e),
         }
     }
 }
