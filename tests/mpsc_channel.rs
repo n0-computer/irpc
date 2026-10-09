@@ -120,6 +120,38 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that a sender gets `ReceiverClosed` if the remote receiver is dropped, as for a local one.
+#[tokio::test]
+async fn mpsc_receiver_dropped() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        drop(Receiver::<Vec<u8>>::from(recv));
+        // keep the connection, so that the stop reaches the client
+        conn.closed().await;
+        TestResult::Ok(())
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    let res = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Err(err) = send.send(vec![1, 2, 3]).await {
+                break err;
+            }
+        }
+    })
+    .await?;
+    assert!(
+        matches!(res, SendError::ReceiverClosed { .. }),
+        "expected ReceiverClosed, got {res:?}"
+    );
+    conn.close(0u32.into(), b"");
+    server.await??;
+    Ok(())
+}
+
 async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
     let conn = server
         .accept()

@@ -211,6 +211,8 @@ impl From<noq::WriteError> for SendError {
             {
                 e!(SendError::MaxMessageSizeExceeded)
             }
+            // A receiver that is dropped stops the stream with code 0.
+            noq::WriteError::Stopped(code) if code == 0u32.into() => e!(SendError::ReceiverClosed),
             _ => e!(SendError::Io, io::Error::from(err)),
         }
     }
