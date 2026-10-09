@@ -9,9 +9,9 @@
 //! Each request has its own stream. If a request is bad, the server stops and
 //! resets the streams of that request:
 //!
-//! * with [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] if the request is larger
+//! * with [`ErrorCode::MaxMessageSizeExceeded`] if the request is larger
 //!   than [`MAX_MESSAGE_SIZE`],
-//! * with [`ERROR_CODE_DECODE_FAILED`] if the request does not decode. For
+//! * with [`ErrorCode::DecodeFailed`] if the request does not decode. For
 //!   example, a client of a newer protocol version sent a request type that
 //!   the server does not know. A stream that ends before its request is
 //!   complete is also a request that does not decode.
@@ -27,22 +27,20 @@
 //! next request.
 //!
 //! A client that drops a request before it wrote all of it resets the stream
-//! with [`ERROR_CODE_ABORTED`]. For example, it dropped the future of
+//! with [`ErrorCode::Aborted`]. For example, it dropped the future of
 //! [`Client::rpc`] while it wrote a large request. The
 //! server skips a request whose stream was reset. It resets its side of the
 //! stream with code 0, and reads the next request.
 //!
 //! A remote channel receiver also stops its stream with
-//! [`ERROR_CODE_DECODE_FAILED`] if a message does not decode. Its sender then
+//! [`ErrorCode::DecodeFailed`] if a message does not decode. Its sender then
 //! gets an error on the next send.
 //!
 //! # Error codes
 //!
-//! irpc reserves the codes 0 to 15 for streams and connections. Code 0 means
-//! no error, for example a normal close. irpc also uses
-//! [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`], [`ERROR_CODE_ENCODE_FAILED`],
-//! [`ERROR_CODE_DECODE_FAILED`], and [`ERROR_CODE_ABORTED`], and can add more
-//! codes in this range in a later version.
+//! irpc closes connections, and stops and resets streams, with the codes of
+//! [`ErrorCode`]. irpc reserves the codes 0 to 15, and can add more codes in
+//! this range in a later version.
 //!
 //! An application should use codes from 16 upward, so that a peer can tell its
 //! codes apart from the codes of irpc. irpc does not check this. A code below
@@ -78,29 +76,73 @@ use crate::{
 /// Default max message size (16 MiB).
 pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 
-/// Error code on streams and connections if a message is larger than [`MAX_MESSAGE_SIZE`].
+/// An error code that irpc uses on streams and connections.
 ///
-/// See [Error codes] for the codes that irpc reserves.
+/// An application should use codes from 16 upward, see [Error codes].
 ///
 /// [Error codes]: self#error-codes
-pub const ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED: u32 = 1;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum ErrorCode {
+    /// No error, for example a normal close or a dropped receiver.
+    Closed = 0,
+    /// A message is larger than [`MAX_MESSAGE_SIZE`].
+    ///
+    /// A server also uses this code for a request that is too large, see
+    /// [Bad requests].
+    ///
+    /// [Bad requests]: self#bad-requests
+    MaxMessageSizeExceeded = 1,
+    /// A message does not encode.
+    EncodeFailed = 2,
+    /// A message does not decode.
+    ///
+    /// A server also uses this code for a request that does not decode, see
+    /// [Bad requests].
+    ///
+    /// [Bad requests]: self#bad-requests
+    DecodeFailed = 3,
+    /// The client dropped the request before it wrote all of it.
+    ///
+    /// The server skips such a request, see [Bad requests].
+    ///
+    /// [Bad requests]: self#bad-requests
+    Aborted = 4,
+}
 
-/// Error code on streams if the sender could not encode a message.
-pub const ERROR_CODE_ENCODE_FAILED: u32 = 2;
+impl ErrorCode {
+    /// Every error code, for [`Self::from_code`].
+    const ALL: [Self; 5] = [
+        Self::Closed,
+        Self::MaxMessageSizeExceeded,
+        Self::EncodeFailed,
+        Self::DecodeFailed,
+        Self::Aborted,
+    ];
 
-/// Error code on streams and connections if the receiver could not decode a message.
-///
-/// A server stops and resets the streams of a request that does not decode,
-/// and by default closes the connection with this code. A remote channel
-/// receiver stops its stream if a message does not decode.
-pub const ERROR_CODE_DECODE_FAILED: u32 = 3;
+    /// Returns the number of this error code.
+    pub const fn to_code(self) -> u32 {
+        self as u32
+    }
 
-/// Error code on a request stream if the client drops the request before it is written.
-///
-/// The server skips such a request, see [Bad requests].
-///
-/// [Bad requests]: self#bad-requests
-pub const ERROR_CODE_ABORTED: u32 = 4;
+    /// Returns the error code for `code`, or `None` if irpc does not use `code`.
+    pub fn from_code(code: u32) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.to_code() == code)
+    }
+
+    fn from_varint(code: VarInt) -> Option<Self> {
+        u32::try_from(code.into_inner())
+            .ok()
+            .and_then(Self::from_code)
+    }
+}
+
+impl From<ErrorCode> for VarInt {
+    fn from(code: ErrorCode) -> Self {
+        VarInt::from_u32(code.to_code())
+    }
+}
 
 /// Error when reading a request with [`read_request`].
 ///
@@ -144,11 +186,11 @@ pub enum ReadRequestError {
 
 impl ReadRequestError {
     /// Returns the irpc error code for a bad request, or `None` for a connection error.
-    fn error_code(&self) -> Option<u32> {
+    fn error_code(&self) -> Option<ErrorCode> {
         match self {
-            Self::MaxMessageSizeExceeded { .. } => Some(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED),
+            Self::MaxMessageSizeExceeded { .. } => Some(ErrorCode::MaxMessageSizeExceeded),
             Self::InvalidRequest { .. } | Self::DecodeFailed { .. } => {
-                Some(ERROR_CODE_DECODE_FAILED)
+                Some(ErrorCode::DecodeFailed)
             }
             Self::Connection { .. } => None,
         }
@@ -213,14 +255,14 @@ impl From<WriteError> for io::Error {
 
 impl From<noq::WriteError> for SendError {
     fn from(err: noq::WriteError) -> Self {
-        match err {
-            noq::WriteError::Stopped(code)
-                if code == ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into() =>
-            {
-                e!(SendError::MaxMessageSizeExceeded)
-            }
+        let code = match &err {
+            noq::WriteError::Stopped(code) => ErrorCode::from_varint(*code),
+            _ => None,
+        };
+        match code {
+            Some(ErrorCode::MaxMessageSizeExceeded) => e!(SendError::MaxMessageSizeExceeded),
             // A receiver that is dropped stops the stream with code 0.
-            noq::WriteError::Stopped(code) if code == 0u32.into() => e!(SendError::ReceiverClosed),
+            Some(ErrorCode::Closed) => e!(SendError::ReceiverClosed),
             _ => e!(SendError::Io, io::Error::from(err)),
         }
     }
@@ -251,11 +293,11 @@ pub trait RemoteConnection: Send + Sync + Debug + 'static {
 /// A connection to a remote service that can be used to send the initial message.
 ///
 /// If it drops before the message is written, it resets the stream with
-/// [`ERROR_CODE_ABORTED`].
+/// [`ErrorCode::Aborted`].
 #[derive(Debug)]
 pub struct RemoteSender<S>(ResetOnDrop, noq::RecvStream, std::marker::PhantomData<S>);
 
-/// A send stream that resets with [`ERROR_CODE_ABORTED`] if it drops before [`Self::into_inner`].
+/// A send stream that resets with [`ErrorCode::Aborted`] if it drops before [`Self::into_inner`].
 #[derive(Debug)]
 struct ResetOnDrop(Option<noq::SendStream>);
 
@@ -272,7 +314,7 @@ impl ResetOnDrop {
 impl Drop for ResetOnDrop {
     fn drop(&mut self) {
         if let Some(send) = &mut self.0 {
-            send.reset(ERROR_CODE_ABORTED.into()).ok();
+            send.reset(ErrorCode::Aborted.into()).ok();
         }
     }
 }
@@ -338,7 +380,7 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
                 return Err(e!(oneshot::RecvError::SenderClosed));
             };
             if size > MAX_MESSAGE_SIZE {
-                read.stop(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
+                read.stop(ErrorCode::MaxMessageSizeExceeded.into()).ok();
                 return Err(e!(oneshot::RecvError::MaxMessageSizeExceeded));
             }
             let rest = read
@@ -346,7 +388,7 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             let msg: T = postcard::from_bytes(&rest).map_err(|e| {
-                read.stop(ERROR_CODE_DECODE_FAILED.into()).ok();
+                read.stop(ErrorCode::DecodeFailed.into()).ok();
                 io::Error::new(io::ErrorKind::InvalidData, e)
             })?;
             Ok(msg)
@@ -385,7 +427,7 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
                 let size = match postcard::experimental::serialized_size(&value) {
                     Ok(size) => size,
                     Err(e) => {
-                        writer.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
+                        writer.reset(ErrorCode::EncodeFailed.into()).ok();
                         return Err(e!(
                             SendError::Io,
                             io::Error::new(io::ErrorKind::InvalidData, e,)
@@ -393,15 +435,13 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
                     }
                 };
                 if size as u64 > MAX_MESSAGE_SIZE {
-                    writer
-                        .reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into())
-                        .ok();
+                    writer.reset(ErrorCode::MaxMessageSizeExceeded.into()).ok();
                     return Err(e!(SendError::MaxMessageSizeExceeded));
                 }
                 // write via a small buffer to avoid allocation for small values
                 let mut buf = SmallVec::<[u8; 128]>::new();
                 if let Err(e) = buf.write_length_prefixed(value) {
-                    writer.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
+                    writer.reset(ErrorCode::EncodeFailed.into()).ok();
                     return Err(e.into());
                 }
                 writer.write_all(&buf).await?;
@@ -445,7 +485,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
             };
             if size > MAX_MESSAGE_SIZE {
                 self.recv
-                    .stop(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into())
+                    .stop(ErrorCode::MaxMessageSizeExceeded.into())
                     .ok();
                 return Err(e!(mpsc::RecvError::MaxMessageSizeExceeded));
             }
@@ -454,7 +494,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
             let msg: T = postcard::from_bytes(&buf).map_err(|e| {
-                read.stop(ERROR_CODE_DECODE_FAILED.into()).ok();
+                read.stop(ErrorCode::DecodeFailed.into()).ok();
                 io::Error::new(io::ErrorKind::InvalidData, e)
             })?;
             Ok(Some(msg))
@@ -481,7 +521,7 @@ impl<T: RpcMessage> NoqSenderInner<T> {
         let size = match postcard::experimental::serialized_size(&value) {
             Ok(size) => size,
             Err(e) => {
-                self.send.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
+                self.send.reset(ErrorCode::EncodeFailed.into()).ok();
                 return Err(e!(
                     SendError::Io,
                     io::Error::new(io::ErrorKind::InvalidData, e)
@@ -490,13 +530,13 @@ impl<T: RpcMessage> NoqSenderInner<T> {
         };
         if size as u64 > MAX_MESSAGE_SIZE {
             self.send
-                .reset(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into())
+                .reset(ErrorCode::MaxMessageSizeExceeded.into())
                 .ok();
             return Err(e!(SendError::MaxMessageSizeExceeded));
         }
         self.buffer.clear();
         if let Err(e) = self.buffer.write_length_prefixed(value) {
-            self.send.reset(ERROR_CODE_ENCODE_FAILED.into()).ok();
+            self.send.reset(ErrorCode::EncodeFailed.into()).ok();
             return Err(e.into());
         }
         Ok(())
@@ -688,7 +728,7 @@ impl HandlerError {
     /// closes a connection with code 0 for a normal close, which
     /// [`Handler::from_sender`] also uses when its receiver is gone. For a bad
     /// request, irpc closes the connection with
-    /// [`ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED`] or [`ERROR_CODE_DECODE_FAILED`].
+    /// [`ErrorCode::MaxMessageSizeExceeded`] or [`ErrorCode::DecodeFailed`].
     ///
     /// # Examples
     ///
@@ -889,7 +929,7 @@ impl<S: RemoteService> Handler<S> {
                 local_sender.send_raw(msg).await.map_err(|err| {
                     // The receiver is gone. Close as a dropped connection does.
                     warn!("handler stopped: {err:#}");
-                    HandlerError::close_connection(0, b"")
+                    HandlerError::close_connection(ErrorCode::Closed.to_code(), b"")
                 })
             }
         })
@@ -1008,7 +1048,7 @@ async fn read_request_inner<S: Service>(
         let (mut send, mut recv) = match connection.accept_bi().await {
             Ok(streams) => streams,
             Err(ConnectionError::ApplicationClosed(cause))
-                if cause.error_code.into_inner() == 0 =>
+                if ErrorCode::from_varint(cause.error_code) == Some(ErrorCode::Closed) =>
             {
                 trace!("remote side closed connection {cause:?}");
                 return Ok(None);
@@ -1024,7 +1064,7 @@ async fn read_request_inner<S: Service>(
             ReadFrame::Reset => {
                 debug!("skipped request: the client reset its stream");
                 // A drop finishes the stream, which looks like an empty response.
-                send.reset(0u32.into()).ok();
+                send.reset(ErrorCode::Closed.into()).ok();
                 continue;
             }
             // The next `accept_bi` returns why.
@@ -1058,7 +1098,7 @@ impl<S> ReadFrame<S> {
     /// Returns the frame for a stream that failed before the request was complete.
     fn from_read_err(err: &noq::ReadError) -> Self {
         match err {
-            // Any reset, not only `ERROR_CODE_ABORTED`: the update sender of a
+            // Any reset, not only `ErrorCode::Aborted`: the update sender of a
             // request resets the stream if an update does not encode. noq drops
             // unread data on a reset, so this reset can arrive before the request.
             noq::ReadError::Reset(_) => Self::Reset,
@@ -1110,5 +1150,18 @@ async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame
     match decoded {
         Ok((carrier, msg)) => ReadFrame::Request(carrier, msg),
         Err(err) => ReadFrame::DecodeFailed(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_code_round_trips() {
+        for code in ErrorCode::ALL {
+            assert_eq!(ErrorCode::from_code(code.to_code()), Some(code));
+        }
+        assert_eq!(ErrorCode::from_code(16), None);
     }
 }

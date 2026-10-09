@@ -12,7 +12,7 @@ use irpc::{
         mpsc::{self, Receiver, RecvError},
         oneshot,
     },
-    rpc::{ERROR_CODE_DECODE_FAILED, Handler},
+    rpc::{ErrorCode, Handler},
     rpc_requests,
     util::AsyncWriteVarintExt,
 };
@@ -421,7 +421,7 @@ async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     // an odd number does not decode as `NoSer`
     send.write_length_prefixed(1u64).await?;
     let code = timeout(Duration::from_secs(5), send.stopped()).await??;
-    assert_eq!(code, Some(ERROR_CODE_DECODE_FAILED.into()));
+    assert_eq!(code, Some(ErrorCode::DecodeFailed.into()));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
