@@ -529,14 +529,27 @@ impl<T: RpcMessage> NoqSenderInner<T> {
 
 enum NoqSenderState<T> {
     Open(NoqSenderInner<T>),
-    Closed { receiver_closed: bool },
+    Closed(CloseReason),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CloseReason {
+    ReceiverClosed,
+    Other,
+}
+
+impl CloseReason {
+    fn error(self) -> SendError {
+        match self {
+            Self::ReceiverClosed => e!(SendError::ReceiverClosed),
+            Self::Other => io::Error::from(io::ErrorKind::BrokenPipe).into(),
+        }
+    }
 }
 
 impl<T> Default for NoqSenderState<T> {
     fn default() -> Self {
-        Self::Closed {
-            receiver_closed: false,
-        }
+        Self::Closed(CloseReason::Other)
     }
 }
 
@@ -545,9 +558,8 @@ impl<T> NoqSenderState<T> {
     fn after_send<R>(sender: NoqSenderInner<T>, res: &Result<R, SendError>) -> Self {
         match res {
             Ok(_) => Self::Open(sender),
-            Err(err) => Self::Closed {
-                receiver_closed: matches!(err, SendError::ReceiverClosed { .. }),
-            },
+            Err(SendError::ReceiverClosed { .. }) => Self::Closed(CloseReason::ReceiverClosed),
+            Err(_) => Self::Closed(CloseReason::Other),
         }
     }
 }
@@ -571,13 +583,9 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
                     *guard = NoqSenderState::after_send(sender, &res);
                     res
                 }
-                NoqSenderState::Closed { receiver_closed } => {
-                    *guard = NoqSenderState::Closed { receiver_closed };
-                    if receiver_closed {
-                        Err(e!(SendError::ReceiverClosed))
-                    } else {
-                        Err(io::Error::from(io::ErrorKind::BrokenPipe).into())
-                    }
+                NoqSenderState::Closed(reason) => {
+                    *guard = NoqSenderState::Closed(reason);
+                    Err(reason.error())
                 }
             }
         })
@@ -596,13 +604,9 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
                     *guard = NoqSenderState::after_send(sender, &res);
                     res
                 }
-                NoqSenderState::Closed { receiver_closed } => {
-                    *guard = NoqSenderState::Closed { receiver_closed };
-                    if receiver_closed {
-                        Err(e!(SendError::ReceiverClosed))
-                    } else {
-                        Err(io::Error::from(io::ErrorKind::BrokenPipe).into())
-                    }
+                NoqSenderState::Closed(reason) => {
+                    *guard = NoqSenderState::Closed(reason);
+                    Err(reason.error())
                 }
             }
         })
@@ -613,7 +617,7 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
             let mut guard = self.0.lock().await;
             match guard.deref_mut() {
                 NoqSenderState::Open(sender) => sender.closed().await,
-                NoqSenderState::Closed { .. } => {}
+                NoqSenderState::Closed(_) => {}
             }
         })
     }
