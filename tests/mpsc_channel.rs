@@ -288,13 +288,16 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
     let Err(cause) = send.send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxMessageSizeExceeded { .. }));
+    assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
+    // later sends get a broken pipe, also for a message that is small enough
+    assert!(matches!(
+        send.send(vec![0u8; 1]).await,
+        Err(SendError::Io { source, .. }) if source.kind() == io::ErrorKind::BrokenPipe
+    ));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(
-        matches!(cause, mpsc::RecvError::Io { source, .. } if source.kind() == ErrorKind::ConnectionReset)
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
     Ok(())
 }
 
@@ -309,13 +312,11 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
     let Err(cause) = send.try_send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxMessageSizeExceeded { .. }));
+    assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(
-        matches!(cause, mpsc::RecvError::Io { source, .. } if source.kind() == ErrorKind::ConnectionReset)
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
     Ok(())
 }
 
@@ -335,10 +336,7 @@ async fn mpsc_max_message_size_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(matches!(
-        cause,
-        mpsc::RecvError::MaxMessageSizeExceeded { .. }
-    ));
+    assert!(matches!(cause, mpsc::RecvError::MaxSizeExceeded { .. }));
     Ok(())
 }
 
@@ -372,15 +370,11 @@ async fn mpsc_serialize_error_send() -> TestResult<()> {
     let Err(cause) = send.send(NoSer(1)).await else {
         panic!("client should have failed due to serialization error");
     };
-    assert!(
-        matches!(cause, SendError::Io { source, .. } if source.kind() == ErrorKind::InvalidData)
-    );
+    assert!(matches!(cause, SendError::EncodeFailed { .. }), "{cause:?}");
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert!(
-        matches!(cause, mpsc::RecvError::Io { source, .. } if source.kind() == ErrorKind::ConnectionReset)
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
     Ok(())
 }
 
@@ -398,30 +392,74 @@ async fn mpsc_serialize_error_recv() -> TestResult<()> {
         panic!("server should have failed due to serialization error");
     };
     assert!(
-        matches!(cause, mpsc::RecvError::Io { source, .. } if source.kind() == ErrorKind::InvalidData)
+        matches!(cause, mpsc::RecvError::DecodeFailed { .. }),
+        "{cause:?}"
     );
     Ok(())
 }
 
-/// Checks that a receiver stops the stream with code 3 if a message does not decode.
+/// Receives a message that does not decode, and keeps the connection until the client closes it.
+async fn noser_receiver_kept(server: Endpoint) -> TestResult<()> {
+    let conn = server.accept().await.unwrap().await?;
+    let (_, recv) = conn.accept_bi().await?;
+    let mut recv = Receiver::<NoSer>::from(recv);
+    assert!(recv.recv().await.is_err());
+    // keep the connection, so that the stop reaches the client
+    conn.closed().await;
+    Ok(())
+}
+
+/// Checks that a sender gets `MessageDecodeFailed` from the remote receiver if it cannot decode a message.
+#[tokio::test]
+async fn mpsc_decode_error_reaches_sender() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(noser_receiver_kept(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    // An odd number encodes as `u64`, but does not decode as `NoSer`.
+    let send = mpsc::Sender::<u64>::from(send);
+    let clone = send.clone();
+    let err = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Err(err) = send.send(1).await {
+                break err;
+            }
+        }
+    })
+    .await?;
+    assert_eq!(err.remote_code(), Some(ErrorCode::MessageDecodeFailed));
+    // later sends, also on a clone that did not see the stop
+    assert_eq!(
+        send.send(2)
+            .await
+            .expect_err("the sender is closed")
+            .remote_code(),
+        Some(ErrorCode::MessageDecodeFailed)
+    );
+    assert_eq!(
+        clone
+            .try_send(2)
+            .await
+            .expect_err("the sender is closed")
+            .remote_code(),
+        Some(ErrorCode::MessageDecodeFailed)
+    );
+    conn.close(0u32.into(), b"");
+    server.await??;
+    Ok(())
+}
+
+/// Checks that a receiver stops the stream with `MessageDecodeFailed` if a message does not decode.
 #[tokio::test]
 async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
-    let server = tokio::spawn(async move {
-        let conn = server.accept().await.unwrap().await?;
-        let (_, recv) = conn.accept_bi().await?;
-        let mut recv = Receiver::<NoSer>::from(recv);
-        assert!(recv.recv().await.is_err());
-        // keep the connection, so that the stop reaches the client
-        conn.closed().await;
-        TestResult::Ok(())
-    });
+    let server = tokio::spawn(noser_receiver_kept(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (mut send, _) = conn.open_bi().await?;
     // an odd number does not decode as `NoSer`
     send.write_length_prefixed(1u64).await?;
     let code = timeout(Duration::from_secs(5), send.stopped()).await??;
-    assert_eq!(code, Some(ErrorCode::DecodeFailed.into()));
+    assert_eq!(code, Some(ErrorCode::MessageDecodeFailed.into()));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())

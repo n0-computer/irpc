@@ -769,9 +769,9 @@ impl<S: Service> Client<S> {
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
+                Request::Remote(mut request) => {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
-                    let buf = rpc::prepare_write::<S>(msg)?;
+                    let buf = request.prepare(msg)?;
                     let (_tx, _rx) = request.write_raw(&buf).await?;
                     if this.0.zero_rtt_rejected().await {
                         // 0rtt was not accepted, the data is lost, send it again!
@@ -808,9 +808,9 @@ impl<S: Service> Client<S> {
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
+                Request::Remote(mut request) => {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
-                    let buf = rpc::prepare_write::<S>(msg)?;
+                    let buf = request.prepare(msg)?;
                     let (_tx, rx) = request.write_raw(&buf).await?;
                     if this.0.zero_rtt_rejected().await {
                         // 0rtt was not accepted, the data is lost, send it again!
@@ -856,9 +856,9 @@ impl<S: Service> Client<S> {
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
-                Request::Remote(request) => {
+                Request::Remote(mut request) => {
                     // see https://www.iroh.computer/blog/0rtt-api#connect-side
-                    let buf = rpc::prepare_write::<S>(msg)?;
+                    let buf = request.prepare(msg)?;
                     let (_tx, rx) = request.write_raw(&buf).await?;
                     if this.0.zero_rtt_rejected().await {
                         // 0rtt was not accepted, the data is lost, send it again!
@@ -955,7 +955,7 @@ pub enum Error {
     #[error("Oneshot recv error")]
     OneshotRecv { source: channel::oneshot::RecvError },
     #[cfg(feature = "rpc")]
-    #[error("Recv error")]
+    #[error("Write error")]
     Write { source: rpc::WriteError },
 }
 
