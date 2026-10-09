@@ -32,6 +32,27 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
     Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
 }
 
+/// Checks that a receiver gets `SenderClosed` if the remote sender is dropped without sending, as for a local one.
+#[tokio::test]
+async fn oneshot_sender_dropped() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let res = oneshot::Receiver::<Vec<u8>>::from(recv).await;
+        TestResult::Ok(res)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    drop(oneshot::Sender::<Vec<u8>>::from(send));
+    let res = server.await??;
+    assert!(
+        matches!(res, Err(RecvError::SenderClosed { .. })),
+        "expected SenderClosed, got {res:?}"
+    );
+    Ok(())
+}
+
 /// Checks that the max message size is enforced on the sender side and that errors are propagated to the receiver side.
 #[tokio::test]
 async fn oneshot_max_message_size_send() -> TestResult<()> {

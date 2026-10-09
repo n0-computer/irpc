@@ -325,10 +325,10 @@ impl<S: Service> RemoteSender<S> {
 impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
     fn from(mut read: noq::RecvStream) -> Self {
         let fut = async move {
-            let size = read.read_varint_u64().await?.ok_or(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "failed to read size",
-            ))?;
+            // A sender that is dropped without sending finishes the stream.
+            let Some(size) = read.read_varint_u64().await? else {
+                return Err(e!(oneshot::RecvError::SenderClosed));
+            };
             if size > MAX_MESSAGE_SIZE {
                 read.stop(ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()).ok();
                 return Err(e!(oneshot::RecvError::MaxMessageSizeExceeded));
