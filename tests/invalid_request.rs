@@ -6,10 +6,7 @@ use std::{pin::pin, time::Duration};
 use irpc::{
     Client, WithChannels,
     noq::listen,
-    rpc::{
-        ERROR_CODE_DECODE_FAILED, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, Handler, MAX_MESSAGE_SIZE,
-        ReadRequestError, read_request,
-    },
+    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, read_request},
 };
 use n0_future::{future::poll_once, task::AbortOnDropHandle};
 use noq::ConnectionError;
@@ -90,7 +87,7 @@ async fn bad_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ERROR_CODE_DECODE_FAILED.into());
+    assert_eq!(close.error_code, ErrorCode::DecodeFailed.into());
     Ok(())
 }
 
@@ -107,10 +104,7 @@ async fn too_large_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(
-        close.error_code,
-        ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()
-    );
+    assert_eq!(close.error_code, ErrorCode::MaxMessageSizeExceeded.into());
     Ok(())
 }
 
@@ -139,7 +133,7 @@ async fn dropped_rpc_keeps_connection() -> TestResult<()> {
     let client = Client::<client::EchoProtocol>::boxed(conn);
 
     // The request is larger than the flow control window, so one poll cannot
-    // write all of it. The drop then resets the stream with `ERROR_CODE_ABORTED`.
+    // write all of it. The drop then resets the stream with `ErrorCode::Aborted`.
     let mut rpc = Box::pin(client.rpc(client::Echo("a".repeat(8 * 1024 * 1024))));
     assert!(poll_once(&mut rpc).await.is_none(), "the write is not done");
     drop(rpc);
@@ -160,7 +154,7 @@ async fn truncated_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ERROR_CODE_DECODE_FAILED.into());
+    assert_eq!(close.error_code, ErrorCode::DecodeFailed.into());
     Ok(())
 }
 
@@ -189,7 +183,7 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     let (tx, _rx) = client
         .client_streaming(client::Upload("a".into()), 1)
         .await?;
-    // The update does not encode, so the sender resets with `ERROR_CODE_ENCODE_FAILED`.
+    // The update does not encode, so the sender resets with `ErrorCode::EncodeFailed`.
     tx.send(NoSer(1))
         .await
         .expect_err("odd numbers do not encode");
