@@ -949,6 +949,7 @@ impl<M> ClientInner<M> {
 /// Error when opening a request. When cross-process rpc is disabled, this is
 /// an empty enum since local requests can not fail.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum RequestError {
     /// Error in noq during connect
     #[cfg(feature = "rpc")]
@@ -976,6 +977,7 @@ pub enum RequestError {
 
 /// Error type that subsumes all possible errors in this crate, for convenience.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Request error")]
     Request { source: RequestError },

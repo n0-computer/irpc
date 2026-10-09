@@ -6,14 +6,19 @@ use std::{
 };
 
 use irpc::{
+    Client, WithChannels,
     channel::{
         SendError,
         mpsc::{self, Receiver, RecvError},
+        oneshot,
     },
+    rpc::{ERROR_CODE_DECODE_FAILED, Handler},
+    rpc_requests,
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
 use noq::Endpoint;
+use serde::{Deserialize, Serialize};
 use testresult::TestResult;
 use tokio::time::timeout;
 
@@ -119,6 +124,140 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that a sender gets `ReceiverClosed` if the remote receiver is dropped, as for a local one.
+#[tokio::test]
+async fn mpsc_receiver_dropped() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        drop(Receiver::<Vec<u8>>::from(recv));
+        // keep the connection, so that the stop reaches the client
+        conn.closed().await;
+        TestResult::Ok(())
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    let res = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Err(err) = send.send(vec![1, 2, 3]).await {
+                break err;
+            }
+        }
+    })
+    .await?;
+    assert!(
+        matches!(res, SendError::ReceiverClosed { .. }),
+        "expected ReceiverClosed, got {res:?}"
+    );
+    conn.close(0u32.into(), b"");
+    server.await??;
+    Ok(())
+}
+
+/// Checks that after the remote receiver is dropped, every send on every clone
+/// of a `Sender` gets `ReceiverClosed`, also on clones that did not see the stop.
+#[tokio::test]
+async fn mpsc_receiver_dropped_clones() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        drop(Receiver::<Vec<u8>>::from(recv));
+        // keep the connection, so that the stop reaches the client
+        conn.closed().await;
+        TestResult::Ok(())
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send1 = mpsc::Sender::<Vec<u8>>::from(send);
+    let send2 = send1.clone();
+    // send on the first clone until the stop arrives
+    let err = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Err(err) = send1.send(vec![1, 2, 3]).await {
+                break err;
+            }
+        }
+    })
+    .await?;
+    assert!(
+        matches!(err, SendError::ReceiverClosed { .. }),
+        "expected ReceiverClosed, got {err:?}"
+    );
+    // later sends on the same clone, and sends on a clone that never saw the stop
+    assert!(matches!(
+        send1.send(vec![1]).await,
+        Err(SendError::ReceiverClosed { .. })
+    ));
+    assert!(matches!(
+        send2.send(vec![1]).await,
+        Err(SendError::ReceiverClosed { .. })
+    ));
+    assert!(matches!(
+        send2.try_send(vec![1]).await,
+        Err(SendError::ReceiverClosed { .. })
+    ));
+    conn.close(0u32.into(), b"");
+    server.await??;
+    Ok(())
+}
+
+/// Check that `ReceiverClosed` works well with the `Handler` as well.
+#[tokio::test]
+async fn mpsc_receiver_dropped_proto() -> TestResult<()> {
+    #[rpc_requests(message = ProtoMessage)]
+    #[derive(Debug, Serialize, Deserialize)]
+    enum Proto {
+        #[rpc(tx = oneshot::Sender<()>, rx = mpsc::Receiver<u32>)]
+        #[wrap(ClientStream)]
+        ClientStream(()),
+    }
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        Handler::<Proto>::sequential(|msg| async move {
+            match msg {
+                ProtoMessage::ClientStream(msg) => {
+                    let WithChannels { tx, mut rx, .. } = msg;
+                    tx.send(()).await.unwrap();
+                    let n = rx.recv().await.unwrap().unwrap();
+                    assert_eq!(n, 1);
+                    drop(rx);
+                }
+            }
+            Ok(())
+        })
+        .handle_connection(&conn)
+        .await
+        .unwrap();
+    });
+    let client = Client::<Proto>::noq(client, server_addr);
+    let (tx, rx) = client.client_streaming(ClientStream(()), 4).await.unwrap();
+    assert!(matches!(rx.await.unwrap(), ()));
+
+    // First send works.
+    let res = tx.send(1).await;
+    assert!(matches!(res, Ok(())));
+
+    // As soon as the Stopped frame arrives, our sends fail.
+    n0_future::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let res = tx.send(2).await;
+            if matches!(res, Err(SendError::ReceiverClosed { .. })) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    drop(client);
+    server.await.unwrap();
+    Ok(())
+}
+
 async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
     let conn = server
         .accept()
@@ -147,6 +286,27 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
     send.send(vec![0u8; 1024 * 1024]).await?;
     // this one should fail!
     let Err(cause) = send.send(vec![0u8; 1024 * 1024 * 32]).await else {
+        panic!("client should have failed due to max message size");
+    };
+    assert!(matches!(cause, SendError::MaxMessageSizeExceeded { .. }));
+    let Err(cause) = server.await? else {
+        panic!("server should have failed due to max message size");
+    };
+    assert!(
+        matches!(cause, mpsc::RecvError::Io { source, .. } if source.kind() == ErrorKind::ConnectionReset)
+    );
+    Ok(())
+}
+
+/// Checks that `try_send` resets the stream for a message that is too large, as `send` does.
+#[tokio::test]
+async fn mpsc_max_message_size_try_send() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    let Err(cause) = send.try_send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
     assert!(matches!(cause, SendError::MaxMessageSizeExceeded { .. }));
@@ -240,5 +400,29 @@ async fn mpsc_serialize_error_recv() -> TestResult<()> {
     assert!(
         matches!(cause, mpsc::RecvError::Io { source, .. } if source.kind() == ErrorKind::InvalidData)
     );
+    Ok(())
+}
+
+/// Checks that a receiver stops the stream with code 3 if a message does not decode.
+#[tokio::test]
+async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let mut recv = Receiver::<NoSer>::from(recv);
+        assert!(recv.recv().await.is_err());
+        // keep the connection, so that the stop reaches the client
+        conn.closed().await;
+        TestResult::Ok(())
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // an odd number does not decode as `NoSer`
+    send.write_length_prefixed(1u64).await?;
+    let code = timeout(Duration::from_secs(5), send.stopped()).await??;
+    assert_eq!(code, Some(ERROR_CODE_DECODE_FAILED.into()));
+    conn.close(0u32.into(), b"");
+    server.await??;
     Ok(())
 }

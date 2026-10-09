@@ -14,9 +14,13 @@ pub mod oneshot;
 /// For rpc communication, there can be any number of errors, so this is a
 /// generic io error.
 #[stack_error(derive, add_meta, from_sources)]
+#[non_exhaustive]
 pub enum SendError {
-    /// The receiver has been closed. This is the only error that can occur
-    /// for local communication.
+    /// The receiver has been closed.
+    ///
+    /// This is the only error that can occur for local communication. For
+    /// remote communication, this means that the receiver stopped the stream
+    /// with code 0, for example because it was dropped.
     #[error("Receiver closed")]
     ReceiverClosed,
     /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
