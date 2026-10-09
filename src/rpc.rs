@@ -550,13 +550,15 @@ impl CloseReason {
     }
 }
 
-impl<T> Default for NoqSenderState<T> {
-    fn default() -> Self {
-        Self::Closed(CloseReason::Other)
-    }
-}
-
 impl<T> NoqSenderState<T> {
+    /// Takes the state for a send, and leaves the sender closed until the send puts it back.
+    ///
+    /// A cancelled send never puts it back, so the sender stays closed: the
+    /// stream can hold part of a message.
+    fn take_for_send(&mut self) -> Self {
+        std::mem::replace(self, Self::Closed(CloseReason::Other))
+    }
+
     /// Returns the state after a send, so that later sends fail with the same kind of error.
     fn after_send<R>(sender: NoqSenderInner<T>, res: &Result<R, SendError>) -> Self {
         match res {
@@ -579,7 +581,7 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>> {
         Box::pin(async {
             let mut guard = self.0.lock().await;
-            let sender = std::mem::take(guard.deref_mut());
+            let sender = guard.take_for_send();
             match sender {
                 NoqSenderState::Open(mut sender) => {
                     let res = sender.send(value).await;
@@ -600,7 +602,7 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
     ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + '_>> {
         Box::pin(async {
             let mut guard = self.0.lock().await;
-            let sender = std::mem::take(guard.deref_mut());
+            let sender = guard.take_for_send();
             match sender {
                 NoqSenderState::Open(mut sender) => {
                     let res = sender.try_send(value).await;
