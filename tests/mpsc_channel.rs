@@ -6,15 +6,19 @@ use std::{
 };
 
 use irpc::{
+    Client, WithChannels,
     channel::{
         SendError,
         mpsc::{self, Receiver, RecvError},
+        oneshot,
     },
-    rpc::ERROR_CODE_DECODE_FAILED,
+    rpc::{ERROR_CODE_DECODE_FAILED, Handler},
+    rpc_requests,
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
 use noq::Endpoint;
+use serde::{Deserialize, Serialize};
 use testresult::TestResult;
 use tokio::time::timeout;
 
@@ -149,6 +153,60 @@ async fn mpsc_receiver_dropped() -> TestResult<()> {
     );
     conn.close(0u32.into(), b"");
     server.await??;
+    Ok(())
+}
+
+/// Check that `ReceiverClosed` works well with the `Handler` as well.
+#[tokio::test]
+async fn mpsc_receiver_dropped_proto() -> TestResult<()> {
+    #[rpc_requests(message = ProtoMessage)]
+    #[derive(Debug, Serialize, Deserialize)]
+    enum Proto {
+        #[rpc(tx = oneshot::Sender<()>, rx = mpsc::Receiver<u32>)]
+        #[wrap(ClientStream)]
+        ClientStream(()),
+    }
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        Handler::<Proto>::sequential(|msg| async move {
+            match msg {
+                ProtoMessage::ClientStream(msg) => {
+                    let WithChannels { tx, mut rx, .. } = msg;
+                    tx.send(()).await.unwrap();
+                    let n = rx.recv().await.unwrap().unwrap();
+                    assert_eq!(n, 1);
+                    drop(rx);
+                }
+            }
+            Ok(())
+        })
+        .handle_connection(&conn)
+        .await
+        .unwrap();
+    });
+    let client = Client::<Proto>::noq(client, server_addr);
+    let (tx, rx) = client.client_streaming(ClientStream(()), 4).await.unwrap();
+    assert!(matches!(rx.await.unwrap(), ()));
+
+    // First send works.
+    let res = tx.send(1).await;
+    assert!(matches!(res, Ok(())));
+
+    // As soon as the Stopped frame arrives, our sends fail.
+    n0_future::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let res = tx.send(2).await;
+            if matches!(res, Err(SendError::ReceiverClosed { .. })) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    drop(client);
+    server.await.unwrap();
     Ok(())
 }
 
