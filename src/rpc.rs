@@ -78,7 +78,7 @@ use std::{
 use n0_error::{e, stack_error};
 use n0_future::future::Boxed as BoxFuture;
 use noq::{ConnectionError, VarInt};
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use smallvec::SmallVec;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, trace, warn};
@@ -470,25 +470,66 @@ impl Drop for ResetOnDrop {
 /// When false, the message is serialized directly.
 fn prepare_write<S: Service>(msg: impl Into<S>) -> Result<SmallVec<[u8; 128]>, WriteError> {
     let msg = msg.into();
-    let mut buf = SmallVec::<[u8; 128]>::new();
-
-    if S::SPAN_PROPAGATION {
+    let mut buf = SmallVec::new();
+    let res = if S::SPAN_PROPAGATION {
         // Include span context in wire format
         let span_ctx = Some(crate::span_propagation::SpanContextCarrier::from_current());
-        let payload = (span_ctx, msg);
-        if postcard::experimental::serialized_size(&payload)? as u64 > MAX_MESSAGE_SIZE {
-            return Err(e!(WriteError::MaxSizeExceeded));
-        }
-        buf.write_length_prefixed(&payload)?;
+        encode(&(span_ctx, msg), &mut buf)
     } else {
         // Original wire format without span context
-        if postcard::experimental::serialized_size(&msg)? as u64 > MAX_MESSAGE_SIZE {
-            return Err(e!(WriteError::MaxSizeExceeded));
-        }
-        buf.write_length_prefixed(&msg)?;
-    }
-
+        encode(&msg, &mut buf)
+    };
+    res.map_err(|err| match err {
+        EncodeError::MaxSizeExceeded => e!(WriteError::MaxSizeExceeded),
+        EncodeError::Failed(source) => e!(WriteError::EncodeFailed, source),
+    })?;
     Ok(buf)
+}
+
+/// Why a message did not encode.
+enum EncodeError {
+    /// The message is larger than [`MAX_MESSAGE_SIZE`].
+    MaxSizeExceeded,
+    /// The message does not encode.
+    Failed(postcard::Error),
+}
+
+/// Encodes `value` with its size prefix into `buf`.
+fn encode(value: &impl Serialize, buf: &mut SmallVec<[u8; 128]>) -> Result<(), EncodeError> {
+    let size = postcard::experimental::serialized_size(value).map_err(EncodeError::Failed)? as u64;
+    if size > MAX_MESSAGE_SIZE {
+        return Err(EncodeError::MaxSizeExceeded);
+    }
+    buf.clear();
+    buf.write_varint_u64(size)
+        .expect("a buffer does not fail to write");
+    postcard::to_io(value, buf).map_err(EncodeError::Failed)?;
+    Ok(())
+}
+
+/// Encodes the channel message `value` with its size prefix into `buf`.
+///
+/// Resets `send` if `value` is too large or does not encode, so the receiver
+/// gets an error instead of the end of the stream.
+fn encode_message(
+    value: &impl Serialize,
+    buf: &mut SmallVec<[u8; 128]>,
+    send: &mut noq::SendStream,
+) -> Result<(), SendError> {
+    encode(value, buf).map_err(|err| {
+        let (code, err) = match err {
+            EncodeError::MaxSizeExceeded => (
+                ErrorCode::MessageMaxSizeExceeded,
+                e!(SendError::MaxSizeExceeded),
+            ),
+            EncodeError::Failed(source) => (
+                ErrorCode::MessageEncodeFailed,
+                e!(SendError::EncodeFailed, source),
+            ),
+        };
+        send.reset(code.into()).ok();
+        err
+    })
 }
 
 impl<S: Service> RemoteSender<S> {
@@ -615,23 +656,9 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
     fn from(mut writer: noq::SendStream) -> Self {
         oneshot::Sender::Boxed(Box::new(move |value| {
             Box::pin(async move {
-                let size = match postcard::experimental::serialized_size(&value) {
-                    Ok(size) => size,
-                    Err(e) => {
-                        writer.reset(ErrorCode::MessageEncodeFailed.into()).ok();
-                        return Err(e!(SendError::EncodeFailed, e));
-                    }
-                };
-                if size as u64 > MAX_MESSAGE_SIZE {
-                    writer.reset(ErrorCode::MessageMaxSizeExceeded.into()).ok();
-                    return Err(e!(SendError::MaxSizeExceeded));
-                }
                 // write via a small buffer to avoid allocation for small values
-                let mut buf = SmallVec::<[u8; 128]>::new();
-                if let Err(e) = buf.write_length_prefixed(value) {
-                    writer.reset(ErrorCode::MessageEncodeFailed.into()).ok();
-                    return Err(e.into());
-                }
+                let mut buf = SmallVec::new();
+                encode_message(&value, &mut buf, &mut writer)?;
                 writer.write_all(&buf).await?;
                 Ok(())
             })
@@ -701,38 +728,12 @@ struct NoqSenderInner<T> {
 }
 
 impl<T: RpcMessage> NoqSenderInner<T> {
-    /// Encodes `value` into the buffer.
-    ///
-    /// Resets the stream if `value` is too large or does not encode, so the
-    /// receiver gets an error instead of the end of the stream.
-    fn encode(&mut self, value: T) -> Result<(), SendError> {
-        let size = match postcard::experimental::serialized_size(&value) {
-            Ok(size) => size,
-            Err(e) => {
-                self.send.reset(ErrorCode::MessageEncodeFailed.into()).ok();
-                return Err(e!(SendError::EncodeFailed, e));
-            }
-        };
-        if size as u64 > MAX_MESSAGE_SIZE {
-            self.send
-                .reset(ErrorCode::MessageMaxSizeExceeded.into())
-                .ok();
-            return Err(e!(SendError::MaxSizeExceeded));
-        }
-        self.buffer.clear();
-        if let Err(e) = self.buffer.write_length_prefixed(value) {
-            self.send.reset(ErrorCode::MessageEncodeFailed.into()).ok();
-            return Err(e.into());
-        }
-        Ok(())
-    }
-
     fn send(
         &mut self,
         value: T,
     ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + Sync + '_>> {
-        Box::pin(async {
-            self.encode(value)?;
+        Box::pin(async move {
+            encode_message(&value, &mut self.buffer, &mut self.send)?;
             self.send.write_all(&self.buffer).await?;
             self.buffer.clear();
             Ok(())
@@ -743,9 +744,9 @@ impl<T: RpcMessage> NoqSenderInner<T> {
         &mut self,
         value: T,
     ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + Sync + '_>> {
-        Box::pin(async {
+        Box::pin(async move {
             // todo: move the non-async part out of the box. Will require a new return type.
-            self.encode(value)?;
+            encode_message(&value, &mut self.buffer, &mut self.send)?;
             let Some(n) = now_or_never(self.send.write(&self.buffer)) else {
                 return Ok(false);
             };
