@@ -15,13 +15,11 @@ use crate::util::FusedOneshotReceiver;
 /// the server for a response.
 ///
 /// If the server rejects the request and also closes the connection, the close
-/// can arrive first, and the receiver gets [`Io`] instead of
-/// [`RequestMaxSizeExceeded`] or [`RequestDecodeFailed`].
+/// can arrive first, and the receiver gets [`Io`] instead of [`Remote`].
 ///
 /// [`SenderClosed`]: Self::SenderClosed
 /// [`Io`]: Self::Io
-/// [`RequestMaxSizeExceeded`]: Self::RequestMaxSizeExceeded
-/// [`RequestDecodeFailed`]: Self::RequestDecodeFailed
+/// [`Remote`]: Self::Remote
 #[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub enum RecvError {
@@ -32,43 +30,26 @@ pub enum RecvError {
     /// without sending, for example because it was dropped.
     #[error("Sender closed")]
     SenderClosed,
-    /// The server skipped the request because the client reset its stream, and closed the channel.
+    /// The sender reset the stream with an irpc error code, and the channel is closed.
     ///
-    /// For example, an update did not encode before the server read the
-    /// request, see [Abandoned requests].
+    /// The code says why, see [`ErrorCode`]. For example, the server rejected
+    /// or skipped the request, see [Bad requests] and [Abandoned requests].
     ///
+    /// [`ErrorCode`]: crate::rpc::ErrorCode
+    /// [Bad requests]: crate::rpc#bad-requests
     /// [Abandoned requests]: crate::rpc#abandoned-requests
-    #[error("Server skipped the request: aborted")]
-    RequestAborted,
-    /// The server rejected the request because it is too large, and closed the channel.
-    ///
-    /// See [Bad requests].
-    ///
-    /// [Bad requests]: crate::rpc#bad-requests
-    #[error("Server rejected the request: too large")]
-    RequestMaxSizeExceeded,
-    /// The server rejected the request because it does not decode, and closed the channel.
-    ///
-    /// For example, the server does not know the request type, see
-    /// [Bad requests].
-    ///
-    /// [Bad requests]: crate::rpc#bad-requests
-    #[error("Server rejected the request: does not decode")]
-    RequestDecodeFailed,
-    /// The message is larger than [`MAX_MESSAGE_SIZE`].
-    ///
-    /// This receiver or the sender found it, and the channel is closed.
+    #[cfg(feature = "rpc")]
+    #[error("Sender closed the channel: {code}")]
+    Remote { code: crate::rpc::ErrorCode },
+    /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
     #[error("Message too large")]
-    MessageMaxSizeExceeded,
-    /// The sender could not encode the message, and closed the channel.
-    #[error("Sender could not encode the message")]
-    MessageEncodeFailed,
+    MaxSizeExceeded,
     /// The message does not decode, so this receiver closed the channel.
     #[cfg(feature = "rpc")]
     #[error("Message does not decode")]
-    MessageDecodeFailed {
+    DecodeFailed {
         #[error(std_err)]
         source: postcard::Error,
     },
@@ -87,6 +68,8 @@ impl From<RecvError> for io::Error {
         match e {
             RecvError::Io { source, .. } => source,
             RecvError::SenderClosed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
+            #[cfg(feature = "rpc")]
+            RecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
         }
     }

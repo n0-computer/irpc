@@ -5,7 +5,7 @@ use std::{pin::pin, time::Duration};
 
 use irpc::{
     Client, WithChannels,
-    channel::{SendError, mpsc, oneshot},
+    channel::oneshot,
     noq::listen,
     rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, WriteError, read_request},
 };
@@ -135,7 +135,10 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
         matches!(
             err,
             irpc::Error::OneshotRecv {
-                source: oneshot::RecvError::RequestDecodeFailed { .. },
+                source: oneshot::RecvError::Remote {
+                    code: ErrorCode::RequestDecodeFailed,
+                    ..
+                },
                 ..
             }
         ),
@@ -145,7 +148,7 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
     Ok(())
 }
 
-/// The sender of the updates of a bad request gets `RequestDecodeFailed`, as the receiver of its response does.
+/// The sender of the updates of a bad request gets the code of the rejection, as the receiver of its response does.
 #[tokio::test]
 async fn bad_request_update_sender() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
@@ -158,10 +161,7 @@ async fn bad_request_update_sender() -> TestResult<()> {
         .client_streaming(client::ShoutStream("a".into()), 1)
         .await?;
     let err = rx.await.expect_err("server does not know the request");
-    assert!(
-        matches!(err, oneshot::RecvError::RequestDecodeFailed { .. }),
-        "{err:?}"
-    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     let err = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Err(err) = tx.send(1).await {
@@ -170,10 +170,7 @@ async fn bad_request_update_sender() -> TestResult<()> {
         }
     })
     .await?;
-    assert!(
-        matches!(err, SendError::RequestDecodeFailed { .. }),
-        "{err:?}"
-    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     Ok(())
 }
 
@@ -195,7 +192,7 @@ async fn too_large_rpc_resets_with_reason() -> TestResult<()> {
         matches!(
             err,
             irpc::Error::Write {
-                source: WriteError::RequestMaxSizeExceeded { .. },
+                source: WriteError::MaxSizeExceeded { .. },
                 ..
             }
         ),
@@ -276,10 +273,7 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     // The server skipped the upload and reset its side of the stream.
     let err = rx.await.expect_err("server skips the upload");
-    assert!(
-        matches!(err, oneshot::RecvError::RequestAborted { .. }),
-        "{err:?}"
-    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
@@ -317,10 +311,7 @@ async fn reset_before_read_fails_mpsc_response() -> TestResult<()> {
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     // The server skipped the exchange, so the response fails instead of ending.
     let err = rx.recv().await.expect_err("server skips the exchange");
-    assert!(
-        matches!(err, mpsc::RecvError::RequestAborted { .. }),
-        "{err:?}"
-    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
@@ -340,10 +331,7 @@ async fn read_request_returns_truncated_request() -> TestResult<()> {
     let err = read_request::<server::EchoProtocol>(&server_conn)
         .await
         .expect_err("the request is not complete");
-    assert!(
-        matches!(err, ReadRequestError::RequestMalformed { .. }),
-        "{err:?}"
-    );
+    assert!(matches!(err, ReadRequestError::Malformed { .. }), "{err:?}");
     Ok(())
 }
 
@@ -381,7 +369,7 @@ async fn read_request_returns_bad_request() -> TestResult<()> {
             .await
             .expect_err("server does not know the request");
         assert!(
-            matches!(err, ReadRequestError::RequestDecodeFailed { .. }),
+            matches!(err, ReadRequestError::DecodeFailed { .. }),
             "{err:?}"
         );
         // The connection is still open, so the server reads the next request.

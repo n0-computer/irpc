@@ -7,6 +7,7 @@ use irpc::{
         SendError,
         oneshot::{self, RecvError},
     },
+    rpc::ErrorCode,
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
@@ -65,11 +66,11 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     let Err(cause) = send.send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MessageMaxSizeExceeded { .. }));
+    assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(matches!(cause, RecvError::MessageMaxSizeExceeded { .. }));
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
     Ok(())
 }
 
@@ -87,7 +88,7 @@ async fn oneshot_max_message_size_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(matches!(cause, RecvError::MessageMaxSizeExceeded { .. }));
+    assert!(matches!(cause, RecvError::MaxSizeExceeded { .. }));
     Ok(())
 }
 
@@ -107,7 +108,7 @@ async fn noser_receiver(server: Endpoint) -> Result<(), RecvError> {
     Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
 }
 
-/// Checks that a message that does not encode gives `MessageEncodeFailed` on both sides.
+/// Checks that a message that does not encode gives `MessageEncodeFailed` on both sides, as an error code for the receiver.
 #[tokio::test]
 async fn oneshot_serialize_error_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
@@ -119,17 +120,11 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
     let Err(cause) = send.send(NoSer(1)).await else {
         panic!("client should have failed due to serialization error");
     };
-    assert!(
-        matches!(cause, SendError::MessageEncodeFailed { .. }),
-        "{cause:?}"
-    );
+    assert!(matches!(cause, SendError::EncodeFailed { .. }), "{cause:?}");
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert!(
-        matches!(cause, RecvError::MessageEncodeFailed { .. }),
-        "{cause:?}"
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
     Ok(())
 }
 
@@ -146,9 +141,6 @@ async fn oneshot_serialize_error_recv() -> TestResult<()> {
         panic!("server should have failed due to serialization error");
     };
     println!("Server error: {cause:?}");
-    assert!(
-        matches!(cause, RecvError::MessageDecodeFailed { .. }),
-        "{cause:?}"
-    );
+    assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
     Ok(())
 }
