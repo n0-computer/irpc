@@ -86,8 +86,7 @@ n0-tracing-test = "0.3.0"
 [features]
 # enable the remote transport
 rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:tracing", "dep:derive_more", "tokio/io-util"]
-# propagate span context to the remote with `span_propagation::layer`, a layer of
-# tracing-subscriber 0.3. Not a default feature, irpc-opentelemetry enables it.
+# span propagation layer for tracing-subscriber 0.3
 tracing-subscriber-03 = ["rpc", "dep:tracing-subscriber", "tokio/rt"]
 # enable the iroh transport
 iroh = ["rpc", "dep:iroh", "dep:portable-atomic", "dep:getrandom"]
@@ -204,7 +203,7 @@ allowed_external_types = [
     "futures_core::stream::Stream",
     "futures_lite::future::Boxed",
     "futures_sink::Sink",
-    # `span_propagation::layer` returns a tracing layer, with the `tracing-subscriber-03` feature
+    # `span_propagation::layer`, with `tracing-subscriber-03`
     "tracing_core::subscriber::Subscriber",
     "tracing_subscriber::layer::Layer",
     "tracing_subscriber::registry::LookupSpan",

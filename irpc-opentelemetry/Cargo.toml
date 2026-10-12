@@ -14,13 +14,12 @@ rust-version = "1.91"
 irpc = { version = "0.17.0", path = "..", default-features = false, features = ["tracing-subscriber-03"] }
 opentelemetry = "0.32"
 tracing = { workspace = true }
-tracing-opentelemetry = "0.33"
+tracing-opentelemetry = { version = "0.33", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }
 clap = { version = "4.5.41", features = ["derive"] }
-# Tests and examples need a crypto provider, which iroh's default features supply.
 iroh = { workspace = true, default-features = true }
 irpc = { version = "0.17.0", path = "..", features = ["iroh", "derive", "spans", "noq_endpoint_setup"] }
 n0-error = { workspace = true }
@@ -42,5 +41,5 @@ allowed_external_types = [
 ]
 
 [package.metadata.release]
-# Released on its own: the version follows the opentelemetry releases, not irpc.
+# own version, follows opentelemetry
 shared-version = false

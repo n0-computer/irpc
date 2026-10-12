@@ -4,11 +4,11 @@
 //! [`rpc_requests`](crate::rpc_requests) macro. Each request then carries a
 //! [`SpanContextCarrier`], a map of text headers, in front of the request.
 //!
-//! irpc does not know any tracing backend. A [`Propagator`] writes the context
+//! irpc does not know any tracing backend. A `Propagator` writes the context
 //! of a span into the headers on the client, and sets the parent of a span from
 //! the headers on the server.
 //!
-//! irpc finds the propagator through the tracing subscriber: add the [`layer`]
+//! irpc finds the propagator through the tracing subscriber: add the `layer`
 //! for it to the subscriber. The client asks the subscriber of the current
 //! thread, and the server asks the subscriber of the request span. Without the
 //! layer, irpc does not propagate span context.
@@ -114,13 +114,16 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}
 /// each other's context, and the context moves with `fut` across threads.
 pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F) -> F::Output {
     #[cfg(not(feature = "tracing-subscriber-03"))]
-    let _ = carrier;
-    #[cfg(not(feature = "tracing-subscriber-03"))]
-    return fut.await;
+    {
+        let _ = carrier;
+        fut.await
+    }
     #[cfg(feature = "tracing-subscriber-03")]
-    match carrier {
-        Some(carrier) => SPAN_CONTEXT.scope(carrier, fut).await,
-        None => fut.await,
+    {
+        match carrier {
+            Some(carrier) => SPAN_CONTEXT.scope(carrier, fut).await,
+            None => fut.await,
+        }
     }
 }
 

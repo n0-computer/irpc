@@ -62,18 +62,25 @@
 //!
 //! ## Features
 //!
-//! - `derive`: Enable the [`rpc_requests`] macro.
+//! - `derive`: Enable the [`rpc_requests`] macro. Enabled by default.
 //! - `rpc`: Enable the rpc features. Enabled by default.
 //!   By disabling this feature, all rpc related dependencies are removed.
 //!   The remaining dependencies are just serde, tokio and tokio-util.
 //! - `iroh`: Enable the iroh transport in the [`iroh`] module. Enabled by
 //!   default. This feature enables `rpc`.
-//! - `spans`: Enable tracing spans for messages. Enabled by default.
-//!   This is useful even without rpc, to not lose tracing context when message
-//!   passing. This is frequently done manually. This obviously requires
-//!   a dependency on tracing.
+//! - `spans`: When irpc creates a message, it stores the current tracing span
+//!   in [`WithChannels::span`]. A handler can enter this span to continue the
+//!   trace of the caller across the channel, which also helps without `rpc`.
+//!   For remote requests, the server creates the message, so the span is the
+//!   current span on the server. The [`rpc_requests`] macro adds a
+//!   `parent_span()` method to the message enum. Enabled by default.
 //! - `noq_endpoint_setup`: Easy way to create noq endpoints, in the [`noq`]
 //!   module. This is useful both for testing and for rpc on localhost.
+//! - `stream`: Convert channels to `Stream` and `Sink`. Enabled by default.
+//! - `varint-util`: Varint helpers in [`util`], without `rpc`.
+//! - `tracing-subscriber-03`: Propagate span context to the remote, with a
+//!   layer for `tracing-subscriber` 0.3, see [`span_propagation`]. Not enabled
+//!   by default. The `irpc-opentelemetry` crate enables it.
 //!
 //! # Example
 //!
@@ -156,6 +163,7 @@
 //! framework for any transport with cheap streams such as QUIC. Compared to
 //! quic-rpc, this crate does not abstract over the stream type and is focused
 //! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [noq](https://docs.rs/noq/latest/noq/index.html).
+
 #![cfg_attr(irpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 
@@ -306,6 +314,7 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// [`Channels<S>`]: Channels
 #[cfg(feature = "derive")]
 pub use irpc_derive::rpc_requests;
+
 #[cfg(feature = "rpc")]
 use n0_error::AnyError;
 use n0_error::stack_error;
@@ -313,13 +322,12 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use self::{
     channel::{
-        mpsc,
+        SendError, mpsc,
         none::{NoReceiver, NoSender},
         oneshot,
     },
     sealed::Sealed,
 };
-use crate::channel::SendError;
 
 pub mod channel;
 #[cfg(feature = "rpc")]
