@@ -78,7 +78,7 @@ clap = { version = "4.5.41", features = ["derive"] }
 futures-util.workspace = true
 hex = "0.4.3"
 rand = "0.10.3"
-n0-tracing-test = "0.3.0"
+n0-tracing-test = { version = "0.3.0", features = ["no-env-filter"] }
 
 [features]
 # enable the remote transport

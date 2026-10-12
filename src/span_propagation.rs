@@ -64,17 +64,34 @@ impl SpanContextCarrier {
         });
     }
 
-    /// Returns the context of the current span, if the subscriber has a propagator.
-    pub(crate) fn from_current() -> Option<Self> {
+    /// Returns the context of `span`, or of the current span if `span` has none.
+    ///
+    /// Returns `None` if the subscriber has no propagator. A span has no
+    /// context if the tracing backend does not record it, for example because
+    /// a filter of the backend drops it. The client calls this outside the
+    /// request span, so the current span is the parent of the request span,
+    /// and the server still joins the trace of the caller.
+    pub(crate) fn from_span_or_current(span: &tracing::Span) -> Option<Self> {
         #[cfg(not(feature = "tracing-subscriber-03"))]
-        return None;
+        {
+            let _ = span;
+            None
+        }
         #[cfg(feature = "tracing-subscriber-03")]
-        tracing::dispatcher::get_default(|dispatch| {
-            let propagator = dispatch.downcast_ref::<PropagatorLayer>()?;
-            let mut carrier = Self::default();
-            propagator.0.inject(&tracing::Span::current(), &mut carrier);
-            Some(carrier)
-        })
+        {
+            // Inside `get_default`, the dispatcher of a scoped subscriber is busy, and
+            // `Span::current` would return no span.
+            let current = tracing::Span::current();
+            tracing::dispatcher::get_default(|dispatch| {
+                let propagator = dispatch.downcast_ref::<PropagatorLayer>()?;
+                let mut carrier = Self::default();
+                propagator.0.inject(span, &mut carrier);
+                if carrier.headers.is_empty() {
+                    propagator.0.inject(&current, &mut carrier);
+                }
+                Some(carrier)
+            })
+        }
     }
 }
 

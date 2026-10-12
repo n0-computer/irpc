@@ -225,8 +225,8 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// * `no_rpc` *(optional, no value)*: If set, no implementation of `RemoteService` will be generated and the generated
 ///   code works without the `rpc` feature of `irpc`.
 /// * `span_propagation` *(optional, no value)*: If set, each request carries the span context
-///   of the client, as `(Option<SpanContextCarrier>, Message)` on the wire. irpc sets the parent
-///   of the request span from it, see [`Service::new_request_span`]. This needs a
+///   of the client request span, as `(Option<SpanContextCarrier>, Message)` on the wire. irpc sets
+///   the parent of the server request span from it, see [`Service::new_request_span`]. This needs a
 ///   propagator in the tracing subscriber, for example the layer of the `irpc-opentelemetry`
 ///   crate, and the `tracing-subscriber-03` feature of irpc.
 ///
@@ -314,6 +314,8 @@ pub use irpc_derive::rpc_requests;
 use n0_error::AnyError;
 use n0_error::stack_error;
 use serde::{Serialize, de::DeserializeOwned};
+#[cfg(feature = "rpc")]
+use tracing::Instrument;
 
 use self::{
     channel::{
@@ -401,17 +403,20 @@ pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static 
     /// This is controlled by the `span_propagation` attribute on the `rpc_requests` macro.
     const SPAN_PROPAGATION: bool = false;
 
-    /// Creates the span in which a server handles this request.
+    /// Creates the span of this request, on the client and on the server.
     ///
-    /// A server calls this for each request that it reads from a connection,
-    /// and runs the handler of the request in the span. With
-    /// [`SPAN_PROPAGATION`](Self::SPAN_PROPAGATION), the server also sets the
-    /// parent of the span from the span context of the client.
+    /// A client calls this for each request that it sends over a connection,
+    /// and logs the request and its response in the span. A server calls this
+    /// for each request that it reads from a connection, and runs the handler
+    /// of the request in the span. With
+    /// [`SPAN_PROPAGATION`](Self::SPAN_PROPAGATION), the request carries the
+    /// context of the client span, and the server makes the client span the
+    /// parent of its span.
     ///
-    /// `req_id` is the index of the QUIC stream of the request, which counts the
-    /// requests of a connection from 0. The default span is named `request`,
-    /// with `req_id` in the field `req`. The [`rpc_requests`] macro names it
-    /// after the variant.
+    /// `req_id` is the index of the QUIC stream of the request, which counts
+    /// the requests of a connection from 0, so both sides use the same id. The
+    /// default span is named `request`, with `req_id` in the field `req`. The
+    /// [`rpc_requests`] macro names it after the variant.
     fn new_request_span(&self, req_id: u64) -> tracing::Span {
         tracing::info_span!("request", req = req_id)
     }
@@ -450,11 +455,14 @@ pub struct WithChannels<I: Channels<S>, S: Service> {
     pub tx: <I as Channels<S>>::Tx,
     /// The request channel to receive the request from. Can be set to [`NoReceiver`] if not needed.
     pub rx: <I as Channels<S>>::Rx,
-    /// The span in which the message was created.
+    /// The span of the request.
     ///
-    /// For a local request, this is the span of the caller. For a remote request,
-    /// it is the span from [`Service::new_request_span`], and a
-    /// [`Handler`](crate::rpc::Handler) already runs in it.
+    /// For a local request, this is the span that the caller was in when it
+    /// sent the request. For a request that a server reads from a connection,
+    /// this is the request span from [`Service::new_request_span`]. A
+    /// [`Handler`](crate::rpc::Handler) runs the handler in this span. After
+    /// [`read_request`](crate::rpc::read_request), the caller decides whether
+    /// to enter it.
     pub span: tracing::Span,
 }
 
@@ -692,8 +700,9 @@ impl<S: Service> Client<S> {
                     Request::Remote(_request) => unreachable!(),
                     #[cfg(feature = "rpc")]
                     Request::Remote(request) => {
-                        let (tx, rx) = request.write(msg).await?;
-                        (tx.into(), rx.into())
+                        let (tx, rx, span) = request.write_in_span(msg).await?;
+                        // The channels log in the span in which they are created.
+                        span.in_scope(|| (tx.into(), rx.into()))
                     }
                 };
             Ok((update_tx, res_rx))
@@ -731,8 +740,9 @@ impl<S: Service> Client<S> {
                     Request::Remote(_request) => unreachable!(),
                     #[cfg(feature = "rpc")]
                     Request::Remote(request) => {
-                        let (tx, rx) = request.write(msg).await?;
-                        (tx.into(), rx.into())
+                        let (tx, rx, span) = request.write_in_span(msg).await?;
+                        // The channels log in the span in which they are created.
+                        span.in_scope(|| (tx.into(), rx.into()))
                     }
                 };
             Ok((update_tx, res_rx))
@@ -772,17 +782,8 @@ impl<S: Service> Client<S> {
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
-                Request::Remote(mut request) => {
-                    // see https://www.iroh.computer/blog/0rtt-api#connect-side
-                    let buf = request.prepare(msg)?;
-                    let (_tx, _rx) = request.write_raw(&buf).await?;
-                    if this.0.zero_rtt_rejected().await {
-                        // 0rtt was not accepted, the data is lost, send it again!
-                        let Request::Remote(request) = this.request().await? else {
-                            unreachable!()
-                        };
-                        let (_tx, _rx) = request.write_raw(&buf).await?;
-                    }
+                Request::Remote(request) => {
+                    this.write_remote(request, msg).await?;
                 }
             };
             Ok(())
@@ -802,34 +803,21 @@ impl<S: Service> Client<S> {
     {
         let this = self.clone();
         async move {
-            let recv: oneshot::Receiver<Res> = match this.request().await? {
+            match this.request().await? {
                 Request::Local(request) => {
                     let (tx, rx) = oneshot::channel();
                     request.send((msg, tx)).await?;
-                    rx
+                    Ok(rx.await?)
                 }
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
-                Request::Remote(mut request) => {
-                    // see https://www.iroh.computer/blog/0rtt-api#connect-side
-                    let buf = request.prepare(msg)?;
-                    let (_tx, rx) = request.write_raw(&buf).await?;
-                    if this.0.zero_rtt_rejected().await {
-                        // 0rtt was not accepted, the data is lost, send it again!
-                        let Request::Remote(request) = this.request().await? else {
-                            unreachable!()
-                        };
-                        let (_tx, rx) = request.write_raw(&buf).await?;
-                        rx
-                    } else {
-                        rx
-                    }
-                    .into()
+                Request::Remote(request) => {
+                    let (rx, span) = this.write_remote(request, msg).await?;
+                    let rx: oneshot::Receiver<Res> = span.in_scope(|| rx.into());
+                    Ok(rx.instrument(span).await?)
                 }
-            };
-            let res = recv.await?;
-            Ok(res)
+            }
         }
     }
 
@@ -859,25 +847,35 @@ impl<S: Service> Client<S> {
                 #[cfg(not(feature = "rpc"))]
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
-                Request::Remote(mut request) => {
-                    // see https://www.iroh.computer/blog/0rtt-api#connect-side
-                    let buf = request.prepare(msg)?;
-                    let (_tx, rx) = request.write_raw(&buf).await?;
-                    if this.0.zero_rtt_rejected().await {
-                        // 0rtt was not accepted, the data is lost, send it again!
-                        let Request::Remote(request) = this.request().await? else {
-                            unreachable!()
-                        };
-                        let (_tx, rx) = request.write_raw(&buf).await?;
-                        rx
-                    } else {
-                        rx
-                    }
-                    .into()
+                Request::Remote(request) => {
+                    let (rx, span) = this.write_remote(request, msg).await?;
+                    span.in_scope(|| rx.into())
                 }
             };
             Ok(recv)
         }
+    }
+
+    /// Writes a remote request in its span, and writes it again if the server rejected 0-RTT.
+    ///
+    /// See <https://www.iroh.computer/blog/0rtt-api#connect-side>.
+    #[cfg(feature = "rpc")]
+    async fn write_remote(
+        &self,
+        mut request: rpc::RemoteSender<S>,
+        msg: impl Into<S>,
+    ) -> Result<(::noq::RecvStream, tracing::Span)> {
+        let (span, buf) = request.prepare(msg)?;
+        let (_tx, mut rx) = request.write_raw(&buf).instrument(span.clone()).await?;
+        if self.0.zero_rtt_rejected().await {
+            // The server did not accept 0-RTT and lost the data, so write it again.
+            let Request::Remote(request) = self.request().await? else {
+                unreachable!()
+            };
+            span.record("req", request.req_id());
+            (_, rx) = request.write_raw(&buf).instrument(span.clone()).await?;
+        }
+        Ok((rx, span))
     }
 }
 

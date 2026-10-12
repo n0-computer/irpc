@@ -9,7 +9,7 @@ mod span_propagation {
         rpc_requests,
     };
     use n0_error::{Result, StdResultExt};
-    use opentelemetry::trace::TraceId;
+    use opentelemetry::trace::{SpanId, TraceId};
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
     use serde::{Deserialize, Serialize};
     use tracing::{Instrument, info, info_span};
@@ -28,11 +28,18 @@ mod span_propagation {
             .map(|s| s.span_context.trace_id())
     }
 
-    /// Find a server-side "Get" span that shares the given trace ID.
+    /// Find the "Get" span with the given trace ID and a remote parent, which is the server request span.
     fn server_span_for_trace(spans: &[SpanData], trace_id: TraceId) -> Option<&SpanData> {
+        spans.iter().find(|s| {
+            s.name == "Get" && s.span_context.trace_id() == trace_id && s.parent_span_is_remote
+        })
+    }
+
+    /// Find the "Get" span with the given span ID, which is the client request span.
+    fn client_span(spans: &[SpanData], span_id: SpanId) -> Option<&SpanData> {
         spans
             .iter()
-            .find(|s| s.name == "Get" && s.span_context.trace_id() == trace_id)
+            .find(|s| s.name == "Get" && s.span_context.span_id() == span_id)
     }
 
     #[tokio::test]
@@ -155,9 +162,10 @@ mod span_propagation {
                 panic!("no server 'Get' span with trace_id={client_trace_id} for req_id={req_id}")
             });
 
+            // The client request span is the parent of the server request span.
             assert!(
-                server_span.parent_span_is_remote,
-                "server span for req_id={req_id} should have a remote parent"
+                client_span(&spans, server_span.parent_span_id).is_some(),
+                "server span for req_id={req_id} should have the client request span as parent"
             );
 
             info!(
