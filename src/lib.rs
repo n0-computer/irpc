@@ -992,6 +992,27 @@ pub enum Error {
     Write { source: rpc::WriteError },
 }
 
+#[cfg(feature = "rpc")]
+impl Error {
+    /// Returns the irpc error code that the peer sent, if any.
+    ///
+    /// This is the code that the peer reset or stopped a stream with, or closed
+    /// the connection with, see [`rpc::ErrorCode`].
+    pub fn remote_code(&self) -> Option<rpc::ErrorCode> {
+        match self {
+            Self::Request {
+                source: RequestError::Connection { source, .. },
+                ..
+            } => rpc::close_code(source),
+            Self::Request { .. } => None,
+            Self::Send { source, .. } => source.remote_code(),
+            Self::MpscRecv { source, .. } => source.remote_code(),
+            Self::OneshotRecv { source, .. } => source.remote_code(),
+            Self::Write { source, .. } => source.remote_code(),
+        }
+    }
+}
+
 /// Type alias for a result with an irpc error type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

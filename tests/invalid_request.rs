@@ -90,10 +90,12 @@ async fn bad_request_closes_connection() -> TestResult<()> {
     let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
     let client = Client::<client::EchoProtocol>::boxed(conn.clone());
 
-    client
+    let err = client
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
+    // The close usually arrives before the reset of the stream.
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };

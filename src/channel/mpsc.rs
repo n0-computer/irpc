@@ -17,9 +17,11 @@ use super::SendError;
 /// the server for a response, and the client for the updates of a request.
 ///
 /// If the server rejects the request and also closes the connection, the close
-/// can arrive first, and the receiver gets [`Io`] instead of [`Remote`].
+/// usually arrives first, and the receiver gets [`Io`] instead of [`Remote`].
+/// [`remote_code`] returns the code in both cases.
 ///
 /// [`Io`]: Self::Io
+/// [`remote_code`]: Self::remote_code
 /// [`Remote`]: Self::Remote
 #[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]

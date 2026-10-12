@@ -30,8 +30,10 @@
 //!
 //! The client gets the code in a `Remote` error from the receiver of the
 //! response, for example [`oneshot::RecvError::Remote`] from [`Client::rpc`].
-//! If the server closes the connection, the close can arrive first, and the
-//! client gets the connection error.
+//! When the server also closes the connection, as a [`Handler`] does by
+//! default, the close usually arrives first, and the client gets an `Io` error
+//! with the connection error instead. In both cases, `remote_code` returns the
+//! code, for example [`crate::Error::remote_code`].
 //!
 //! [`read_request`] returns a bad request as a [`ReadRequestError`]. A server
 //! with its own loop decides what to do: close the connection, or read the
@@ -308,6 +310,27 @@ impl WriteError {
     }
 }
 
+/// Returns the irpc error code that the peer closed the connection with, if any, other than 0.
+pub(crate) fn close_code(err: &ConnectionError) -> Option<ErrorCode> {
+    match err {
+        ConnectionError::ApplicationClosed(close) => ErrorCode::from_varint(close.error_code),
+        _ => None,
+    }
+    .filter(|code| *code != ErrorCode::Closed)
+}
+
+/// Returns the irpc error code that the peer closed the connection with, if `err` comes from that close.
+fn io_close_code(err: &io::Error) -> Option<ErrorCode> {
+    let err = err.get_ref()?;
+    if let Some(noq::ReadError::ConnectionLost(err)) = err.downcast_ref() {
+        close_code(err)
+    } else if let Some(noq::WriteError::ConnectionLost(err)) = err.downcast_ref() {
+        close_code(err)
+    } else {
+        None
+    }
+}
+
 /// Returns the irpc error code that the receiver stopped the stream with, if any.
 fn stop_code(err: &noq::WriteError) -> Option<ErrorCode> {
     match err {
@@ -345,40 +368,56 @@ impl From<noq::WriteError> for SendError {
 }
 
 impl WriteError {
-    /// Returns the code of a [`Remote`](Self::Remote) error.
+    /// Returns the irpc error code that the peer sent, if any.
+    ///
+    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
+    /// the peer closed the connection with.
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
+            Self::Io { source, .. } => io_close_code(source),
             _ => None,
         }
     }
 }
 
 impl oneshot::RecvError {
-    /// Returns the code of a [`Remote`](Self::Remote) error.
+    /// Returns the irpc error code that the peer sent, if any.
+    ///
+    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
+    /// the peer closed the connection with.
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
+            Self::Io { source, .. } => io_close_code(source),
             _ => None,
         }
     }
 }
 
 impl mpsc::RecvError {
-    /// Returns the code of a [`Remote`](Self::Remote) error.
+    /// Returns the irpc error code that the peer sent, if any.
+    ///
+    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
+    /// the peer closed the connection with.
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
+            Self::Io { source, .. } => io_close_code(source),
             _ => None,
         }
     }
 }
 
 impl SendError {
-    /// Returns the code of a [`Remote`](Self::Remote) error.
+    /// Returns the irpc error code that the peer sent, if any.
+    ///
+    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
+    /// the peer closed the connection with.
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
+            Self::Io { source, .. } => io_close_code(source),
             _ => None,
         }
     }
