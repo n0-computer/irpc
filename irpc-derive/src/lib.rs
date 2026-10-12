@@ -155,11 +155,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         };
 
         // Generate parent_span method
-        let parent_span_impl = if !args.no_spans {
-            generate_parent_span_impl(message_enum_name, &variant_names)
-        } else {
-            quote! {}
-        };
+        let parent_span_impl = generate_parent_span_impl(message_enum_name, &variant_names);
 
         // Generate From implementations for the message enum (only for variants with rpc attributes)
         let message_from_impls =
@@ -377,7 +373,6 @@ struct MacroArgs {
     alias_suffix: Option<String>,
     rpc_feature: Option<String>,
     no_rpc: bool,
-    no_spans: bool,
     /// When true, includes span context in the wire format and enables span propagation.
     span_propagation: bool,
 }
@@ -411,9 +406,6 @@ impl Parse for MacroArgs {
                         return syn_err(arg.span(), "rpc_feature is incompatible with no_rpc");
                     }
                     this.no_rpc = true;
-                }
-                "no_spans" => {
-                    this.no_spans = true;
                 }
                 "span_propagation" => {
                     this.span_propagation = true;

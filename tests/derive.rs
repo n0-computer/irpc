@@ -40,7 +40,7 @@ fn derive_simple() {
     #[derive(Debug, Serialize, Deserialize)]
     struct Response4;
 
-    #[rpc_requests(message = RequestWithChannels, no_rpc, no_spans)]
+    #[rpc_requests(message = RequestWithChannels, no_rpc)]
     #[derive(Debug, Serialize, Deserialize)]
     enum Request {
         #[rpc(tx=oneshot::Sender<()>)]
