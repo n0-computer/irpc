@@ -314,7 +314,6 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// [`Channels<S>`]: Channels
 #[cfg(feature = "derive")]
 pub use irpc_derive::rpc_requests;
-
 #[cfg(feature = "rpc")]
 use n0_error::AnyError;
 use n0_error::stack_error;
