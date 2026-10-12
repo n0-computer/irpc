@@ -432,6 +432,7 @@ pub trait Channels<S: Service>: Send + 'static {
 ///
 /// When the `spans` feature is enabled, this also includes a tracing
 /// span to carry the tracing context during message passing.
+#[non_exhaustive]
 pub struct WithChannels<I: Channels<S>, S: Service> {
     /// The inner message.
     pub inner: I,
