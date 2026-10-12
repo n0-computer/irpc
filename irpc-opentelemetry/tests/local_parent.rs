@@ -16,7 +16,7 @@ use irpc::{
 };
 use n0_error::Result;
 use n0_future::task::AbortOnDropHandle;
-use opentelemetry::trace::TracerProvider;
+use opentelemetry::trace::{SpanId, TracerProvider};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use serde::{Deserialize, Serialize};
 use tracing::{Instrument, info_span};
@@ -69,10 +69,8 @@ async fn check_local_parent(context_activation: bool) -> Result<()> {
         let done_tx = done_tx.clone();
         async move {
             async move {
-                let EchoMessage::Echo(WithChannels {
-                    inner, tx, span, ..
-                }) = request.with_remote_channels(rx, tx);
-                let _guard = span.enter();
+                let EchoMessage::Echo(WithChannels { inner, tx, .. }) =
+                    request.with_remote_channels(rx, tx);
                 tx.send(inner.0).await.ok();
             }
             .instrument(info_span!("server-handler"))
@@ -97,14 +95,13 @@ async fn check_local_parent(context_activation: bool) -> Result<()> {
     };
     let handler_span = find("server-handler");
     let request_span = find("Echo");
-    assert_eq!(
-        request_span.span_context.trace_id(),
-        handler_span.span_context.trace_id()
-    );
-    assert_eq!(
-        request_span.parent_span_id,
-        handler_span.span_context.span_id()
-    );
+    // The request span keeps its local parent: the empty carrier does not make it a new root.
+    assert_ne!(request_span.parent_span_id, SpanId::INVALID);
     assert!(!request_span.parent_span_is_remote);
+    // irpc runs the handler in the request span.
+    assert_eq!(
+        handler_span.parent_span_id,
+        request_span.span_context.span_id()
+    );
     Ok(())
 }

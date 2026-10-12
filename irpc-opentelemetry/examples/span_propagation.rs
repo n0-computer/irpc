@@ -155,10 +155,10 @@ async fn server(otlp_endpoint: &str) -> Result<()> {
     let protocol = IrohProtocol::<Proto>::new(Handler::sequential(|msg: Message| async move {
         match msg {
             Message::Get(msg) => {
-                // `WithChannels` carries a `span` field that the derive
-                // macro builds as `info_span!("Get")` with its parent set
-                // from the propagated remote context, so the handler's
-                // work shows up under the originating client trace.
+                // irpc runs this handler in the request span `Get`, with its
+                // parent set from the propagated remote context, and
+                // `WithChannels::span` is that span. So the handler's work
+                // shows up under the originating client trace.
                 let WithChannels {
                     inner, tx, span, ..
                 } = msg;

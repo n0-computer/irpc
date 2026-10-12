@@ -215,6 +215,9 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 ///     * Generates a [`Service`] implementation for the protocol enum, with the `Message`
 ///       type set to the message enum.
 ///     * Generates a [`rpc::RemoteService`] implementation for the protocol enum.
+///     * Generates a `span` method on the message enum, which returns the span of the
+///       message, see [`WithChannels::span`].
+///     * Implements [`Service::new_request_span`] to name each request span after its variant.
 /// * `alias = "<suffix>"` *(optional)*: Generate type aliases with the given suffix for each `WithChannels<T, Service>`.
 /// * `rpc_feature = "<feature>"` *(optional)*: If set, the `RemoteService` implementation will be feature-flagged
 ///   with this feature. Set this if your crate only optionally enables the `rpc` feature
@@ -222,8 +225,8 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// * `no_rpc` *(optional, no value)*: If set, no implementation of `RemoteService` will be generated and the generated
 ///   code works without the `rpc` feature of `irpc`.
 /// * `span_propagation` *(optional, no value)*: If set, each request carries the span context
-///   of the client, as `(Option<SpanContextCarrier>, Message)` on the wire. The generated
-///   `RemoteService` implementation sets the parent of the request span from it. This needs a
+///   of the client, as `(Option<SpanContextCarrier>, Message)` on the wire. irpc sets the parent
+///   of the request span from it, see [`Service::new_request_span`]. This needs a
 ///   propagator in the tracing subscriber, for example the layer of the `irpc-opentelemetry`
 ///   crate, and the `tracing-subscriber-03` feature of irpc.
 ///
@@ -397,6 +400,21 @@ pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static 
     ///
     /// This is controlled by the `span_propagation` attribute on the `rpc_requests` macro.
     const SPAN_PROPAGATION: bool = false;
+
+    /// Creates the span in which a server handles this request.
+    ///
+    /// A server calls this for each request that it reads from a connection,
+    /// and runs the handler of the request in the span. With
+    /// [`SPAN_PROPAGATION`](Self::SPAN_PROPAGATION), the server also sets the
+    /// parent of the span from the span context of the client.
+    ///
+    /// `req_id` is the index of the QUIC stream of the request, which counts the
+    /// requests of a connection from 0. The default span is named `request`,
+    /// with `req_id` in the field `req`. The [`rpc_requests`] macro names it
+    /// after the variant.
+    fn new_request_span(&self, req_id: u64) -> tracing::Span {
+        tracing::info_span!("request", req = req_id)
+    }
 }
 
 /// Sealed marker trait for a sender
@@ -432,7 +450,11 @@ pub struct WithChannels<I: Channels<S>, S: Service> {
     pub tx: <I as Channels<S>>::Tx,
     /// The request channel to receive the request from. Can be set to [`NoReceiver`] if not needed.
     pub rx: <I as Channels<S>>::Rx,
-    /// The current span where the full message was created.
+    /// The span in which the message was created.
+    ///
+    /// For a local request, this is the span of the caller. For a remote request,
+    /// it is the span from [`Service::new_request_span`], and a
+    /// [`Handler`](crate::rpc::Handler) already runs in it.
     pub span: tracing::Span,
 }
 
@@ -443,13 +465,6 @@ impl<I: Channels<S> + Debug, S: Service> Debug for WithChannels<I, S> {
             .field(&self.tx)
             .field(&self.rx)
             .finish()
-    }
-}
-
-impl<I: Channels<S>, S: Service> WithChannels<I, S> {
-    /// Get the parent span
-    pub fn parent_span_opt(&self) -> Option<&tracing::Span> {
-        Some(&self.span)
     }
 }
 

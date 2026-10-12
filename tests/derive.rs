@@ -1,6 +1,7 @@
 #![cfg(feature = "derive")]
 
 use irpc::{
+    WithChannels,
     channel::{none::NoSender, oneshot},
     rpc_requests,
 };
@@ -52,6 +53,26 @@ fn derive_simple() {
         #[rpc(tx=NoSender)]
         ClientStreaming(ClientStreamingRequest),
     }
+}
+
+/// The message enum returns the span in which the message was created.
+#[test]
+fn message_span() {
+    #[rpc_requests(message = PingMessage, no_rpc)]
+    #[derive(Debug, Serialize, Deserialize)]
+    enum PingProtocol {
+        #[rpc(tx = oneshot::Sender<()>)]
+        #[wrap(Ping)]
+        Ping,
+    }
+
+    let subscriber = tracing_subscriber::registry();
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::info_span!("caller");
+        let (tx, _rx) = oneshot::channel();
+        let msg = span.in_scope(|| PingMessage::from(WithChannels::from((Ping, tx))));
+        assert_eq!(msg.span().id(), span.id());
+    });
 }
 
 /// Use

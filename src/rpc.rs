@@ -86,7 +86,7 @@ use noq::{ConnectionError, VarInt};
 use serde::{Serialize, de::DeserializeOwned};
 use smallvec::SmallVec;
 use tokio::io::AsyncReadExt;
-use tracing::{debug, trace, warn};
+use tracing::{Instrument, debug, trace, warn};
 
 #[cfg(feature = "iroh")]
 pub(crate) mod iroh_impl;
@@ -953,9 +953,9 @@ impl<S> Clone for Handler<S> {
 impl<S: Service> Handler<S> {
     /// Creates a handler that runs `f` on the protocol enum and the streams of each request.
     ///
-    /// The requests of a connection run one after the other. If `f` needs the
-    /// message enum, call [`RemoteService::with_remote_channels`] inside its
-    /// future: the remote span context is only set while the future runs.
+    /// The requests of a connection run one after the other, each in its span
+    /// from [`Service::new_request_span`]. If `f` calls
+    /// [`RemoteService::with_remote_channels`], the message gets this span.
     pub fn raw<F, Fut>(f: F) -> Self
     where
         F: Fn(S, noq::RecvStream, noq::SendStream) -> Fut + Send + Sync + 'static,
@@ -1000,13 +1000,12 @@ impl<S: Service> Handler<S> {
         &self,
         connection: &impl IncomingRemoteConnection,
     ) -> io::Result<()> {
-        debug!("connection accepted");
         loop {
             let Some((msg, carrier, rx, tx)) = self.read_next(connection).await? else {
                 return Ok(());
             };
-            let fut = (self.f)(msg, rx, tx);
-            let fut = crate::span_propagation::scope_remote(carrier, fut);
+            let span = new_request_span(&msg, &rx, carrier.as_ref());
+            let fut = span.in_scope(|| (self.f)(msg, rx, tx)).instrument(span);
             if let Err(err) = fut.await {
                 match err.inner {
                     HandlerErrorInner::CloseConnection { code, reason } => {
@@ -1067,10 +1066,7 @@ impl<S: RemoteService> Handler<S> {
         let f = Arc::new(f);
         Self::raw(move |msg, rx, tx| {
             let f = f.clone();
-            async move {
-                // Inside the future: the remote span context is only set while it runs.
-                f(S::with_remote_channels(msg, rx, tx)).await
-            }
+            async move { f(S::with_remote_channels(msg, rx, tx)).await }
         })
     }
 }
@@ -1128,21 +1124,29 @@ pub async fn read_request<S: RemoteService>(
     let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
         return Ok(None);
     };
-    Ok(Some(
-        crate::span_propagation::scope_remote(carrier, async move {
-            S::with_remote_channels(msg, rx, tx)
-        })
-        .await,
-    ))
+    let span = new_request_span(&msg, &rx, carrier.as_ref());
+    Ok(Some(span.in_scope(|| S::with_remote_channels(msg, rx, tx))))
+}
+
+/// Creates the span of a request, and sets its parent from the span context of the client.
+fn new_request_span<S: Service>(
+    msg: &S,
+    recv: &noq::RecvStream,
+    carrier: Option<&crate::span_propagation::SpanContextCarrier>,
+) -> tracing::Span {
+    let span = msg.new_request_span(recv.id().index());
+    if let Some(carrier) = carrier {
+        carrier.set_parent_of(&span);
+    }
+    span
 }
 
 /// Reads a single request from the connection.
 ///
 /// This accepts a bi-directional stream from the connection and reads and parses the request.
 ///
-/// When `S::SPAN_PROPAGATION` is true, any propagated span context on the wire is
-/// silently dropped. Use [`Handler::handle_connection`] (or [`read_request`]) if you need
-/// the propagated context to reach the generated handler spans.
+/// Unlike [`read_request`] and a [`Handler`], this creates no request span, and
+/// drops the span context of the client.
 ///
 /// Returns `None` in the same cases as [`read_request`].
 pub async fn read_request_raw<S: Service>(

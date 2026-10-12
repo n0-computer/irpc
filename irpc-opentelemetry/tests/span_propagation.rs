@@ -77,12 +77,9 @@ mod span_propagation {
                     info!("handle request {msg:?}");
                     match msg {
                         Message::Get(msg) => {
-                            let WithChannels {
-                                inner, tx, span, ..
-                            } = msg;
-                            info!("handle request {inner:?} with span {span:?}");
-                            let _guard = span.enter();
-                            info!("handle request {inner:?}, entered span");
+                            // irpc runs the handler in the request span.
+                            let WithChannels { inner, tx, .. } = msg;
+                            info!("handle request {inner:?}");
                             tx.send(inner.0.to_uppercase()).await.ok();
                         }
                     }

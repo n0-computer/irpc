@@ -84,7 +84,7 @@ n0-tracing-test = "0.3.0"
 # enable the remote transport
 rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:derive_more", "tokio/io-util"]
 # span propagation layer for tracing-subscriber 0.3
-tracing-subscriber-03 = ["rpc", "dep:tracing-subscriber", "tokio/rt"]
+tracing-subscriber-03 = ["rpc", "dep:tracing-subscriber"]
 # enable the iroh transport
 iroh = ["rpc", "dep:iroh", "dep:portable-atomic", "dep:getrandom"]
 # add helpers to create noq endpoints, for tests and for rpc on localhost
@@ -192,12 +192,12 @@ allowed_external_types = [
     "tokio::sync::mpsc::bounded::Sender",
     "tokio::sync::oneshot::Receiver",
     "tokio::sync::oneshot::Sender",
-    "tracing::span::Span",
 
     # stable-ish non-1.0 crates that we accept in the public API
     "futures_core::stream::Stream",
     "futures_lite::future::Boxed",
     "futures_sink::Sink",
+    "tracing::span::Span",
     # `span_propagation::layer`, with `tracing-subscriber-03`
     "tracing_core::subscriber::Subscriber",
     "tracing_subscriber::layer::Layer",

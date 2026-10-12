@@ -22,14 +22,9 @@
 //!
 //! The `irpc-opentelemetry` crate has a propagator for OpenTelemetry.
 
-use std::{collections::HashMap, future::Future};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "tracing-subscriber-03")]
-tokio::task_local! {
-    static SPAN_CONTEXT: SpanContextCarrier;
-}
 
 /// Text headers that carry the context of a span to the remote.
 ///
@@ -55,6 +50,18 @@ impl SpanContextCarrier {
     /// Returns the keys of all headers.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.headers.keys().map(String::as_str)
+    }
+
+    /// Sets the parent of `span` from this context, if the subscriber of `span` has a propagator.
+    pub(crate) fn set_parent_of(&self, span: &tracing::Span) {
+        #[cfg(not(feature = "tracing-subscriber-03"))]
+        let _ = span;
+        #[cfg(feature = "tracing-subscriber-03")]
+        span.with_subscriber(|(_id, dispatch)| {
+            if let Some(propagator) = dispatch.downcast_ref::<PropagatorLayer>() {
+                propagator.0.set_parent(span, self);
+            }
+        });
     }
 
     /// Returns the context of the current span, if the subscriber has a propagator.
@@ -105,41 +112,3 @@ struct PropagatorLayer(Box<dyn Propagator>);
 
 #[cfg(feature = "tracing-subscriber-03")]
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}
-
-/// Runs `fut` with `carrier` in scope for [`set_span_parent_from_remote`].
-///
-/// The server loop calls this for each request. Most users do not call it.
-///
-/// The carrier lives in a task-local of `fut`, so concurrent requests do not see
-/// each other's context, and the context moves with `fut` across threads.
-pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F) -> F::Output {
-    #[cfg(not(feature = "tracing-subscriber-03"))]
-    {
-        let _ = carrier;
-        fut.await
-    }
-    #[cfg(feature = "tracing-subscriber-03")]
-    {
-        match carrier {
-            Some(carrier) => SPAN_CONTEXT.scope(carrier, fut).await,
-            None => fut.await,
-        }
-    }
-}
-
-/// Sets the parent of `span` from the span context of the current request.
-///
-/// The code from `rpc_requests(span_propagation)` calls this. It does nothing
-/// outside of [`scope_remote`], if the subscriber of `span` has no propagator, or
-/// without the `tracing-subscriber-03` feature.
-pub fn set_span_parent_from_remote(span: &tracing::Span) {
-    #[cfg(not(feature = "tracing-subscriber-03"))]
-    let _ = span;
-    #[cfg(feature = "tracing-subscriber-03")]
-    span.with_subscriber(|(_id, dispatch)| {
-        let Some(propagator) = dispatch.downcast_ref::<PropagatorLayer>() else {
-            return;
-        };
-        let _ = SPAN_CONTEXT.try_with(|carrier| propagator.0.set_parent(span, carrier));
-    });
-}
