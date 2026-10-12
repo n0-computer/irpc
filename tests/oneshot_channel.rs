@@ -140,7 +140,6 @@ async fn oneshot_serialize_error_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    println!("Server error: {cause:?}");
     assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
     Ok(())
 }

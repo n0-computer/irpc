@@ -427,22 +427,13 @@ async fn mpsc_decode_error_reaches_sender() -> TestResult<()> {
         }
     })
     .await?;
-    assert_eq!(err.remote_code(), Some(ErrorCode::MessageDecodeFailed));
+    let decode_failed = Some(ErrorCode::MessageDecodeFailed);
+    assert_eq!(err.remote_code(), decode_failed);
     // later sends, also on a clone that did not see the stop
+    assert_eq!(send.send(2).await.unwrap_err().remote_code(), decode_failed);
     assert_eq!(
-        send.send(2)
-            .await
-            .expect_err("the sender is closed")
-            .remote_code(),
-        Some(ErrorCode::MessageDecodeFailed)
-    );
-    assert_eq!(
-        clone
-            .try_send(2)
-            .await
-            .expect_err("the sender is closed")
-            .remote_code(),
-        Some(ErrorCode::MessageDecodeFailed)
+        clone.try_send(2).await.unwrap_err().remote_code(),
+        decode_failed
     );
     conn.close(0u32.into(), b"");
     server.await??;

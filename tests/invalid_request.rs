@@ -5,7 +5,6 @@ use std::{pin::pin, time::Duration};
 
 use irpc::{
     Client, WithChannels,
-    channel::oneshot,
     noq::listen,
     rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, WriteError, read_request},
 };
@@ -36,9 +35,6 @@ mod server {
         #[rpc(tx = oneshot::Sender<()>, rx = mpsc::Receiver<NoSer>)]
         #[wrap(Upload)]
         Upload(String),
-        #[rpc(tx = mpsc::Sender<()>, rx = mpsc::Receiver<NoSer>)]
-        #[wrap(Exchange)]
-        Exchange(String),
     }
 }
 
@@ -90,10 +86,12 @@ async fn bad_request_closes_connection() -> TestResult<()> {
     let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
     let client = Client::<client::EchoProtocol>::boxed(conn.clone());
 
-    client
+    let err = client
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
+    // The close usually arrives before the reset of the stream.
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
@@ -131,19 +129,7 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
-    assert!(
-        matches!(
-            err,
-            irpc::Error::OneshotRecv {
-                source: oneshot::RecvError::Remote {
-                    code: ErrorCode::RequestDecodeFailed,
-                    ..
-                },
-                ..
-            }
-        ),
-        "{err:?}"
-    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     Ok(())
 }
@@ -241,20 +227,20 @@ async fn truncated_request_closes_connection() -> TestResult<()> {
     Ok(())
 }
 
-/// The update sender resets the stream of its request before the server reads it.
+/// The update senders reset the streams of their requests before the server reads them.
 #[tokio::test]
 async fn reset_before_read_skips_request() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
         let conn = server.accept().await.expect("endpoint is open").await?;
-        // Read only after the reset arrived: noq then has dropped the request.
-        while conn.stats().frame_rx.reset_stream == 0 {
+        // Read only after both resets arrived: noq then has dropped both requests.
+        while conn.stats().frame_rx.reset_stream < 2 {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         let Some(server::EchoMessage::Echo(msg)) =
             read_request::<server::EchoProtocol>(&conn).await?
         else {
-            panic!("server skips the upload");
+            panic!("server skips the upload and the exchange");
         };
         msg.tx.send(msg.inner.0).await?;
         conn.closed().await;
@@ -263,54 +249,26 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
     let client = Client::<client::EchoProtocol>::boxed(conn.clone());
 
-    let (tx, rx) = client
+    let (upload_tx, upload_rx) = client
         .client_streaming(client::Upload("a".into()), 1)
         .await?;
-    // The update does not encode, so the sender resets with `ErrorCode::MessageEncodeFailed`.
-    tx.send(NoSer(1))
-        .await
-        .expect_err("odd numbers do not encode");
-    assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
-    // The server skipped the upload and reset its side of the stream.
-    let err = rx.await.expect_err("server skips the upload");
-    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
-    conn.close(0u32.into(), b"");
-    server.await??;
-    Ok(())
-}
-
-/// Like [`reset_before_read_skips_request`], but the response is an mpsc channel.
-#[tokio::test]
-async fn reset_before_read_fails_mpsc_response() -> TestResult<()> {
-    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
-    let server = tokio::spawn(async move {
-        let conn = server.accept().await.expect("endpoint is open").await?;
-        // Read only after the reset arrived: noq then has dropped the request.
-        while conn.stats().frame_rx.reset_stream == 0 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        let Some(server::EchoMessage::Echo(msg)) =
-            read_request::<server::EchoProtocol>(&conn).await?
-        else {
-            panic!("server skips the exchange");
-        };
-        msg.tx.send(msg.inner.0).await?;
-        conn.closed().await;
-        TestResult::Ok(())
-    });
-    let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
-    let client = Client::<client::EchoProtocol>::boxed(conn.clone());
-
-    let (tx, mut rx) = client
+    let (exchange_tx, mut exchange_rx) = client
         .bidi_streaming(client::Exchange("a".into()), 1, 1)
         .await?;
-    // The update does not encode, so the sender resets with `ErrorCode::MessageEncodeFailed`.
-    tx.send(NoSer(1))
+    // The updates do not encode, so the senders reset with `ErrorCode::MessageEncodeFailed`.
+    upload_tx.send(NoSer(1)).await.expect_err("does not encode");
+    exchange_tx
+        .send(NoSer(1))
         .await
-        .expect_err("odd numbers do not encode");
+        .expect_err("does not encode");
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
-    // The server skipped the exchange, so the response fails instead of ending.
-    let err = rx.recv().await.expect_err("server skips the exchange");
+    // The server reset its side of both streams, so the mpsc response fails instead of ending.
+    let err = upload_rx.await.expect_err("server skips the upload");
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
+    let err = exchange_rx
+        .recv()
+        .await
+        .expect_err("server skips the exchange");
     assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
     conn.close(0u32.into(), b"");
     server.await??;

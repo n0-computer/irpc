@@ -7,31 +7,31 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::A
 use n0_error::{e, stack_error};
 
 use super::SendError;
+#[cfg(feature = "rpc")]
+use crate::rpc::{self, ErrorCode};
 
 /// Error when receiving an mpsc message.
 ///
-/// A local channel has no errors: `recv` returns `Ok(None)` when all senders
-/// are gone. A remote channel does the same when its sender closes the stream.
+/// A local channel has no errors.
 ///
 /// For a remote channel, the sender is on the other side of the connection:
-/// the server for a response, and the client for the updates of a request.
+/// the server for a response stream, and the client for the updates of a request.
 ///
 /// If the server rejects the request and also closes the connection, the close
-/// can arrive first, and the receiver gets [`Io`] instead of [`Remote`].
+/// usually arrives first, and the receiver gets [`Io`] instead of [`Remote`].
+/// [`Self::remote_code`] returns the code in both cases.
 ///
 /// [`Io`]: Self::Io
 /// [`Remote`]: Self::Remote
-#[stack_error(derive, add_meta, from_sources)]
+#[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum RecvError {
     /// The sender reset the stream with an irpc error code, and the channel is closed.
     ///
-    /// The code says why, see [`ErrorCode`]. For example, the server rejected
-    /// or skipped the request, see [Bad requests] and [Abandoned requests].
+    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
     ///
     /// [`ErrorCode`]: crate::rpc::ErrorCode
-    /// [Bad requests]: crate::rpc#bad-requests
-    /// [Abandoned requests]: crate::rpc#abandoned-requests
+    /// [`rpc`]: crate::rpc
     #[cfg(feature = "rpc")]
     #[error("Sender closed the channel: {code}")]
     Remote { code: crate::rpc::ErrorCode },
@@ -57,6 +57,20 @@ pub enum RecvError {
     },
 }
 
+/// Converts an io error from reading the stream of a remote channel.
+///
+/// A reset with an irpc error code becomes [`RecvError::Remote`], and any
+/// other io error becomes [`RecvError::Io`].
+impl From<io::Error> for RecvError {
+    fn from(err: io::Error) -> Self {
+        #[cfg(feature = "rpc")]
+        if let Some(code) = rpc::reset_code(&err) {
+            return e!(RecvError::Remote { code });
+        }
+        e!(RecvError::Io, err)
+    }
+}
+
 impl From<RecvError> for io::Error {
     fn from(e: RecvError) -> Self {
         match e {
@@ -64,6 +78,21 @@ impl From<RecvError> for io::Error {
             #[cfg(feature = "rpc")]
             RecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
+        }
+    }
+}
+
+#[cfg(feature = "rpc")]
+impl RecvError {
+    /// Returns the irpc error code that the peer sent, if any.
+    ///
+    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
+    /// the peer closed the connection with.
+    pub fn remote_code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::Remote { code, .. } => Some(*code),
+            Self::Io { source, .. } => rpc::io_close_code(source),
+            _ => None,
         }
     }
 }
