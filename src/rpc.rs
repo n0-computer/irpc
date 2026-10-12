@@ -45,8 +45,9 @@
 //! request resets the stream with [`ErrorCode::RequestMaxSizeExceeded`] or
 //! [`ErrorCode::RequestEncodeFailed`]. The server skips a request whose stream
 //! was reset. It resets its side of the stream with
-//! [`ErrorCode::RequestAborted`], so the receiver of the response gets an
-//! error, and reads the next request.
+//! [`ErrorCode::RequestAborted`], so the receiver of the response gets
+//! [`oneshot::RecvError::RequestAborted`] or
+//! [`mpsc::RecvError::RequestAborted`], and reads the next request.
 //!
 //! # Channel messages
 //!
@@ -540,6 +541,7 @@ fn reset_code(err: &io::Error) -> Option<ErrorCode> {
 /// Returns the error for a oneshot stream that failed.
 fn oneshot_recv_error(err: io::Error) -> oneshot::RecvError {
     match reset_code(&err) {
+        Some(ErrorCode::RequestAborted) => e!(oneshot::RecvError::RequestAborted),
         Some(ErrorCode::RequestMaxSizeExceeded) => e!(oneshot::RecvError::RequestMaxSizeExceeded),
         Some(ErrorCode::RequestDecodeFailed) => e!(oneshot::RecvError::RequestDecodeFailed),
         Some(ErrorCode::MessageMaxSizeExceeded) => e!(oneshot::RecvError::MessageMaxSizeExceeded),
@@ -551,6 +553,7 @@ fn oneshot_recv_error(err: io::Error) -> oneshot::RecvError {
 /// Returns the error for an mpsc stream that failed.
 fn mpsc_recv_error(err: io::Error) -> mpsc::RecvError {
     match reset_code(&err) {
+        Some(ErrorCode::RequestAborted) => e!(mpsc::RecvError::RequestAborted),
         Some(ErrorCode::RequestMaxSizeExceeded) => e!(mpsc::RecvError::RequestMaxSizeExceeded),
         Some(ErrorCode::RequestDecodeFailed) => e!(mpsc::RecvError::RequestDecodeFailed),
         Some(ErrorCode::MessageMaxSizeExceeded) => e!(mpsc::RecvError::MessageMaxSizeExceeded),

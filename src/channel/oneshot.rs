@@ -32,6 +32,14 @@ pub enum RecvError {
     /// without sending, for example because it was dropped.
     #[error("Sender closed")]
     SenderClosed,
+    /// The server skipped the request because the client reset its stream, and closed the channel.
+    ///
+    /// For example, an update did not encode before the server read the
+    /// request, see [Abandoned requests].
+    ///
+    /// [Abandoned requests]: crate::rpc#abandoned-requests
+    #[error("Server skipped the request: aborted")]
+    RequestAborted,
     /// The server rejected the request because it is too large, and closed the channel.
     ///
     /// See [Bad requests].

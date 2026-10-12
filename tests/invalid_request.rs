@@ -276,7 +276,10 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     // The server skipped the upload and reset its side of the stream.
     let err = rx.await.expect_err("server skips the upload");
-    assert!(matches!(err, oneshot::RecvError::Io { .. }), "{err:?}");
+    assert!(
+        matches!(err, oneshot::RecvError::RequestAborted { .. }),
+        "{err:?}"
+    );
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
@@ -314,7 +317,10 @@ async fn reset_before_read_fails_mpsc_response() -> TestResult<()> {
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     // The server skipped the exchange, so the response fails instead of ending.
     let err = rx.recv().await.expect_err("server skips the exchange");
-    assert!(matches!(err, mpsc::RecvError::Io { .. }), "{err:?}");
+    assert!(
+        matches!(err, mpsc::RecvError::RequestAborted { .. }),
+        "{err:?}"
+    );
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
