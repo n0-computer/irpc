@@ -14,7 +14,14 @@ use crate::util::FusedOneshotReceiver;
 /// channel, the sender is on the other side of the connection, for example
 /// the server for a response.
 ///
+/// If the server rejects the request and also closes the connection, the close
+/// can arrive first, and the receiver gets [`Io`] instead of
+/// [`RequestMaxSizeExceeded`] or [`RequestDecodeFailed`].
+///
 /// [`SenderClosed`]: Self::SenderClosed
+/// [`Io`]: Self::Io
+/// [`RequestMaxSizeExceeded`]: Self::RequestMaxSizeExceeded
+/// [`RequestDecodeFailed`]: Self::RequestDecodeFailed
 #[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub enum RecvError {
@@ -25,32 +32,38 @@ pub enum RecvError {
     /// without sending, for example because it was dropped.
     #[error("Sender closed")]
     SenderClosed,
-    /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+    /// The server rejected the request because it is too large, and closed the channel.
     ///
-    /// Either this receiver found it, or the sender reported it.
+    /// See [Bad requests].
+    ///
+    /// [Bad requests]: crate::rpc#bad-requests
+    #[error("Server rejected the request: too large")]
+    RequestMaxSizeExceeded,
+    /// The server rejected the request because it does not decode, and closed the channel.
+    ///
+    /// For example, the server does not know the request type, see
+    /// [Bad requests].
+    ///
+    /// [Bad requests]: crate::rpc#bad-requests
+    #[error("Server rejected the request: does not decode")]
+    RequestDecodeFailed,
+    /// The message is larger than [`MAX_MESSAGE_SIZE`].
+    ///
+    /// This receiver or the sender found it, and the channel is closed.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
-    #[error("Maximum message size exceeded")]
-    MaxMessageSizeExceeded,
-    /// The sender could not encode a message.
+    #[error("Message too large")]
+    MessageMaxSizeExceeded,
+    /// The sender could not encode the message, and closed the channel.
     #[error("Sender could not encode the message")]
-    EncodeFailed,
-    /// The message does not decode.
+    MessageEncodeFailed,
+    /// The message does not decode, so this receiver closed the channel.
     #[cfg(feature = "rpc")]
     #[error("Message does not decode")]
-    DecodeFailed {
+    MessageDecodeFailed {
         #[error(std_err)]
         source: postcard::Error,
     },
-    /// The server rejected the request.
-    ///
-    /// This is about the request, not about a message on this channel, see
-    /// [Bad requests]. If the server also closes the connection, the close can
-    /// arrive first, and the receiver gets [`Self::Io`] instead.
-    ///
-    /// [Bad requests]: crate::rpc#bad-requests
-    #[error("Bad request")]
-    BadRequest,
     /// An io error, for example because the connection was lost.
     ///
     /// A stream that ends in the middle of a message also gives an io error.

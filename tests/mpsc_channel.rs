@@ -288,18 +288,18 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
     let Err(cause) = send.send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxMessageSizeExceeded { .. }));
+    assert!(matches!(cause, SendError::MessageMaxSizeExceeded { .. }));
     // later sends get the same error, also for a message that is small enough
     assert!(matches!(
         send.send(vec![0u8; 1]).await,
-        Err(SendError::MaxMessageSizeExceeded { .. })
+        Err(SendError::MessageMaxSizeExceeded { .. })
     ));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
     assert!(matches!(
         cause,
-        mpsc::RecvError::MaxMessageSizeExceeded { .. }
+        mpsc::RecvError::MessageMaxSizeExceeded { .. }
     ));
     Ok(())
 }
@@ -315,13 +315,13 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
     let Err(cause) = send.try_send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxMessageSizeExceeded { .. }));
+    assert!(matches!(cause, SendError::MessageMaxSizeExceeded { .. }));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
     assert!(matches!(
         cause,
-        mpsc::RecvError::MaxMessageSizeExceeded { .. }
+        mpsc::RecvError::MessageMaxSizeExceeded { .. }
     ));
     Ok(())
 }
@@ -344,7 +344,7 @@ async fn mpsc_max_message_size_recv() -> TestResult<()> {
     };
     assert!(matches!(
         cause,
-        mpsc::RecvError::MaxMessageSizeExceeded { .. }
+        mpsc::RecvError::MessageMaxSizeExceeded { .. }
     ));
     Ok(())
 }
@@ -379,11 +379,14 @@ async fn mpsc_serialize_error_send() -> TestResult<()> {
     let Err(cause) = send.send(NoSer(1)).await else {
         panic!("client should have failed due to serialization error");
     };
-    assert!(matches!(cause, SendError::EncodeFailed { .. }), "{cause:?}");
+    assert!(
+        matches!(cause, SendError::MessageEncodeFailed { .. }),
+        "{cause:?}"
+    );
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert!(matches!(cause, mpsc::RecvError::EncodeFailed { .. }));
+    assert!(matches!(cause, mpsc::RecvError::MessageEncodeFailed { .. }));
     Ok(())
 }
 
@@ -401,7 +404,7 @@ async fn mpsc_serialize_error_recv() -> TestResult<()> {
         panic!("server should have failed due to serialization error");
     };
     assert!(
-        matches!(cause, mpsc::RecvError::DecodeFailed { .. }),
+        matches!(cause, mpsc::RecvError::MessageDecodeFailed { .. }),
         "{cause:?}"
     );
     Ok(())
@@ -418,9 +421,9 @@ async fn noser_receiver_kept(server: Endpoint) -> TestResult<()> {
     Ok(())
 }
 
-/// Checks that a sender gets `DecodeFailed` if the remote receiver cannot decode a message.
+/// Checks that a sender gets `MessageDecodeFailed` if the remote receiver cannot decode a message.
 #[tokio::test]
-async fn mpsc_decode_error_remote_decode_failed() -> TestResult<()> {
+async fn mpsc_decode_error_reaches_sender() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(noser_receiver_kept(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
@@ -436,22 +439,25 @@ async fn mpsc_decode_error_remote_decode_failed() -> TestResult<()> {
         }
     })
     .await?;
-    assert!(matches!(err, SendError::DecodeFailed { .. }), "{err:?}");
+    assert!(
+        matches!(err, SendError::MessageDecodeFailed { .. }),
+        "{err:?}"
+    );
     // later sends, also on a clone that did not see the stop
     assert!(matches!(
         send.send(2).await,
-        Err(SendError::DecodeFailed { .. })
+        Err(SendError::MessageDecodeFailed { .. })
     ));
     assert!(matches!(
         clone.try_send(2).await,
-        Err(SendError::DecodeFailed { .. })
+        Err(SendError::MessageDecodeFailed { .. })
     ));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
 }
 
-/// Checks that a receiver stops the stream with code 3 if a message does not decode.
+/// Checks that a receiver stops the stream with `MessageDecodeFailed` if a message does not decode.
 #[tokio::test]
 async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
@@ -461,7 +467,7 @@ async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     // an odd number does not decode as `NoSer`
     send.write_length_prefixed(1u64).await?;
     let code = timeout(Duration::from_secs(5), send.stopped()).await??;
-    assert_eq!(code, Some(ErrorCode::DecodeFailed.into()));
+    assert_eq!(code, Some(ErrorCode::MessageDecodeFailed.into()));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())

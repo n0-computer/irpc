@@ -17,13 +17,14 @@ pub mod oneshot;
 /// send fails for one of two reasons:
 ///
 /// * The message of this send is bad. It is too large
-///   ([`MaxMessageSizeExceeded`]), or it does not encode (`EncodeFailed`). This
-///   sender finds this before it writes the message.
+///   ([`MessageMaxSizeExceeded`]), or it does not encode (`MessageEncodeFailed`).
+///   This sender finds this before it writes the message.
 /// * Something other than this message ended the channel:
 ///   * The receiver closed it ([`ReceiverClosed`]).
-///   * The receiver rejected an earlier message ([`MaxMessageSizeExceeded`] or
-///     [`DecodeFailed`]).
-///   * The server rejected the request ([`BadRequest`]).
+///   * The server rejected the request ([`RequestMaxSizeExceeded`] or
+///     [`RequestDecodeFailed`]).
+///   * The receiver rejected an earlier message ([`MessageMaxSizeExceeded`] or
+///     [`MessageDecodeFailed`]).
 ///   * The connection failed ([`Io`]).
 ///
 /// After an error, the channel is closed. Later sends get the same error, or
@@ -31,9 +32,10 @@ pub mod oneshot;
 /// failure.
 ///
 /// [`ReceiverClosed`]: Self::ReceiverClosed
-/// [`MaxMessageSizeExceeded`]: Self::MaxMessageSizeExceeded
-/// [`DecodeFailed`]: Self::DecodeFailed
-/// [`BadRequest`]: Self::BadRequest
+/// [`RequestMaxSizeExceeded`]: Self::RequestMaxSizeExceeded
+/// [`RequestDecodeFailed`]: Self::RequestDecodeFailed
+/// [`MessageMaxSizeExceeded`]: Self::MessageMaxSizeExceeded
+/// [`MessageDecodeFailed`]: Self::MessageDecodeFailed
 /// [`Io`]: Self::Io
 #[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
@@ -45,29 +47,37 @@ pub enum SendError {
     /// with code 0, for example because it was dropped.
     #[error("Receiver closed")]
     ReceiverClosed,
-    /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+    /// The server rejected the request of this channel because it is too large.
     ///
-    /// Either this sender found it, or the receiver reported it.
+    /// The channel is closed. Only the sender of updates gets this, see [Bad requests].
+    ///
+    /// [Bad requests]: crate::rpc#bad-requests
+    #[error("Server rejected the request: too large")]
+    RequestMaxSizeExceeded,
+    /// The server rejected the request of this channel because it does not decode.
+    ///
+    /// The channel is closed. Only the sender of updates gets this, see [Bad requests].
+    ///
+    /// [Bad requests]: crate::rpc#bad-requests
+    #[error("Server rejected the request: does not decode")]
+    RequestDecodeFailed,
+    /// This message, or an earlier one, is larger than [`MAX_MESSAGE_SIZE`].
+    ///
+    /// This sender or the receiver found it, and the channel is closed.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
-    #[error("Maximum message size exceeded")]
-    MaxMessageSizeExceeded,
-    /// The message does not encode.
+    #[error("Message too large")]
+    MessageMaxSizeExceeded,
+    /// This message does not encode, so this sender closed the channel.
     #[cfg(feature = "rpc")]
     #[error("Message does not encode")]
-    EncodeFailed {
+    MessageEncodeFailed {
         #[error(std_err)]
         source: postcard::Error,
     },
-    /// The receiver could not decode a message.
+    /// The receiver could not decode an earlier message, and closed the channel.
     #[error("Receiver could not decode the message")]
-    DecodeFailed,
-    /// The server rejected the request that this stream belongs to.
-    ///
-    /// This is about the request, not about a message on this channel. The
-    /// sender of the updates of a request gets this.
-    #[error("Bad request")]
-    BadRequest,
+    MessageDecodeFailed,
     /// An io error, for example because the connection was lost.
     ///
     /// After a send was cancelled, later sends get an io error with

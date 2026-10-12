@@ -7,7 +7,7 @@ use irpc::{
     Client, WithChannels,
     channel::{SendError, oneshot},
     noq::listen,
-    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, read_request},
+    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, WriteError, read_request},
 };
 use n0_future::{future::poll_once, task::AbortOnDropHandle};
 use noq::ConnectionError;
@@ -91,7 +91,7 @@ async fn bad_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::BadRequest.into());
+    assert_eq!(close.error_code, ErrorCode::RequestDecodeFailed.into());
     Ok(())
 }
 
@@ -108,7 +108,7 @@ async fn too_large_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::BadRequest.into());
+    assert_eq!(close.error_code, ErrorCode::RequestMaxSizeExceeded.into());
     Ok(())
 }
 
@@ -129,7 +129,7 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
         matches!(
             err,
             irpc::Error::OneshotRecv {
-                source: oneshot::RecvError::BadRequest { .. },
+                source: oneshot::RecvError::RequestDecodeFailed { .. },
                 ..
             }
         ),
@@ -139,7 +139,7 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
     Ok(())
 }
 
-/// The sender of the updates of a bad request gets `BadRequest`, as the receiver of its response does.
+/// The sender of the updates of a bad request gets `RequestDecodeFailed`, as the receiver of its response does.
 #[tokio::test]
 async fn bad_request_update_sender() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
@@ -153,7 +153,7 @@ async fn bad_request_update_sender() -> TestResult<()> {
         .await?;
     let err = rx.await.expect_err("server does not know the request");
     assert!(
-        matches!(err, oneshot::RecvError::BadRequest { .. }),
+        matches!(err, oneshot::RecvError::RequestDecodeFailed { .. }),
         "{err:?}"
     );
     let err = tokio::time::timeout(Duration::from_secs(5), async {
@@ -164,7 +164,44 @@ async fn bad_request_update_sender() -> TestResult<()> {
         }
     })
     .await?;
-    assert!(matches!(err, SendError::BadRequest { .. }), "{err:?}");
+    assert!(
+        matches!(err, SendError::RequestDecodeFailed { .. }),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+/// A client that cannot send a request resets its stream with the reason.
+#[tokio::test]
+async fn too_large_rpc_resets_with_reason() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let connecting = client_endpoint.connect(server_addr, "localhost")?;
+    let accepting = async { server.accept().await.expect("endpoint is open").await };
+    let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+    let client = Client::<client::EchoProtocol>::boxed(client_conn);
+
+    let large = "a".repeat(MAX_MESSAGE_SIZE as usize + 1);
+    let err = client
+        .rpc(client::Echo(large))
+        .await
+        .expect_err("the request is too large");
+    assert!(
+        matches!(
+            err,
+            irpc::Error::Write {
+                source: WriteError::RequestMaxSizeExceeded { .. },
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let (_send, mut recv) = server_conn.accept_bi().await?;
+    assert_eq!(
+        recv.read(&mut [0]).await,
+        Err(noq::ReadError::Reset(
+            ErrorCode::RequestMaxSizeExceeded.into()
+        ))
+    );
     Ok(())
 }
 
@@ -176,7 +213,7 @@ async fn dropped_rpc_keeps_connection() -> TestResult<()> {
     let client = Client::<client::EchoProtocol>::boxed(conn);
 
     // The request is larger than the flow control window, so one poll cannot
-    // write all of it. The drop then resets the stream with `ErrorCode::Aborted`.
+    // write all of it. The drop then resets the stream with `ErrorCode::RequestAborted`.
     let mut rpc = Box::pin(client.rpc(client::Echo("a".repeat(8 * 1024 * 1024))));
     assert!(poll_once(&mut rpc).await.is_none(), "the write is not done");
     drop(rpc);
@@ -197,7 +234,7 @@ async fn truncated_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::BadRequest.into());
+    assert_eq!(close.error_code, ErrorCode::RequestDecodeFailed.into());
     Ok(())
 }
 
@@ -226,7 +263,7 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     let (tx, rx) = client
         .client_streaming(client::Upload("a".into()), 1)
         .await?;
-    // The update does not encode, so the sender resets with `ErrorCode::EncodeFailed`.
+    // The update does not encode, so the sender resets with `ErrorCode::MessageEncodeFailed`.
     tx.send(NoSer(1))
         .await
         .expect_err("odd numbers do not encode");
@@ -257,7 +294,7 @@ async fn read_request_returns_truncated_request() -> TestResult<()> {
         .await
         .expect_err("the request is not complete");
     assert!(
-        matches!(err, ReadRequestError::InvalidRequest { .. }),
+        matches!(err, ReadRequestError::RequestMalformed { .. }),
         "{err:?}"
     );
     Ok(())
@@ -297,7 +334,7 @@ async fn read_request_returns_bad_request() -> TestResult<()> {
             .await
             .expect_err("server does not know the request");
         assert!(
-            matches!(err, ReadRequestError::DecodeFailed { .. }),
+            matches!(err, ReadRequestError::RequestDecodeFailed { .. }),
             "{err:?}"
         );
         // The connection is still open, so the server reads the next request.
