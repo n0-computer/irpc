@@ -1,6 +1,9 @@
 use std::vec;
 
+use n0_tracing_test::traced_test;
+
 #[tokio::test]
+#[traced_test]
 async fn test_map_filter() {
     use crate::channel::mpsc;
     let (tx, rx) = mpsc::channel::<u64>(100);

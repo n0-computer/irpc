@@ -82,6 +82,8 @@ futures-util.workspace = true
 hex = "0.4.3"
 rand = "0.10.3"
 n0-tracing-test = "0.3.0"
+# `#[traced_test]` expands to `tracing` macros, also without the optional dependency
+tracing = { workspace = true }
 
 [features]
 # enable the remote transport

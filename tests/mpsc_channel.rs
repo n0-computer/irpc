@@ -17,6 +17,7 @@ use irpc::{
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
+use n0_tracing_test::traced_test;
 use noq::Endpoint;
 use serde::{Deserialize, Serialize};
 use testresult::TestResult;
@@ -28,8 +29,8 @@ use common::*;
 /// Checks that all clones of a `Sender` will get the closed signal as soon as
 /// a send fails with an io error.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
-    tracing_subscriber::fmt::try_init().ok();
     let (server, client, server_addr) = create_connected_endpoints()?;
     // accept a single bidi stream on a single connection, then immediately stop it
     let server = tokio::spawn(async move {
@@ -75,6 +76,7 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
 /// Checks that all clones of a `Sender` will get the closed signal as soon as
 /// a send future gets dropped before completing.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     // accept a single bidi stream on a single connection, then read indefinitely
@@ -126,6 +128,7 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
 
 /// Checks that a sender gets `ReceiverClosed` if the remote receiver is dropped, as for a local one.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_receiver_dropped() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -159,6 +162,7 @@ async fn mpsc_receiver_dropped() -> TestResult<()> {
 /// Checks that after the remote receiver is dropped, every send on every clone
 /// of a `Sender` gets `ReceiverClosed`, also on clones that did not see the stop.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_receiver_dropped_clones() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -206,6 +210,7 @@ async fn mpsc_receiver_dropped_clones() -> TestResult<()> {
 
 /// Check that `ReceiverClosed` works well with the `Handler` as well.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_receiver_dropped_proto() -> TestResult<()> {
     #[rpc_requests(message = ProtoMessage)]
     #[derive(Debug, Serialize, Deserialize)]
@@ -276,6 +281,7 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
 
 /// Checks that the max message size is enforced on the sender side and that errors are propagated to the receiver side.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_max_message_size_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -300,6 +306,7 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
 
 /// Checks that `try_send` resets the stream for a message that is too large, as `send` does.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_max_message_size_try_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -321,6 +328,7 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
 
 /// Checks that the max message size is enforced on receiver side.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_max_message_size_recv() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -360,6 +368,7 @@ async fn noser_receiver(server: Endpoint) -> Result<(), mpsc::RecvError> {
 
 /// Checks that a serialization error is caught and propagated to the receiver.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_serialize_error_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(noser_receiver(server));
@@ -385,6 +394,7 @@ async fn mpsc_serialize_error_send() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn mpsc_serialize_error_recv() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(noser_receiver(server));
@@ -405,6 +415,7 @@ async fn mpsc_serialize_error_recv() -> TestResult<()> {
 
 /// Checks that a receiver stops the stream with code 3 if a message does not decode.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
