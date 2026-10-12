@@ -13,8 +13,10 @@
 //! thread, and the server asks the subscriber of the request span. Without the
 //! layer, irpc does not propagate span context.
 //!
-//! The propagator and the layer need the `span-propagation` feature. Neither
-//! the feature nor the layer changes the wire format: a protocol with
+//! The propagator and the layer need the `tracing-subscriber-03` feature,
+//! because the layer is a layer of `tracing-subscriber` 0.3. A later version
+//! of `tracing-subscriber` would get its own feature. Neither the feature nor
+//! the layer changes the wire format: a protocol with
 //! `span_propagation` always sends an `Option<SpanContextCarrier>`, which is
 //! `None` when irpc does not propagate span context.
 //!
@@ -24,7 +26,7 @@ use std::{collections::HashMap, future::Future};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "span-propagation")]
+#[cfg(feature = "tracing-subscriber-03")]
 tokio::task_local! {
     static SPAN_CONTEXT: SpanContextCarrier;
 }
@@ -57,9 +59,9 @@ impl SpanContextCarrier {
 
     /// Returns the context of the current span, if the subscriber has a propagator.
     pub(crate) fn from_current() -> Option<Self> {
-        #[cfg(not(feature = "span-propagation"))]
+        #[cfg(not(feature = "tracing-subscriber-03"))]
         return None;
-        #[cfg(feature = "span-propagation")]
+        #[cfg(feature = "tracing-subscriber-03")]
         tracing::dispatcher::get_default(|dispatch| {
             let propagator = dispatch.downcast_ref::<PropagatorLayer>()?;
             let mut carrier = Self::default();
@@ -70,7 +72,7 @@ impl SpanContextCarrier {
 }
 
 /// Connects span propagation to a tracing backend.
-#[cfg(feature = "span-propagation")]
+#[cfg(feature = "tracing-subscriber-03")]
 pub trait Propagator: Send + Sync + 'static {
     /// Writes the context of `span` into `carrier`.
     fn inject(&self, span: &tracing::Span, carrier: &mut SpanContextCarrier);
@@ -88,7 +90,7 @@ pub trait Propagator: Send + Sync + 'static {
 /// use per-layer filters, and every `debug!` and `trace!` would reach them.
 /// Another layer must enable the request spans, for example the layer of the
 /// tracing backend.
-#[cfg(feature = "span-propagation")]
+#[cfg(feature = "tracing-subscriber-03")]
 pub fn layer<S>(propagator: impl Propagator) -> impl tracing_subscriber::Layer<S>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
@@ -98,10 +100,10 @@ where
 }
 
 /// The layer from [`layer`], without its filter.
-#[cfg(feature = "span-propagation")]
+#[cfg(feature = "tracing-subscriber-03")]
 struct PropagatorLayer(Box<dyn Propagator>);
 
-#[cfg(feature = "span-propagation")]
+#[cfg(feature = "tracing-subscriber-03")]
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}
 
 /// Runs `fut` with `carrier` in scope for [`set_span_parent_from_remote`].
@@ -111,11 +113,11 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}
 /// The carrier lives in a task-local of `fut`, so concurrent requests do not see
 /// each other's context, and the context moves with `fut` across threads.
 pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F) -> F::Output {
-    #[cfg(not(feature = "span-propagation"))]
+    #[cfg(not(feature = "tracing-subscriber-03"))]
     let _ = carrier;
-    #[cfg(not(feature = "span-propagation"))]
+    #[cfg(not(feature = "tracing-subscriber-03"))]
     return fut.await;
-    #[cfg(feature = "span-propagation")]
+    #[cfg(feature = "tracing-subscriber-03")]
     match carrier {
         Some(carrier) => SPAN_CONTEXT.scope(carrier, fut).await,
         None => fut.await,
@@ -126,11 +128,11 @@ pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F
 ///
 /// The code from `rpc_requests(span_propagation)` calls this. It does nothing
 /// outside of [`scope_remote`], if the subscriber of `span` has no propagator, or
-/// without the `span-propagation` feature.
+/// without the `tracing-subscriber-03` feature.
 pub fn set_span_parent_from_remote(span: &tracing::Span) {
-    #[cfg(not(feature = "span-propagation"))]
+    #[cfg(not(feature = "tracing-subscriber-03"))]
     let _ = span;
-    #[cfg(feature = "span-propagation")]
+    #[cfg(feature = "tracing-subscriber-03")]
     span.with_subscriber(|(_id, dispatch)| {
         let Some(propagator) = dispatch.downcast_ref::<PropagatorLayer>() else {
             return;

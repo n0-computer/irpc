@@ -224,7 +224,7 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 ///   of the client, as `(Option<SpanContextCarrier>, Message)` on the wire. The generated
 ///   `RemoteService` implementation sets the parent of the request span from it. This needs a
 ///   propagator in the tracing subscriber, for example the layer of the `irpc-opentelemetry`
-///   crate, and the `span-propagation` feature of irpc.
+///   crate, and the `tracing-subscriber-03` feature of irpc.
 ///
 /// ## Variant attributes
 ///
