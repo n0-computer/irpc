@@ -44,7 +44,9 @@
 //! [`Client::rpc`] while it wrote a large request. A client that cannot send a
 //! request resets the stream with [`ErrorCode::RequestMaxSizeExceeded`] or
 //! [`ErrorCode::RequestEncodeFailed`]. The server skips a request whose stream
-//! was reset, and reads the next request.
+//! was reset. It resets its side of the stream with
+//! [`ErrorCode::RequestAborted`], so the receiver of the response gets an
+//! error, and reads the next request.
 //!
 //! # Channel messages
 //!
@@ -126,7 +128,8 @@ pub enum ErrorCode {
     Closed = 0,
     /// The client dropped the request before it wrote all of it.
     ///
-    /// The server skips such a request, see [Abandoned requests].
+    /// The server skips such a request, and resets its side of the stream
+    /// with this code, see [Abandoned requests].
     ///
     /// [Abandoned requests]: self#abandoned-requests
     RequestAborted = 1,
@@ -1201,6 +1204,9 @@ async fn read_request_inner<S: Service>(
             ReadFrame::DecodeFailed(source) => e!(ReadRequestError::RequestDecodeFailed, source),
             ReadFrame::Reset(reason) => {
                 debug!(?reason, "skipped request: the client reset its stream");
+                // A dropped stream finishes, which a client with an mpsc
+                // response would take for the end of the response.
+                send.reset(ErrorCode::RequestAborted.into()).ok();
                 continue;
             }
             // The next `accept_bi` returns why.

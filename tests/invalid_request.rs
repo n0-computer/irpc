@@ -5,7 +5,7 @@ use std::{pin::pin, time::Duration};
 
 use irpc::{
     Client, WithChannels,
-    channel::{SendError, oneshot},
+    channel::{SendError, mpsc, oneshot},
     noq::listen,
     rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, WriteError, read_request},
 };
@@ -36,6 +36,9 @@ mod server {
         #[rpc(tx = oneshot::Sender<()>, rx = mpsc::Receiver<NoSer>)]
         #[wrap(Upload)]
         Upload(String),
+        #[rpc(tx = mpsc::Sender<()>, rx = mpsc::Receiver<NoSer>)]
+        #[wrap(Exchange)]
+        Exchange(String),
     }
 }
 
@@ -58,6 +61,9 @@ mod client {
         #[rpc(tx = oneshot::Sender<()>, rx = mpsc::Receiver<NoSer>)]
         #[wrap(Upload)]
         Upload(String),
+        #[rpc(tx = mpsc::Sender<()>, rx = mpsc::Receiver<NoSer>)]
+        #[wrap(Exchange)]
+        Exchange(String),
         #[rpc(tx = oneshot::Sender<String>)]
         #[wrap(Shout)]
         Shout(String),
@@ -268,12 +274,47 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
         .await
         .expect_err("odd numbers do not encode");
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
-    // The server skipped the upload and ended its side of the stream.
+    // The server skipped the upload and reset its side of the stream.
     let err = rx.await.expect_err("server skips the upload");
-    assert!(
-        matches!(err, oneshot::RecvError::SenderClosed { .. }),
-        "{err:?}"
-    );
+    assert!(matches!(err, oneshot::RecvError::Io { .. }), "{err:?}");
+    conn.close(0u32.into(), b"");
+    server.await??;
+    Ok(())
+}
+
+/// Like [`reset_before_read_skips_request`], but the response is an mpsc channel.
+#[tokio::test]
+async fn reset_before_read_fails_mpsc_response() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.expect("endpoint is open").await?;
+        // Read only after the reset arrived: noq then has dropped the request.
+        while conn.stats().frame_rx.reset_stream == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let Some(server::EchoMessage::Echo(msg)) =
+            read_request::<server::EchoProtocol>(&conn).await?
+        else {
+            panic!("server skips the exchange");
+        };
+        msg.tx.send(msg.inner.0).await?;
+        conn.closed().await;
+        TestResult::Ok(())
+    });
+    let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
+    let client = Client::<client::EchoProtocol>::boxed(conn.clone());
+
+    let (tx, mut rx) = client
+        .bidi_streaming(client::Exchange("a".into()), 1, 1)
+        .await?;
+    // The update does not encode, so the sender resets with `ErrorCode::MessageEncodeFailed`.
+    tx.send(NoSer(1))
+        .await
+        .expect_err("odd numbers do not encode");
+    assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
+    // The server skipped the exchange, so the response fails instead of ending.
+    let err = rx.recv().await.expect_err("server skips the exchange");
+    assert!(matches!(err, mpsc::RecvError::Io { .. }), "{err:?}");
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
