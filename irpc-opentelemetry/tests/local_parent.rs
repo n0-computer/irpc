@@ -5,10 +5,7 @@
 //! activation off, the current OpenTelemetry context is empty, and setting it as
 //! parent would make the request span a new root.
 
-use std::{
-    net::{Ipv4Addr, SocketAddrV4},
-    sync::Arc,
-};
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 use irpc::{
     Client, WithChannels,
@@ -68,9 +65,9 @@ async fn check_local_parent(context_activation: bool) -> Result<()> {
 
     // Spans are exported when they close, so the handler reports when its spans are closed.
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
-    let handler: Handler<EchoProtocol> = Arc::new(move |request, rx, tx| {
+    let handler = Handler::raw(move |request: EchoProtocol, rx, tx| {
         let done_tx = done_tx.clone();
-        Box::pin(async move {
+        async move {
             async move {
                 let EchoMessage::Echo(WithChannels {
                     inner, tx, span, ..
@@ -82,7 +79,7 @@ async fn check_local_parent(context_activation: bool) -> Result<()> {
             .await;
             done_tx.send(()).ok();
             Ok(())
-        })
+        }
     });
     let _server = AbortOnDropHandle::new(tokio::spawn(listen::<EchoProtocol>(server, handler)));
     let client = Client::<EchoProtocol>::noq(client, server_addr);

@@ -69,13 +69,11 @@ async fn propagator_carries_headers_to_the_server() -> TestResult<()> {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let (server, client, server_addr) = create_connected_endpoints()?;
-    let handler: Handler<EchoProtocol> = Arc::new(|request, rx, tx| {
-        Box::pin(async move {
-            let EchoMessage::Echo(WithChannels { inner, tx, .. }) =
-                request.with_remote_channels(rx, tx);
-            tx.send(inner.0).await.ok();
-            Ok(())
-        })
+    let handler = Handler::raw(|request: EchoProtocol, rx, tx| async move {
+        let EchoMessage::Echo(WithChannels { inner, tx, .. }) =
+            request.with_remote_channels(rx, tx);
+        tx.send(inner.0).await.ok();
+        Ok(())
     });
     let _server = AbortOnDropHandle::new(tokio::spawn(listen::<EchoProtocol>(server, handler)));
     let client = Client::<EchoProtocol>::noq(client, server_addr);
