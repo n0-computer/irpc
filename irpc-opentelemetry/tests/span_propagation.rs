@@ -1,4 +1,3 @@
-#[cfg(feature = "tracing-opentelemetry")]
 mod span_propagation {
 
     use iroh::{Endpoint, endpoint::presets, protocol::Router};
@@ -57,6 +56,7 @@ mod span_propagation {
         // that impls `LookupSpan`
         let subscriber = Registry::default()
             .with(telemetry)
+            .with(irpc_opentelemetry::layer())
             .with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::from_default_env()));
         tracing::subscriber::set_global_default(subscriber).expect("global already set");
 

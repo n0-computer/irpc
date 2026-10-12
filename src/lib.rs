@@ -62,18 +62,25 @@
 //!
 //! ## Features
 //!
-//! - `derive`: Enable the [`rpc_requests`] macro.
+//! - `derive`: Enable the [`rpc_requests`] macro. Enabled by default.
 //! - `rpc`: Enable the rpc features. Enabled by default.
 //!   By disabling this feature, all rpc related dependencies are removed.
 //!   The remaining dependencies are just serde, tokio and tokio-util.
 //! - `iroh`: Enable the iroh transport in the [`iroh`] module. Enabled by
 //!   default. This feature enables `rpc`.
-//! - `spans`: Enable tracing spans for messages. Enabled by default.
-//!   This is useful even without rpc, to not lose tracing context when message
-//!   passing. This is frequently done manually. This obviously requires
-//!   a dependency on tracing.
+//! - `spans`: When irpc creates a message, it stores the current tracing span
+//!   in [`WithChannels::span`]. A handler can enter this span to continue the
+//!   trace of the caller across the channel, which also helps without `rpc`.
+//!   For remote requests, the server creates the message, so the span is the
+//!   current span on the server. The [`rpc_requests`] macro adds a
+//!   `parent_span()` method to the message enum. Enabled by default.
 //! - `noq_endpoint_setup`: Easy way to create noq endpoints, in the [`noq`]
 //!   module. This is useful both for testing and for rpc on localhost.
+//! - `stream`: Convert channels to `Stream` and `Sink`. Enabled by default.
+//! - `varint-util`: Varint helpers in [`util`], without `rpc`.
+//! - `tracing-subscriber-03`: Propagate span context to the remote, with a
+//!   layer for `tracing-subscriber` 0.3, see [`span_propagation`]. Not enabled
+//!   by default. The `irpc-opentelemetry` crate enables it.
 //!
 //! # Example
 //!
@@ -156,6 +163,7 @@
 //! framework for any transport with cheap streams such as QUIC. Compared to
 //! quic-rpc, this crate does not abstract over the stream type and is focused
 //! on [iroh](https://docs.rs/iroh/latest/iroh/index.html) and our [noq](https://docs.rs/noq/latest/noq/index.html).
+
 #![cfg_attr(irpc_docsrs, feature(doc_cfg))]
 use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 
@@ -220,12 +228,11 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// * `no_rpc` *(optional, no value)*: If set, no implementation of `RemoteService` will be generated and the generated
 ///   code works without the `rpc` feature of `irpc`.
 /// * `no_spans` *(optional, no value)*: If set, the generated code works without the `spans` feature of `irpc`.
-/// * `span_propagation` *(optional, no value)*: If set, enables OpenTelemetry span context propagation
-///   across remote connections. When enabled, span context is included in the wire format as
-///   `(Option<SpanContextCarrier>, Message)`, and the generated `RemoteService` implementation
-///   will set the parent span from the propagated remote context. Requires the `tracing-opentelemetry`
-///   feature to be enabled for actual OpenTelemetry integration; without it, the context is
-///   still serialized but has no effect.
+/// * `span_propagation` *(optional, no value)*: If set, each request carries the span context
+///   of the client, as `(Option<SpanContextCarrier>, Message)` on the wire. The generated
+///   `RemoteService` implementation sets the parent of the request span from it. This needs a
+///   propagator in the tracing subscriber, for example the layer of the `irpc-opentelemetry`
+///   crate, and the `tracing-subscriber-03` feature of irpc.
 ///
 /// ## Variant attributes
 ///
@@ -314,13 +321,12 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use self::{
     channel::{
-        mpsc,
+        SendError, mpsc,
         none::{NoReceiver, NoSender},
         oneshot,
     },
     sealed::Sealed,
 };
-use crate::channel::SendError;
 
 pub mod channel;
 #[cfg(feature = "rpc")]
