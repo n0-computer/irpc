@@ -6,10 +6,7 @@ use std::{pin::pin, time::Duration};
 use irpc::{
     Client, WithChannels,
     noq::listen,
-    rpc::{
-        ERROR_CODE_DECODE_FAILED, ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, Handler, MAX_MESSAGE_SIZE,
-        ReadRequestError, read_request,
-    },
+    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, WriteError, read_request},
 };
 use n0_future::{future::poll_once, task::AbortOnDropHandle};
 use noq::ConnectionError;
@@ -60,9 +57,15 @@ mod client {
         #[rpc(tx = oneshot::Sender<()>, rx = mpsc::Receiver<NoSer>)]
         #[wrap(Upload)]
         Upload(String),
+        #[rpc(tx = mpsc::Sender<()>, rx = mpsc::Receiver<NoSer>)]
+        #[wrap(Exchange)]
+        Exchange(String),
         #[rpc(tx = oneshot::Sender<String>)]
         #[wrap(Shout)]
         Shout(String),
+        #[rpc(tx = oneshot::Sender<()>, rx = mpsc::Receiver<u32>)]
+        #[wrap(ShoutStream)]
+        ShoutStream(String),
     }
 }
 
@@ -83,14 +86,16 @@ async fn bad_request_closes_connection() -> TestResult<()> {
     let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
     let client = Client::<client::EchoProtocol>::boxed(conn.clone());
 
-    client
+    let err = client
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
+    // The close usually arrives before the reset of the stream.
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ERROR_CODE_DECODE_FAILED.into());
+    assert_eq!(close.error_code, ErrorCode::RequestDecodeFailed.into());
     Ok(())
 }
 
@@ -107,10 +112,7 @@ async fn too_large_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(
-        close.error_code,
-        ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into()
-    );
+    assert_eq!(close.error_code, ErrorCode::RequestMaxSizeExceeded.into());
     Ok(())
 }
 
@@ -123,11 +125,72 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
     // A client on this one connection, so the second request shows that it still works.
     let client = Client::<client::EchoProtocol>::boxed(conn);
 
-    client
+    let err = client
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
+    Ok(())
+}
+
+/// The sender of the updates of a bad request gets the code of the rejection, as the receiver of its response does.
+#[tokio::test]
+async fn bad_request_update_sender() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let handler = echo_handler().skip_bad_requests(true);
+    let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, handler)));
+    let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
+    let client = Client::<client::EchoProtocol>::boxed(conn);
+
+    let (tx, rx) = client
+        .client_streaming(client::ShoutStream("a".into()), 1)
+        .await?;
+    let err = rx.await.expect_err("server does not know the request");
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
+    let err = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Err(err) = tx.send(1).await {
+                break err;
+            }
+        }
+    })
+    .await?;
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
+    Ok(())
+}
+
+/// A client that cannot send a request resets its stream with the reason.
+#[tokio::test]
+async fn too_large_rpc_resets_with_reason() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let connecting = client_endpoint.connect(server_addr, "localhost")?;
+    let accepting = async { server.accept().await.expect("endpoint is open").await };
+    let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+    let client = Client::<client::EchoProtocol>::boxed(client_conn);
+
+    let large = "a".repeat(MAX_MESSAGE_SIZE as usize + 1);
+    let err = client
+        .rpc(client::Echo(large))
+        .await
+        .expect_err("the request is too large");
+    assert!(
+        matches!(
+            err,
+            irpc::Error::Write {
+                source: WriteError::MaxSizeExceeded { .. },
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let (_send, mut recv) = server_conn.accept_bi().await?;
+    assert_eq!(
+        recv.read(&mut [0]).await,
+        Err(noq::ReadError::Reset(
+            ErrorCode::RequestMaxSizeExceeded.into()
+        ))
+    );
     Ok(())
 }
 
@@ -139,7 +202,7 @@ async fn dropped_rpc_keeps_connection() -> TestResult<()> {
     let client = Client::<client::EchoProtocol>::boxed(conn);
 
     // The request is larger than the flow control window, so one poll cannot
-    // write all of it. The drop then resets the stream with `ERROR_CODE_ABORTED`.
+    // write all of it. The drop then resets the stream with `ErrorCode::RequestAborted`.
     let mut rpc = Box::pin(client.rpc(client::Echo("a".repeat(8 * 1024 * 1024))));
     assert!(poll_once(&mut rpc).await.is_none(), "the write is not done");
     drop(rpc);
@@ -160,24 +223,24 @@ async fn truncated_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ERROR_CODE_DECODE_FAILED.into());
+    assert_eq!(close.error_code, ErrorCode::RequestDecodeFailed.into());
     Ok(())
 }
 
-/// The update sender resets the stream of its request before the server reads it.
+/// The update senders reset the streams of their requests before the server reads them.
 #[tokio::test]
 async fn reset_before_read_skips_request() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
         let conn = server.accept().await.expect("endpoint is open").await?;
-        // Read only after the reset arrived: noq then has dropped the request.
-        while conn.stats().frame_rx.reset_stream == 0 {
+        // Read only after both resets arrived: noq then has dropped both requests.
+        while conn.stats().frame_rx.reset_stream < 2 {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         let Some(server::EchoMessage::Echo(msg)) =
             read_request::<server::EchoProtocol>(&conn).await?
         else {
-            panic!("server skips the upload");
+            panic!("server skips the upload and the exchange");
         };
         msg.tx.send(msg.inner.0).await?;
         conn.closed().await;
@@ -186,14 +249,27 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     let conn = client_endpoint.connect(server_addr, "localhost")?.await?;
     let client = Client::<client::EchoProtocol>::boxed(conn.clone());
 
-    let (tx, _rx) = client
+    let (upload_tx, upload_rx) = client
         .client_streaming(client::Upload("a".into()), 1)
         .await?;
-    // The update does not encode, so the sender resets with `ERROR_CODE_ENCODE_FAILED`.
-    tx.send(NoSer(1))
+    let (exchange_tx, mut exchange_rx) = client
+        .bidi_streaming(client::Exchange("a".into()), 1, 1)
+        .await?;
+    // The updates do not encode, so the senders reset with `ErrorCode::MessageEncodeFailed`.
+    upload_tx.send(NoSer(1)).await.expect_err("does not encode");
+    exchange_tx
+        .send(NoSer(1))
         .await
-        .expect_err("odd numbers do not encode");
+        .expect_err("does not encode");
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
+    // The server reset its side of both streams, so the mpsc response fails instead of ending.
+    let err = upload_rx.await.expect_err("server skips the upload");
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
+    let err = exchange_rx
+        .recv()
+        .await
+        .expect_err("server skips the exchange");
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
@@ -213,10 +289,7 @@ async fn read_request_returns_truncated_request() -> TestResult<()> {
     let err = read_request::<server::EchoProtocol>(&server_conn)
         .await
         .expect_err("the request is not complete");
-    assert!(
-        matches!(err, ReadRequestError::InvalidRequest { .. }),
-        "{err:?}"
-    );
+    assert!(matches!(err, ReadRequestError::Malformed { .. }), "{err:?}");
     Ok(())
 }
 

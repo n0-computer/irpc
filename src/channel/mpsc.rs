@@ -7,22 +7,49 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::A
 use n0_error::{e, stack_error};
 
 use super::SendError;
+#[cfg(feature = "rpc")]
+use crate::rpc::{self, ErrorCode};
 
-/// Error when receiving a oneshot or mpsc message. For local communication,
-/// the only thing that can go wrong is that the sender has been closed.
+/// Error when receiving an mpsc message.
 ///
-/// For rpc communication, there can be any number of errors, so this is a
-/// generic io error.
-#[stack_error(derive, add_meta, from_sources)]
+/// A local channel has no errors.
+///
+/// For a remote channel, the sender is on the other side of the connection:
+/// the server for a response stream, and the client for the updates of a request.
+///
+/// If the server rejects the request and also closes the connection, the close
+/// usually arrives first, and the receiver gets [`Io`] instead of [`Remote`].
+/// [`Self::remote_code`] returns the code in both cases.
+///
+/// [`Io`]: Self::Io
+/// [`Remote`]: Self::Remote
+#[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum RecvError {
-    /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+    /// The sender reset the stream with an irpc error code, and the channel is closed.
+    ///
+    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
+    ///
+    /// [`ErrorCode`]: crate::rpc::ErrorCode
+    /// [`rpc`]: crate::rpc
+    #[cfg(feature = "rpc")]
+    #[error("Sender closed the channel: {code}")]
+    Remote { code: crate::rpc::ErrorCode },
+    /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
-    #[error("Maximum message size exceeded")]
-    MaxMessageSizeExceeded,
-    /// An io error occurred. This can occur for remote communication,
-    /// due to a network error or deserialization error.
+    #[error("Message too large")]
+    MaxSizeExceeded,
+    /// The message does not decode, so this receiver closed the channel.
+    #[cfg(feature = "rpc")]
+    #[error("Message does not decode")]
+    DecodeFailed {
+        #[error(std_err)]
+        source: postcard::Error,
+    },
+    /// An io error, for example because the connection was lost.
+    ///
+    /// A stream that ends in the middle of a message also gives an io error.
     #[error("Io error")]
     Io {
         #[error(std_err)]
@@ -30,13 +57,42 @@ pub enum RecvError {
     },
 }
 
+/// Converts an io error from reading the stream of a remote channel.
+///
+/// A reset with an irpc error code becomes [`RecvError::Remote`], and any
+/// other io error becomes [`RecvError::Io`].
+impl From<io::Error> for RecvError {
+    fn from(err: io::Error) -> Self {
+        #[cfg(feature = "rpc")]
+        if let Some(code) = rpc::reset_code(&err) {
+            return e!(RecvError::Remote { code });
+        }
+        e!(RecvError::Io, err)
+    }
+}
+
 impl From<RecvError> for io::Error {
     fn from(e: RecvError) -> Self {
         match e {
             RecvError::Io { source, .. } => source,
-            RecvError::MaxMessageSizeExceeded { .. } => {
-                io::Error::new(io::ErrorKind::InvalidData, e)
-            }
+            #[cfg(feature = "rpc")]
+            RecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
+            _ => io::Error::new(io::ErrorKind::InvalidData, e),
+        }
+    }
+}
+
+#[cfg(feature = "rpc")]
+impl RecvError {
+    /// Returns the irpc error code that the peer sent, if any.
+    ///
+    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
+    /// the peer closed the connection with.
+    pub fn remote_code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::Remote { code, .. } => Some(*code),
+            Self::Io { source, .. } => rpc::io_close_code(source),
+            _ => None,
         }
     }
 }
