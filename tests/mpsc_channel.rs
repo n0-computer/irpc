@@ -607,6 +607,21 @@ async fn mpsc_connection_closed_inside_message_is_an_error() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that a reset with code 0 is a closed channel, not an io error.
+#[tokio::test]
+async fn mpsc_reset_with_code_0() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    send.reset(0u32.into())?;
+    let Err(cause) = server.await? else {
+        panic!("the sender reset the stream");
+    };
+    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
+    Ok(())
+}
+
 /// Checks that the max message size is enforced on the sender side and that errors are propagated to the receiver side.
 #[tokio::test]
 #[traced_test]
