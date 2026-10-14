@@ -228,7 +228,9 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 ///   of the client request span, as `(Option<SpanContextCarrier>, Message)` on the wire. irpc sets
 ///   the parent of the server request span from it, see [`Service::new_request_span`]. This needs a
 ///   propagator in the tracing subscriber, for example the layer of the `irpc-opentelemetry`
-///   crate, and the `tracing-subscriber-03` feature of irpc.
+///   crate, and the `tracing-subscriber-03` feature of irpc. The request spans have debug
+///   level, and the tracing backend on the server must record them, see
+///   [`span_propagation`].
 ///
 /// ## Variant attributes
 ///

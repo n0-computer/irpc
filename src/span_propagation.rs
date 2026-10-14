@@ -20,7 +20,15 @@
 //! `span_propagation` always sends an `Option<SpanContextCarrier>`, which is
 //! `None` when irpc does not propagate span context.
 //!
-//! The `irpc-opentelemetry` crate has a propagator for OpenTelemetry.
+//! irpc creates the request spans at debug level, see
+//! [`Service::new_request_span`](crate::Service::new_request_span). The server
+//! can only set the parent of a request span that the tracing backend records,
+//! so the filter of the backend on the server must let the request spans
+//! through. If it drops them, the server starts a new trace. The client sends
+//! the context of the span that it is in if the backend drops its request span.
+//!
+//! The `irpc-opentelemetry` crate has a propagator for OpenTelemetry, and
+//! documents how to filter for it.
 
 use std::collections::HashMap;
 
