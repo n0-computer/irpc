@@ -7,7 +7,7 @@ use n0_future::future::Boxed as BoxFuture;
 
 use super::SendError;
 #[cfg(feature = "rpc")]
-use crate::rpc::{self, ConnectionClose, RemoteCode};
+use crate::rpc::{self, ConnectionClose, ErrorCode};
 use crate::util::FusedOneshotReceiver;
 
 /// Error when receiving a oneshot message.
@@ -37,13 +37,13 @@ pub enum RecvError {
     SenderClosed,
     /// The sender reset the stream with a code, and the channel is closed.
     ///
-    /// The `code` says why, see [`RemoteCode`], and the [`rpc`] module for an overview.
+    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
     ///
-    /// [`RemoteCode`]: crate::rpc::RemoteCode
+    /// [`ErrorCode`]: crate::rpc::ErrorCode
     /// [`rpc`]: crate::rpc
     #[cfg(feature = "rpc")]
     #[error("Sender closed the channel: {code}")]
-    Remote { code: crate::rpc::RemoteCode },
+    Remote { code: crate::rpc::ErrorCode },
     /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
@@ -124,7 +124,7 @@ impl RecvError {
     ///
     /// This is the code of a [`Remote`](Self::Remote) error, or the code that
     /// the peer closed the connection with.
-    pub fn remote_code(&self) -> Option<RemoteCode> {
+    pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
             Self::ConnectionClosed { close, .. } => close.code(),

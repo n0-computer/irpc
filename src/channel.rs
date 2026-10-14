@@ -7,7 +7,7 @@ use n0_error::e;
 use n0_error::stack_error;
 
 #[cfg(feature = "rpc")]
-use crate::rpc::{ConnectionClose, RemoteCode};
+use crate::rpc::{ConnectionClose, ErrorCode};
 
 pub mod mpsc;
 pub mod none;
@@ -56,13 +56,13 @@ pub enum SendError {
     ReceiverClosed,
     /// The receiver stopped the stream with a code, and the channel is closed.
     ///
-    /// The `code` says why, see [`RemoteCode`], and the [`rpc`] module for an overview.
+    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
     ///
-    /// [`RemoteCode`]: crate::rpc::RemoteCode
+    /// [`ErrorCode`]: crate::rpc::ErrorCode
     /// [`rpc`]: crate::rpc
     #[cfg(feature = "rpc")]
     #[error("Receiver closed the channel: {code}")]
-    Remote { code: crate::rpc::RemoteCode },
+    Remote { code: crate::rpc::ErrorCode },
     /// This message is larger than [`MAX_MESSAGE_SIZE`], so this sender closed the channel.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
@@ -117,7 +117,7 @@ impl SendError {
     ///
     /// This is the code of a [`Remote`](Self::Remote) error, or the code that
     /// the peer closed the connection with.
-    pub fn remote_code(&self) -> Option<RemoteCode> {
+    pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
             Self::ConnectionClosed { close, .. } => close.code(),
@@ -131,7 +131,7 @@ impl From<noq::WriteError> for SendError {
     fn from(err: noq::WriteError) -> Self {
         match err {
             // A receiver that is dropped stops the stream with code 0.
-            noq::WriteError::Stopped(code) => match RemoteCode::from_code(code.into_inner()) {
+            noq::WriteError::Stopped(code) => match ErrorCode::from_code(code.into_inner()) {
                 Some(code) => e!(SendError::Remote { code }),
                 None => e!(SendError::ReceiverClosed),
             },
