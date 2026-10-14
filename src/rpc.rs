@@ -700,6 +700,14 @@ fn read_error(err: &io::Error) -> Option<&noq::ReadError> {
     err.get_ref()?.downcast_ref()
 }
 
+/// Returns whether `err` is the end of a stream in the middle of a message.
+///
+/// The reads of a message return an `UnexpectedEof` error that is not from noq
+/// when the stream finishes early.
+pub(crate) fn is_truncated(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::UnexpectedEof && read_error(err).is_none()
+}
+
 /// Returns the code that the sender reset the stream with, if it did.
 ///
 /// The inner `None` is code 0.

@@ -65,6 +65,40 @@ async fn oneshot_connection_closed_with_app_code() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that a stream that ends in the middle of a message is `Truncated`, not an io error.
+#[tokio::test]
+async fn oneshot_truncated_message() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The size prefix says 100 bytes, but only 3 follow.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of a message");
+    };
+    assert!(matches!(cause, RecvError::Truncated { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a stream that ends in the middle of the size prefix is `Truncated`.
+#[tokio::test]
+async fn oneshot_truncated_size() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The high bit says that more bytes of the size prefix follow.
+    send.write_all(&[0x80]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of the size prefix");
+    };
+    assert!(matches!(cause, RecvError::Truncated { .. }), "{cause:?}");
+    Ok(())
+}
+
 /// Checks that a reset with code 0 is a closed channel, not an io error.
 #[tokio::test]
 async fn oneshot_reset_with_code_0() -> TestResult<()> {
