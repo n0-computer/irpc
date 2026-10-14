@@ -2,10 +2,8 @@
 //! multi-threaded runtime.
 //!
 //! Fires many in-flight requests so that handler futures are very likely to
-//! yield and migrate worker threads between dispatch and span creation. With
-//! the previous `thread_local!` storage this was racy — a yielding task could
-//! lose its slot to another request landing on the same OS thread. The
-//! `task_local!` scope is per-task and survives migration, so every server
+//! yield and migrate worker threads. irpc creates each request span from the
+//! span context of its own request before the handler runs, so every server
 //! "Get" span must share its client's trace id.
 //!
 //! Lives in its own integration-test binary because it installs a global

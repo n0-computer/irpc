@@ -2,8 +2,8 @@
 //!
 //! irpc carries the span context of a request in text headers, but does not
 //! know any tracing backend. This crate connects it to OpenTelemetry: the
-//! client writes the context of the current span with the global text map
-//! propagator of `opentelemetry`, and the server sets the parent of the request
+//! client writes the context of its request span with the global text map
+//! propagator of `opentelemetry`, and the server sets the parent of its request
 //! span from it.
 //!
 //! Add its [`layer`] to the tracing subscriber, next to the
@@ -30,6 +30,46 @@
 //! remote: `opentelemetry` keeps the registered propagator in a static, and
 //! this crate and irpc find their layers in the subscriber by type, so they
 //! do not see the static or the layer types of another copy.
+//!
+//! # Filtering
+//!
+//! irpc creates its request spans at debug level, so that a console filter at
+//! info level does not prefix every log line with them. The macro-generated spans
+//! have the target of the module that defines the protocol.
+//!
+//! The server sets the parent of its request span from the context that the
+//! client sent. It can only do that if the `tracing-opentelemetry` layer records
+//! the request span. If a filter drops the span, nothing fails: the server starts
+//! a new trace instead of joining the trace of the client. So give the
+//! `tracing-opentelemetry` layer its own filter that lets the request spans
+//! through, and keep the console filter at info:
+//!
+//! ```no_run
+//! # let tracer = opentelemetry::global::tracer("app");
+//! use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
+//!
+//! let subscriber = Registry::default()
+//!     .with(
+//!         tracing_opentelemetry::layer()
+//!             .with_tracer(tracer)
+//!             .with_filter(EnvFilter::new("info,my_protocol=debug")),
+//!     )
+//!     .with(irpc_opentelemetry::layer())
+//!     .with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::new("info")));
+//! ```
+//!
+//! Replace `my_protocol` with the module path of the protocol. The directive
+//! also sends the debug events of that module to OpenTelemetry, so a protocol in a
+//! module of its own keeps the traces small. irpc's own debug events have the
+//! target `irpc` and stay out.
+//!
+//! A single filter for the whole subscriber, such as
+//! `tracing_subscriber::fmt().with_env_filter("info")`, cannot do both: at info
+//! level it drops the request spans, and at debug level the console shows them.
+//!
+//! The client does not need its request span recorded. If the
+//! `tracing-opentelemetry` layer drops it, the client sends the context of the
+//! span that it is in.
 
 use irpc::span_propagation::{Propagator, SpanContextCarrier};
 use opentelemetry::{

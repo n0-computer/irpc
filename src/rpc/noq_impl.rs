@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
 use noq::{ConnectionError, PathId, RecvStream, SendStream, VarInt};
-use tracing::{Instrument, debug, error_span, warn};
+use tracing::{Instrument, debug, debug_span, warn};
 
 use crate::{
     RequestError, Service,
@@ -104,7 +104,7 @@ async fn connect_and_open_bi(
 /// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
 pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: impl Into<Handler<S>>) {
     let handler = handler.into();
-    let mut request_id = 0u64;
+    let mut connection_id = 0u64;
     let mut tasks = JoinSet::new();
     loop {
         let incoming = tokio::select! {
@@ -123,8 +123,9 @@ pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: impl Into<Hand
         let fut = async move {
             match incoming.await {
                 Ok(connection) => {
-                    if let Some(remote) = remote_address(&connection) {
-                        tracing::Span::current().record("remote", tracing::field::display(remote));
+                    match remote_address(&connection) {
+                        Some(remote) => debug!(%remote, "connection accepted"),
+                        None => debug!("connection accepted"),
                     }
                     match handler.handle_connection(&connection).await {
                         Err(err) => warn!("connection closed with error: {err:?}"),
@@ -136,13 +137,13 @@ pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: impl Into<Hand
                 }
             };
         };
-        let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
+        let span = debug_span!("rpc", conn = connection_id);
         tasks.spawn(fut.instrument(span));
-        request_id += 1;
+        connection_id += 1;
     }
 }
 
-/// Returns the address of the remote, for the `remote` field of a span.
+/// Returns the address of the remote, for the log of an accepted connection.
 fn remote_address(connection: &noq::Connection) -> Option<std::net::SocketAddr> {
     connection.path(PathId::ZERO)?.remote_address().ok()
 }
