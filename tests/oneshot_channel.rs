@@ -71,7 +71,10 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
+    assert_eq!(
+        cause.remote_code(),
+        Some(ErrorCode::MessageMaxSizeExceeded.into())
+    );
     Ok(())
 }
 
@@ -90,7 +93,7 @@ async fn oneshot_cancelled_send_resets_stream() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("the send was cancelled");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageAborted));
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageAborted.into()));
     Ok(())
 }
 
@@ -144,7 +147,10 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
+    assert_eq!(
+        cause.remote_code(),
+        Some(ErrorCode::MessageEncodeFailed.into())
+    );
     Ok(())
 }
 

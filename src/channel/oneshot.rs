@@ -7,7 +7,7 @@ use n0_future::future::Boxed as BoxFuture;
 
 use super::SendError;
 #[cfg(feature = "rpc")]
-use crate::rpc::{self, ErrorCode};
+use crate::rpc::{self, RemoteCode};
 use crate::util::FusedOneshotReceiver;
 
 /// Error when receiving a oneshot message.
@@ -33,15 +33,15 @@ pub enum RecvError {
     /// without sending, for example because it was dropped.
     #[error("Sender closed")]
     SenderClosed,
-    /// The sender reset the stream with an irpc error code, and the channel is closed.
+    /// The sender reset the stream with a code, and the channel is closed.
     ///
-    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
+    /// The `code` says why, see [`RemoteCode`], and the [`rpc`] module for an overview.
     ///
-    /// [`ErrorCode`]: crate::rpc::ErrorCode
+    /// [`RemoteCode`]: crate::rpc::RemoteCode
     /// [`rpc`]: crate::rpc
     #[cfg(feature = "rpc")]
     #[error("Sender closed the channel: {code}")]
-    Remote { code: crate::rpc::ErrorCode },
+    Remote { code: crate::rpc::RemoteCode },
     /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
@@ -66,7 +66,7 @@ pub enum RecvError {
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
-/// A reset with an irpc error code becomes [`RecvError::Remote`], and any
+/// A reset with a code other than 0 becomes [`RecvError::Remote`], and any
 /// other io error becomes [`RecvError::Io`].
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
@@ -92,11 +92,11 @@ impl From<RecvError> for io::Error {
 
 #[cfg(feature = "rpc")]
 impl RecvError {
-    /// Returns the irpc error code that the peer sent, if any.
+    /// Returns the code that the peer sent, if any.
     ///
     /// This is the code of a [`Remote`](Self::Remote) error, or the code that
     /// the peer closed the connection with.
-    pub fn remote_code(&self) -> Option<ErrorCode> {
+    pub fn remote_code(&self) -> Option<RemoteCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
             Self::Io { source, .. } => rpc::io_close_code(source),
