@@ -1,9 +1,6 @@
 #![cfg(feature = "noq_endpoint_setup")]
 
-use std::{
-    io::{self, ErrorKind},
-    time::Duration,
-};
+use std::{io, time::Duration};
 
 use irpc::{
     Client, WithChannels,
@@ -94,15 +91,11 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
         send2.closed().await;
     });
     let third_client = tokio::spawn(async move {
-        // this should fail with an io error, since the stream was stopped
-        loop {
-            match send3.send(vec![1, 2, 3]).await {
-                Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {
-                    break;
-                }
-                _ => {}
-            };
-        }
+        // this fails eventually, since a cancelled send closes the sender
+        while !matches!(
+            send3.send(vec![1, 2, 3]).await,
+            Err(SendError::Closed { .. })
+        ) {}
     });
     // send a lot of data with a tiny timeout, this will cause the send future to be dropped
     loop {
@@ -303,10 +296,10 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
         panic!("client should have failed due to max message size");
     };
     assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
-    // later sends get a broken pipe, also for a message that is small enough
+    // later sends fail because the sender is closed, also for a message that is small enough
     assert!(matches!(
         send.send(vec![0u8; 1]).await,
-        Err(SendError::Io { source, .. }) if source.kind() == io::ErrorKind::BrokenPipe
+        Err(SendError::Closed { .. })
     ));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");

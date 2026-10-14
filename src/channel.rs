@@ -36,13 +36,13 @@ pub mod oneshot;
 /// [`Self::remote_code`] returns the code in both cases.
 ///
 /// After an error, the channel is closed. Later sends get the same error if
-/// the receiver ended the channel, and [`Io`] with
-/// [`io::ErrorKind::BrokenPipe`] otherwise.
+/// the peer ended the channel, and [`Closed`] otherwise.
 ///
 /// [`ReceiverClosed`]: Self::ReceiverClosed
 /// [`MaxSizeExceeded`]: Self::MaxSizeExceeded
 /// [`Remote`]: Self::Remote
 /// [`ConnectionClosed`]: Self::ConnectionClosed
+/// [`Closed`]: Self::Closed
 /// [`Io`]: Self::Io
 #[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
@@ -79,10 +79,15 @@ pub enum SendError {
     #[cfg(feature = "rpc")]
     #[error("Connection {close}")]
     ConnectionClosed { close: crate::rpc::ConnectionClose },
-    /// An io error, for example because the connection was lost.
+    /// This sender closed the channel after an earlier send failed or was cancelled.
     ///
-    /// After a send was cancelled, later sends get an io error with
-    /// [`io::ErrorKind::BrokenPipe`].
+    /// An earlier send on this sender or a clone of it found its message bad,
+    /// failed with an io error, or was dropped before it was done. The stream
+    /// can hold part of a message, so this sender sends no more messages.
+    #[cfg(feature = "rpc")]
+    #[error("Sender closed after an earlier error")]
+    Closed,
+    /// An io error, for example because the connection was lost.
     #[error("Io error")]
     Io {
         #[error(std_err)]
@@ -99,6 +104,8 @@ impl From<SendError> for io::Error {
             SendError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
             #[cfg(feature = "rpc")]
             SendError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
+            #[cfg(feature = "rpc")]
+            SendError::Closed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
         }
     }

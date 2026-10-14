@@ -867,7 +867,7 @@ impl CloseReason {
             Self::ReceiverClosed => e!(SendError::ReceiverClosed),
             Self::Remote(code) => e!(SendError::Remote { code }),
             Self::ConnectionClosed(close) => e!(SendError::ConnectionClosed { close }),
-            Self::Other => io::Error::from(io::ErrorKind::BrokenPipe).into(),
+            Self::Other => e!(SendError::Closed),
         }
     }
 }

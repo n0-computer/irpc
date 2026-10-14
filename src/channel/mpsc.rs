@@ -288,8 +288,8 @@ impl<T: Send + 'static> Sender<T> {
     /// ## Cancellation safety
     ///
     /// If the future is dropped before completion, and if this is a remote sender,
-    /// then the sender will be closed and further sends will return an [`SendError::Io`]
-    /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+    /// then the sender will be closed and further sends will return
+    /// `SendError::Closed`. Therefore, make sure to always poll the
     /// future until completion if you want to reuse the sender or any clone afterwards.
     pub async fn send(&self, value: T) -> Result<(), SendError> {
         match self {
@@ -319,8 +319,8 @@ impl<T: Send + 'static> Sender<T> {
     /// ## Cancellation safety
     ///
     /// If the future is dropped before completion, and if this is a remote sender,
-    /// then the sender will be closed and further sends will return an [`SendError::Io`]
-    /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
+    /// then the sender will be closed and further sends will return
+    /// `SendError::Closed`. Therefore, make sure to always poll the
     /// future until completion if you want to reuse the sender or any clone afterwards.
     pub async fn try_send(&self, value: T) -> Result<bool, SendError> {
         match self {
