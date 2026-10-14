@@ -6,7 +6,10 @@ use std::{pin::pin, time::Duration};
 use irpc::{
     Client, WithChannels,
     noq::listen,
-    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, WriteError, read_request},
+    rpc::{
+        ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, RemoteCode, WriteError,
+        read_request,
+    },
 };
 use n0_future::{future::poll_once, task::AbortOnDropHandle};
 use noq::ConnectionError;
@@ -362,5 +365,31 @@ async fn read_request_returns_bad_request() -> TestResult<()> {
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     conn.close(0u32.into(), b"");
     server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn close_with_code_returns_connection_closed() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let connecting = client_endpoint.connect(server_addr, "localhost")?;
+    let accepting = async { server.accept().await.expect("endpoint is open").await };
+    let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+
+    client_conn.close(401u32.into(), b"bye");
+    let err = read_request::<server::EchoProtocol>(&server_conn)
+        .await
+        .expect_err("the client closed the connection with a code");
+    let ReadRequestError::ConnectionClosed { close, .. } = err else {
+        panic!("expected ConnectionClosed, got {err:?}");
+    };
+    assert_eq!(close.code(), Some(RemoteCode::Other(401)));
+
+    // A client that opens a request on the closed connection gets the same close.
+    let client = Client::<client::EchoProtocol>::boxed(server_conn);
+    let err = client
+        .rpc(client::Echo("a".into()))
+        .await
+        .expect_err("the connection is closed");
+    assert_eq!(err.remote_code(), Some(RemoteCode::Other(401)));
     Ok(())
 }
