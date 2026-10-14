@@ -195,17 +195,78 @@ impl ErrorCode {
     pub fn from_code(code: u32) -> Option<Self> {
         Self::ALL.into_iter().find(|c| c.to_code() == code)
     }
-
-    fn from_varint(code: VarInt) -> Option<Self> {
-        u32::try_from(code.into_inner())
-            .ok()
-            .and_then(Self::from_code)
-    }
 }
 
 impl From<ErrorCode> for VarInt {
     fn from(code: ErrorCode) -> Self {
         VarInt::from_u32(code.to_code())
+    }
+}
+
+/// A code other than 0 that the peer reset or stopped a stream with, or closed the connection with.
+///
+/// Code 0 means no error, so it is never a `RemoteCode`. irpc reports it as a
+/// closed channel instead, for example [`SendError::ReceiverClosed`].
+///
+/// # Examples
+///
+/// ```
+/// use irpc::rpc::{ErrorCode, RemoteCode};
+///
+/// assert_eq!(
+///     RemoteCode::from_code(4),
+///     Some(RemoteCode::Irpc(ErrorCode::RequestDecodeFailed))
+/// );
+/// assert_eq!(RemoteCode::from_code(401), Some(RemoteCode::Other(401)));
+/// assert_eq!(RemoteCode::from_code(0), None);
+/// ```
+#[derive(Debug, derive_more::Display, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RemoteCode {
+    /// A code that irpc uses.
+    Irpc(ErrorCode),
+    /// A code that irpc does not use: a code of the application, see [Error codes],
+    /// or a code that a newer version of irpc added.
+    ///
+    /// [Error codes]: self#error-codes
+    #[display("code {_0}")]
+    Other(u64),
+}
+
+impl RemoteCode {
+    /// Returns the number of this code.
+    pub fn to_code(self) -> u64 {
+        match self {
+            Self::Irpc(code) => code.to_code().into(),
+            Self::Other(code) => code,
+        }
+    }
+
+    /// Returns the code for `code`, or `None` for code 0.
+    pub fn from_code(code: u64) -> Option<Self> {
+        if code == 0 {
+            return None;
+        }
+        let irpc = u32::try_from(code).ok().and_then(ErrorCode::from_code);
+        Some(irpc.map_or(Self::Other(code), Self::Irpc))
+    }
+
+    /// Returns the irpc error code, if this is one.
+    pub fn error_code(self) -> Option<ErrorCode> {
+        match self {
+            Self::Irpc(code) => Some(code),
+            Self::Other(_) => None,
+        }
+    }
+
+    fn from_varint(code: VarInt) -> Option<Self> {
+        Self::from_code(code.into_inner())
+    }
+}
+
+impl From<ErrorCode> for RemoteCode {
+    fn from(code: ErrorCode) -> Self {
+        Self::Irpc(code)
     }
 }
 
@@ -286,11 +347,11 @@ pub enum WriteError {
         #[error(std_err)]
         source: postcard::Error,
     },
-    /// The server stopped the stream with an irpc error code while this client wrote the request.
+    /// The server stopped the stream with a code while this client wrote the request.
     ///
-    /// The `code` says why, see [`ErrorCode`], and the [`rpc`](self) module for an overview.
+    /// The `code` says why, see [`RemoteCode`], and the [`rpc`](self) module for an overview.
     #[error("Server rejected the request: {code}")]
-    Remote { code: ErrorCode },
+    Remote { code: RemoteCode },
     /// An io error, for example because the connection was lost.
     #[error("Io error")]
     Io {
@@ -310,17 +371,16 @@ impl WriteError {
     }
 }
 
-/// Returns the irpc error code that the peer closed the connection with, if any, other than 0.
-pub(crate) fn close_code(err: &ConnectionError) -> Option<ErrorCode> {
+/// Returns the code that the peer closed the connection with, if any, other than 0.
+pub(crate) fn close_code(err: &ConnectionError) -> Option<RemoteCode> {
     match err {
-        ConnectionError::ApplicationClosed(close) => ErrorCode::from_varint(close.error_code),
+        ConnectionError::ApplicationClosed(close) => RemoteCode::from_varint(close.error_code),
         _ => None,
     }
-    .filter(|code| *code != ErrorCode::Closed)
 }
 
-/// Returns the irpc error code that the peer closed the connection with, if `err` comes from that close.
-pub(crate) fn io_close_code(err: &io::Error) -> Option<ErrorCode> {
+/// Returns the code that the peer closed the connection with, if `err` comes from that close.
+pub(crate) fn io_close_code(err: &io::Error) -> Option<RemoteCode> {
     let err = err.get_ref()?;
     if let Some(noq::ReadError::ConnectionLost(err)) = err.downcast_ref() {
         close_code(err)
@@ -331,17 +391,13 @@ pub(crate) fn io_close_code(err: &io::Error) -> Option<ErrorCode> {
     }
 }
 
-/// Returns the irpc error code that the receiver stopped the stream with, if any.
-pub(crate) fn stop_code(err: &noq::WriteError) -> Option<ErrorCode> {
-    match err {
-        noq::WriteError::Stopped(code) => ErrorCode::from_varint(*code),
-        _ => None,
-    }
-}
-
 impl From<noq::WriteError> for WriteError {
     fn from(err: noq::WriteError) -> Self {
-        match stop_code(&err).filter(|code| *code != ErrorCode::Closed) {
+        let code = match err {
+            noq::WriteError::Stopped(code) => RemoteCode::from_varint(code),
+            _ => None,
+        };
+        match code {
             Some(code) => e!(WriteError::Remote { code }),
             None => e!(WriteError::Io, err.into()),
         }
@@ -359,11 +415,11 @@ impl From<WriteError> for io::Error {
 }
 
 impl WriteError {
-    /// Returns the irpc error code that the peer sent, if any.
+    /// Returns the code that the peer sent, if any.
     ///
     /// This is the code of a [`Remote`](Self::Remote) error, or the code that
     /// the peer closed the connection with.
-    pub fn remote_code(&self) -> Option<ErrorCode> {
+    pub fn remote_code(&self) -> Option<RemoteCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
             Self::Io { source, .. } => io_close_code(source),
@@ -573,13 +629,12 @@ fn read_error(err: &io::Error) -> Option<&noq::ReadError> {
     err.get_ref()?.downcast_ref()
 }
 
-/// Returns the irpc error code that the sender reset the stream with, if any, other than 0.
-pub(crate) fn reset_code(err: &io::Error) -> Option<ErrorCode> {
+/// Returns the code that the sender reset the stream with, if any, other than 0.
+pub(crate) fn reset_code(err: &io::Error) -> Option<RemoteCode> {
     match read_error(err)? {
-        noq::ReadError::Reset(code) => ErrorCode::from_varint(*code),
+        noq::ReadError::Reset(code) => RemoteCode::from_varint(*code),
         _ => None,
     }
-    .filter(|code| *code != ErrorCode::Closed)
 }
 
 impl From<noq::RecvStream> for crate::channel::none::NoReceiver {
@@ -717,8 +772,28 @@ impl<T: RpcMessage> NoqSenderInner<T> {
 
 enum NoqSenderState<T> {
     Open(NoqSenderInner<T>),
-    /// Closed by an error, with the code that the receiver stopped the stream with if it did.
-    Closed(Option<ErrorCode>),
+    Closed(CloseReason),
+}
+
+/// Why a remote sender is closed, so that later sends fail with the same error.
+#[derive(Debug, Clone, Copy)]
+enum CloseReason {
+    /// The receiver closed the channel.
+    ReceiverClosed,
+    /// The peer stopped the stream or closed the connection with a code.
+    Remote(RemoteCode),
+    /// This sender closed the channel after an error or a cancelled send.
+    Other,
+}
+
+impl CloseReason {
+    fn error(self) -> SendError {
+        match self {
+            Self::ReceiverClosed => e!(SendError::ReceiverClosed),
+            Self::Remote(code) => e!(SendError::Remote { code }),
+            Self::Other => io::Error::from(io::ErrorKind::BrokenPipe).into(),
+        }
+    }
 }
 
 impl<T> NoqSenderState<T> {
@@ -727,15 +802,18 @@ impl<T> NoqSenderState<T> {
     /// A cancelled send never puts it back, so the sender stays closed: the
     /// stream can hold part of a message.
     fn take_for_send(&mut self) -> Self {
-        std::mem::replace(self, Self::Closed(None))
+        std::mem::replace(self, Self::Closed(CloseReason::Other))
     }
 
     /// Returns the state after a send, so that later sends fail with the same error.
     fn after_send<R>(sender: NoqSenderInner<T>, res: &Result<R, SendError>) -> Self {
         match res {
             Ok(_) => Self::Open(sender),
-            Err(SendError::ReceiverClosed { .. }) => Self::Closed(Some(ErrorCode::Closed)),
-            Err(err) => Self::Closed(err.remote_code()),
+            Err(SendError::ReceiverClosed { .. }) => Self::Closed(CloseReason::ReceiverClosed),
+            Err(err) => Self::Closed(
+                err.remote_code()
+                    .map_or(CloseReason::Other, CloseReason::Remote),
+            ),
         }
     }
 }
@@ -759,9 +837,9 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
                     *guard = NoqSenderState::after_send(sender, &res);
                     res
                 }
-                NoqSenderState::Closed(code) => {
-                    *guard = NoqSenderState::Closed(code);
-                    Err(SendError::closed(code))
+                NoqSenderState::Closed(reason) => {
+                    *guard = NoqSenderState::Closed(reason);
+                    Err(reason.error())
                 }
             }
         })
@@ -780,9 +858,9 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
                     *guard = NoqSenderState::after_send(sender, &res);
                     res
                 }
-                NoqSenderState::Closed(code) => {
-                    *guard = NoqSenderState::Closed(code);
-                    Err(SendError::closed(code))
+                NoqSenderState::Closed(reason) => {
+                    *guard = NoqSenderState::Closed(reason);
+                    Err(reason.error())
                 }
             }
         })
@@ -1212,8 +1290,8 @@ enum ReadFrame<S> {
     Malformed(io::Error),
     /// The request does not decode.
     DecodeFailed(postcard::Error),
-    /// The client reset the stream before the request was complete, with the irpc code if it sent one.
-    Reset(Option<ErrorCode>),
+    /// The client reset the stream before the request was complete, with its code if it was not 0.
+    Reset(Option<RemoteCode>),
     /// The connection was lost before the request was complete.
     ConnectionLost,
 }
@@ -1225,7 +1303,7 @@ impl<S> ReadFrame<S> {
             // Any reset, not only `ErrorCode::RequestAborted`: the update sender of a
             // request resets the stream if an update does not encode. noq drops
             // unread data on a reset, so this reset can arrive before the request.
-            noq::ReadError::Reset(code) => Self::Reset(ErrorCode::from_varint(*code)),
+            noq::ReadError::Reset(code) => Self::Reset(RemoteCode::from_varint(*code)),
             noq::ReadError::ConnectionLost(_) => Self::ConnectionLost,
             // A server cannot get these: irpc stops a request stream only after
             // its read failed, and only a client gets `ZeroRttRejected`.
@@ -1291,9 +1369,31 @@ mod tests {
         let err = WriteError::from(noq::WriteError::Stopped(
             ErrorCode::RequestDecodeFailed.into(),
         ));
-        assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
+        assert_eq!(
+            err.remote_code(),
+            Some(ErrorCode::RequestDecodeFailed.into())
+        );
         assert_eq!(io::Error::from(err).kind(), io::ErrorKind::ConnectionReset);
         let err = WriteError::from(noq::WriteError::Stopped(16u32.into()));
-        assert!(matches!(err, WriteError::Io { .. }), "{err:?}");
+        assert_eq!(err.remote_code(), Some(RemoteCode::Other(16)));
+    }
+
+    #[test]
+    fn send_error_maps_stop_codes() {
+        let err = SendError::from(noq::WriteError::Stopped(0u32.into()));
+        assert!(matches!(err, SendError::ReceiverClosed { .. }), "{err:?}");
+        let err = SendError::from(noq::WriteError::Stopped(401u32.into()));
+        assert_eq!(err.remote_code(), Some(RemoteCode::Other(401)));
+    }
+
+    #[test]
+    fn remote_code_round_trips() {
+        for code in [1, 7, 16, 401, u64::from(u32::MAX) + 1] {
+            assert_eq!(
+                RemoteCode::from_code(code).map(RemoteCode::to_code),
+                Some(code)
+            );
+        }
+        assert_eq!(RemoteCode::from_code(0), None);
     }
 }

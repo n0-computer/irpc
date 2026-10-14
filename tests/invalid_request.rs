@@ -91,7 +91,10 @@ async fn bad_request_closes_connection() -> TestResult<()> {
         .await
         .expect_err("server does not know the request");
     // The close usually arrives before the reset of the stream.
-    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
+    assert_eq!(
+        err.remote_code(),
+        Some(ErrorCode::RequestDecodeFailed.into())
+    );
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
@@ -129,7 +132,10 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
-    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
+    assert_eq!(
+        err.remote_code(),
+        Some(ErrorCode::RequestDecodeFailed.into())
+    );
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     Ok(())
 }
@@ -147,7 +153,10 @@ async fn bad_request_update_sender() -> TestResult<()> {
         .client_streaming(client::ShoutStream("a".into()), 1)
         .await?;
     let err = rx.await.expect_err("server does not know the request");
-    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
+    assert_eq!(
+        err.remote_code(),
+        Some(ErrorCode::RequestDecodeFailed.into())
+    );
     let err = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Err(err) = tx.send(1).await {
@@ -156,7 +165,10 @@ async fn bad_request_update_sender() -> TestResult<()> {
         }
     })
     .await?;
-    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
+    assert_eq!(
+        err.remote_code(),
+        Some(ErrorCode::RequestDecodeFailed.into())
+    );
     Ok(())
 }
 
@@ -264,12 +276,12 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     // The server reset its side of both streams, so the mpsc response fails instead of ending.
     let err = upload_rx.await.expect_err("server skips the upload");
-    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted.into()));
     let err = exchange_rx
         .recv()
         .await
         .expect_err("server skips the exchange");
-    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted.into()));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
