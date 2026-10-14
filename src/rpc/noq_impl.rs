@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
 use noq::{ConnectionError, PathId, RecvStream, SendStream, VarInt};
-use tracing::{Instrument, debug, info_span, warn};
+use tracing::{Instrument, debug, debug_span, warn};
 
 use crate::{
     RequestError, Service,
@@ -137,7 +137,7 @@ pub async fn listen<S: Service>(endpoint: noq::Endpoint, handler: impl Into<Hand
                 }
             };
         };
-        let span = info_span!("rpc", conn = connection_id);
+        let span = debug_span!("rpc", conn = connection_id);
         tasks.spawn(fut.instrument(span));
         connection_id += 1;
     }

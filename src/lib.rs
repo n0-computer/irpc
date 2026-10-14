@@ -417,8 +417,12 @@ pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static 
     /// the requests of a connection from 0, so both sides use the same id. The
     /// default span is named `request`, with `req_id` in the field `req`. The
     /// [`rpc_requests`] macro names it after the variant.
+    ///
+    /// The span has debug level, so a filter at info level keeps it out of the
+    /// logs. Span propagation needs the span: a server can only set the parent
+    /// of a span that its tracing backend records.
     fn new_request_span(&self, req_id: u64) -> tracing::Span {
-        tracing::info_span!("request", req = req_id)
+        tracing::debug_span!("request", req = req_id)
     }
 }
 

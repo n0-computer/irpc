@@ -118,11 +118,13 @@ fn init_tracing(
     //     through the `tracing-opentelemetry` layer (which forwards to OTLP
     //     and is filtered to `info` so noisy debug spans don't ship to
     //     Jaeger), in parallel with a plain fmt layer that prints to stderr
-    //     under `RUST_LOG`.
+    //     under `RUST_LOG`. irpc creates the request spans at debug level,
+    //     with the target of this example, which defines the protocol, so the
+    //     filter lets them through.
     let tracer = opentelemetry::global::tracer(service_name);
     let telemetry = tracing_opentelemetry::layer()
         .with_tracer(tracer)
-        .with_filter(EnvFilter::new("info"));
+        .with_filter(EnvFilter::new("info,span_propagation=debug"));
     let fmt_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("span_propagation=info"));
     // The irpc layer writes the span context into each request.

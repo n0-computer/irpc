@@ -24,6 +24,12 @@
 //!
 //! Spans reach OpenTelemetry through the `tracing-opentelemetry` layer.
 //!
+//! irpc creates its request spans at debug level, with the target of the
+//! module that defines the protocol. A filter on the `tracing-opentelemetry`
+//! layer must let them through, for example `info,my_protocol=debug`.
+//! Otherwise the server cannot set the parent of its request span, and does
+//! not join the trace of the client.
+//!
 //! The application must use semver-compatible versions of `irpc`,
 //! `opentelemetry`, and `tracing-opentelemetry` with this crate. With a second
 //! copy of one of them, everything compiles, but no span context reaches the

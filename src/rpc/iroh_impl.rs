@@ -13,7 +13,7 @@ use n0_future::{TryFutureExt, future::Boxed as BoxFuture};
 // portable-atomic provides AtomicU64 on 32-bit targets (e.g. Xtensa ESP32) that
 // lack native 64-bit atomics, same as iroh itself.
 use portable_atomic::{AtomicU64, Ordering};
-use tracing::{Instrument, debug, info_span, warn};
+use tracing::{Instrument, debug, debug_span, warn};
 
 use crate::{
     RequestError, Service,
@@ -177,7 +177,7 @@ impl<S: Service> ProtocolHandler for IrohProtocol<S> {
             .handler
             .handle_connection(&connection)
             .map_err(AcceptError::from_err);
-        let span = info_span!("rpc", conn = connection_id);
+        let span = debug_span!("rpc", conn = connection_id);
         span.in_scope(
             || debug!(remote = %connection.remote_id().fmt_short(), "connection accepted"),
         );
@@ -218,7 +218,7 @@ impl<S: Service> ProtocolHandler for Iroh0RttProtocol<S> {
     async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
         let zrtt_conn = accepting.into_0rtt();
         let connection_id = self.connection_id.fetch_add(1, Ordering::AcqRel);
-        let span = info_span!("rpc", conn = connection_id);
+        let span = debug_span!("rpc", conn = connection_id);
         // The remote id of a 0-RTT connection can be unknown.
         span.in_scope(|| match zrtt_conn.remote_id() {
             Ok(remote) => debug!(remote = %remote.fmt_short(), "connection accepted"),
@@ -301,7 +301,7 @@ pub async fn listen<S: Service>(endpoint: iroh::Endpoint, handler: impl Into<Han
                 }
             };
         };
-        let span = info_span!("rpc", conn = connection_id);
+        let span = debug_span!("rpc", conn = connection_id);
         tasks.spawn(fut.instrument(span));
         connection_id += 1;
     }

@@ -172,7 +172,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                     req_id: u64,
                 ) -> ::irpc::__macro_exports::tracing::Span {
                     match self {
-                        #(Self::#variant_names { .. } => ::irpc::__macro_exports::tracing::info_span!(#span_names, req = req_id)),*
+                        #(Self::#variant_names { .. } => ::irpc::__macro_exports::tracing::debug_span!(#span_names, req = req_id)),*
                     }
                 }
             }
