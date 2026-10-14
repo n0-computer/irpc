@@ -780,7 +780,7 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
         let span = tracing::Span::current();
         let fut = async move {
             // A sender that is dropped without sending finishes the stream.
-            let Some(size) = read.read_varint_u64().await? else {
+            let Some(size) = read_size(&mut read).await? else {
                 return Err(e!(oneshot::RecvError::SenderClosed));
             };
             if size > MAX_MESSAGE_SIZE {
@@ -803,6 +803,20 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
 /// Returns the noq read error in `err`, if the stream failed.
 fn read_error(err: &io::Error) -> Option<&noq::ReadError> {
     err.get_ref()?.downcast_ref()
+}
+
+/// Reads the size prefix of a message, or returns `None` at the end of the stream.
+///
+/// A size prefix that does not fit in a `u64` is larger than
+/// [`MAX_MESSAGE_SIZE`], so this returns `u64::MAX` for it.
+async fn read_size(recv: &mut noq::RecvStream) -> io::Result<Option<u64>> {
+    match recv.read_varint_u64().await {
+        // The only error of the varint itself: all others are from the stream.
+        Err(err) if err.kind() == io::ErrorKind::InvalidData && read_error(&err).is_none() => {
+            Ok(Some(u64::MAX))
+        }
+        res => res,
+    }
 }
 
 /// Returns whether `err` is the end of a stream in the middle of a message.
@@ -990,6 +1004,8 @@ fn parse_frame(buf: &[u8]) -> io::Result<Frame> {
         Err(postcard::Error::DeserializeUnexpectedEnd) => {
             return Ok(Frame::Partial { frame_len: None });
         }
+        // A size that does not fit in a u64 is larger than MAX_MESSAGE_SIZE.
+        Err(postcard::Error::DeserializeBadVarint) => return Ok(Frame::TooLarge),
         Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidData, err)),
     };
     let prefix = buf.len() - rest.len();
@@ -1725,7 +1741,7 @@ enum ReadFrame<S> {
     Request(Option<crate::span_propagation::SpanContextCarrier>, S),
     /// The request is larger than [`MAX_MESSAGE_SIZE`].
     MaxSizeExceeded,
-    /// The stream ended before the request was complete, or the size prefix is too long.
+    /// The stream ended before the request was complete.
     Malformed(io::Error),
     /// The request does not decode.
     DecodeFailed(postcard::Error),
@@ -1753,7 +1769,7 @@ impl<S> ReadFrame<S> {
 
 /// Reads and decodes a request.
 async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame<S> {
-    let size = match recv.read_varint_u64().await {
+    let size = match read_size(recv).await {
         Ok(Some(size)) => size,
         Ok(None) => {
             return ReadFrame::Malformed(io::Error::new(
@@ -1764,7 +1780,7 @@ async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame
         Err(err) => {
             return match read_error(&err) {
                 Some(read_err) => ReadFrame::from_read_err(read_err),
-                // The varint is longer than a u64, or the stream ended inside it.
+                // The stream ended inside the size prefix.
                 None => ReadFrame::Malformed(err),
             };
         }
@@ -1862,12 +1878,12 @@ mod tests {
         let max = [[0xFFu8; 9].as_slice(), &[0x01]].concat();
         assert_eq!(parse_frame(&max).unwrap(), Frame::TooLarge);
 
-        // A 10th byte with bits beyond u64, or an 11th byte, is not a u64 varint.
+        // A 10th byte with bits beyond u64, or an 11th byte, does not fit in a
+        // u64, so it is too large as well.
         let overflow = [[0xFFu8; 9].as_slice(), &[0x02]].concat();
         let overlong = [0x80u8; 10];
         for buf in [&overflow[..], &overlong[..]] {
-            let err = parse_frame(buf).unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(parse_frame(buf).unwrap(), Frame::TooLarge);
         }
     }
 
