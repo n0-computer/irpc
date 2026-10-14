@@ -572,7 +572,10 @@ async fn mpsc_reset_inside_message_is_an_error() -> TestResult<()> {
         let Err(cause) = server.await? else {
             panic!("the stream was reset");
         };
-        assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
+        assert_eq!(
+            cause.remote_code(),
+            Some(ErrorCode::MessageEncodeFailed.into())
+        );
     }
     Ok(())
 }
@@ -600,7 +603,7 @@ async fn mpsc_connection_closed_inside_message_is_an_error() -> TestResult<()> {
     let Err(cause) = server.await?? else {
         panic!("the connection was closed");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::RequestAborted));
+    assert_eq!(cause.remote_code(), Some(ErrorCode::RequestAborted.into()));
     Ok(())
 }
 
@@ -628,7 +631,10 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
+    assert_eq!(
+        cause.remote_code(),
+        Some(ErrorCode::MessageMaxSizeExceeded.into())
+    );
     Ok(())
 }
 
@@ -648,7 +654,10 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
+    assert_eq!(
+        cause.remote_code(),
+        Some(ErrorCode::MessageMaxSizeExceeded.into())
+    );
     Ok(())
 }
 
@@ -740,7 +749,10 @@ async fn mpsc_serialize_error_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
+    assert_eq!(
+        cause.remote_code(),
+        Some(ErrorCode::MessageEncodeFailed.into())
+    );
     Ok(())
 }
 
@@ -795,7 +807,7 @@ async fn mpsc_decode_error_reaches_sender() -> TestResult<()> {
         }
     })
     .await?;
-    let decode_failed = Some(ErrorCode::MessageDecodeFailed);
+    let decode_failed = Some(ErrorCode::MessageDecodeFailed.into());
     assert_eq!(err.remote_code(), decode_failed);
     // later sends, also on a clone that did not see the stop
     assert_eq!(send.send(2).await.unwrap_err().remote_code(), decode_failed);

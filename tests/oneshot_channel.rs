@@ -74,7 +74,10 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
+    assert_eq!(
+        cause.remote_code(),
+        Some(ErrorCode::MessageMaxSizeExceeded.into())
+    );
     Ok(())
 }
 
@@ -149,7 +152,10 @@ async fn oneshot_reset_inside_message_is_an_error() -> TestResult<()> {
         let Err(cause) = server.await? else {
             panic!("the stream was reset");
         };
-        assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
+        assert_eq!(
+            cause.remote_code(),
+            Some(ErrorCode::MessageEncodeFailed.into())
+        );
     }
     Ok(())
 }
@@ -176,7 +182,7 @@ async fn oneshot_connection_closed_inside_message_is_an_error() -> TestResult<()
     let Err(cause) = server.await?? else {
         panic!("the connection was closed");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::RequestAborted));
+    assert_eq!(cause.remote_code(), Some(ErrorCode::RequestAborted.into()));
     Ok(())
 }
 
@@ -232,7 +238,10 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
+    assert_eq!(
+        cause.remote_code(),
+        Some(ErrorCode::MessageEncodeFailed.into())
+    );
     Ok(())
 }
 
