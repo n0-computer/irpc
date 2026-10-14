@@ -7,7 +7,7 @@ use n0_error::e;
 use n0_error::stack_error;
 
 #[cfg(feature = "rpc")]
-use crate::rpc::{self, RemoteCode};
+use crate::rpc::{ConnectionClose, RemoteCode};
 
 pub mod mpsc;
 pub mod none;
@@ -25,13 +25,14 @@ pub mod oneshot;
 ///   ([`MaxSizeExceeded`]), or it does not encode (`EncodeFailed`).
 /// * Something other than this message ended the channel:
 ///   * The receiver closed it ([`ReceiverClosed`]).
-///   * The receiver stopped the stream with an irpc error code ([`Remote`]).
+///   * The receiver stopped the stream with a code ([`Remote`]).
 ///     For example, the server rejected the request, or the receiver could not
 ///     decode an earlier message.
+///   * The connection was closed on purpose ([`ConnectionClosed`]).
 ///   * The connection failed ([`Io`]).
 ///
 /// If the server rejects the request and also closes the connection, the close
-/// usually arrives first, and the sender gets [`Io`] instead of [`Remote`].
+/// usually arrives first, and the sender gets [`ConnectionClosed`] instead of [`Remote`].
 /// [`Self::remote_code`] returns the code in both cases.
 ///
 /// After an error, the channel is closed. Later sends get the same error if
@@ -41,6 +42,7 @@ pub mod oneshot;
 /// [`ReceiverClosed`]: Self::ReceiverClosed
 /// [`MaxSizeExceeded`]: Self::MaxSizeExceeded
 /// [`Remote`]: Self::Remote
+/// [`ConnectionClosed`]: Self::ConnectionClosed
 /// [`Io`]: Self::Io
 #[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
@@ -73,6 +75,10 @@ pub enum SendError {
         #[error(std_err)]
         source: postcard::Error,
     },
+    /// The connection was closed on purpose, by the peer or by this side.
+    #[cfg(feature = "rpc")]
+    #[error("Connection {close}")]
+    ConnectionClosed { close: crate::rpc::ConnectionClose },
     /// An io error, for example because the connection was lost.
     ///
     /// After a send was cancelled, later sends get an io error with
@@ -91,6 +97,8 @@ impl From<SendError> for io::Error {
             SendError::Io { source, .. } => source,
             #[cfg(feature = "rpc")]
             SendError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
+            #[cfg(feature = "rpc")]
+            SendError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
         }
     }
@@ -105,7 +113,7 @@ impl SendError {
     pub fn remote_code(&self) -> Option<RemoteCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
-            Self::Io { source, .. } => rpc::io_close_code(source),
+            Self::ConnectionClosed { close, .. } => close.code(),
             _ => None,
         }
     }
@@ -120,6 +128,12 @@ impl From<noq::WriteError> for SendError {
                 Some(code) => e!(SendError::Remote { code }),
                 None => e!(SendError::ReceiverClosed),
             },
+            noq::WriteError::ConnectionLost(ref cause) => {
+                match ConnectionClose::from_error(cause) {
+                    Some(close) => e!(SendError::ConnectionClosed { close }),
+                    None => e!(SendError::Io, err.into()),
+                }
+            }
             err => e!(SendError::Io, err.into()),
         }
     }
