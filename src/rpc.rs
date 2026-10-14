@@ -76,9 +76,7 @@
 //! 16 works, but a later version of irpc can give it a different meaning.
 //!
 //! [`Client::rpc`]: crate::Client::rpc
-use std::{
-    fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
-};
+use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::Arc};
 
 use n0_error::{e, stack_error};
 use n0_future::future::Boxed as BoxFuture;
@@ -707,12 +705,6 @@ impl<T: RpcMessage> NoqSenderInner<T> {
             Ok(true)
         })
     }
-
-    fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
-        Box::pin(async move {
-            self.send.stopped().await.ok();
-        })
-    }
 }
 
 enum NoqSenderState<T> {
@@ -790,11 +782,12 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
 
     fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
         Box::pin(async {
-            let mut guard = self.0.lock().await;
-            match guard.deref_mut() {
-                NoqSenderState::Open(sender) => sender.closed().await,
-                NoqSenderState::Closed(_) => {}
-            }
+            // Wait without the lock, so that other clones can send meanwhile.
+            let stopped = match &*self.0.lock().await {
+                NoqSenderState::Open(sender) => sender.send.stopped(),
+                NoqSenderState::Closed(_) => return,
+            };
+            stopped.await.ok();
         })
     }
 

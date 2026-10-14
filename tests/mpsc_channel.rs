@@ -156,6 +156,34 @@ async fn mpsc_receiver_dropped() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that a clone that waits for `closed` does not block sends on other clones.
+#[tokio::test]
+async fn mpsc_closed_does_not_block_send() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let mut recv = Receiver::<Vec<u8>>::from(recv);
+        assert_eq!(recv.recv().await?, Some(vec![1, 2, 3]));
+        drop(recv);
+        conn.closed().await;
+        TestResult::Ok(())
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send1 = mpsc::Sender::<Vec<u8>>::from(send);
+    let send2 = send1.clone();
+    let closed = tokio::spawn(async move { send1.closed().await });
+    // let the first clone wait for the close
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    timeout(Duration::from_secs(5), send2.send(vec![1, 2, 3])).await??;
+    // the receiver drops after the message, which ends the wait of the first clone
+    timeout(Duration::from_secs(5), closed).await??;
+    conn.close(0u32.into(), b"");
+    server.await??;
+    Ok(())
+}
+
 /// Checks that after the remote receiver is dropped, every send on every clone
 /// of a `Sender` gets `ReceiverClosed`, also on clones that did not see the stop.
 #[tokio::test]
