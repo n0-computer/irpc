@@ -969,8 +969,8 @@ impl Error {
     /// Returns the code that the peer sent, if any.
     ///
     /// This is the code that the peer reset or stopped a stream with, or closed
-    /// the connection with, see [`rpc::RemoteCode`].
-    pub fn remote_code(&self) -> Option<rpc::RemoteCode> {
+    /// the connection with, see [`rpc::ErrorCode`].
+    pub fn remote_code(&self) -> Option<rpc::ErrorCode> {
         match self {
             Self::Request {
                 source: RequestError::ConnectionClosed { close, .. },

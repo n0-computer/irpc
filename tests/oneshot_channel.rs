@@ -7,7 +7,7 @@ use irpc::{
         SendError,
         oneshot::{self, RecvError},
     },
-    rpc::{ConnectionClose, ErrorCode, RemoteCode},
+    rpc::{ConnectionClose, ErrorCode},
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
@@ -56,11 +56,11 @@ async fn oneshot_connection_closed_with_app_code() -> TestResult<()> {
     assert_eq!(
         *close,
         ConnectionClose::Remote {
-            code: Some(RemoteCode::Other(401)),
+            code: Some(ErrorCode::Other(401)),
             reason: b"permission denied".to_vec(),
         }
     );
-    assert_eq!(err.remote_code(), Some(RemoteCode::Other(401)));
+    assert_eq!(err.remote_code(), Some(ErrorCode::Other(401)));
     server.await??;
     Ok(())
 }
@@ -151,10 +151,7 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert_eq!(
-        cause.remote_code(),
-        Some(ErrorCode::MessageMaxSizeExceeded.into())
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
     Ok(())
 }
 
@@ -208,10 +205,7 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert_eq!(
-        cause.remote_code(),
-        Some(ErrorCode::MessageEncodeFailed.into())
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
     Ok(())
 }
 

@@ -6,10 +6,7 @@ use std::{pin::pin, time::Duration};
 use irpc::{
     Client, WithChannels,
     noq::listen,
-    rpc::{
-        ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, RemoteCode, WriteError,
-        read_request,
-    },
+    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, WriteError, read_request},
 };
 use n0_future::{future::poll_once, task::AbortOnDropHandle};
 use noq::ConnectionError;
@@ -94,14 +91,14 @@ async fn bad_request_closes_connection() -> TestResult<()> {
         .await
         .expect_err("server does not know the request");
     // The close usually arrives before the reset of the stream.
-    assert_eq!(
-        err.remote_code(),
-        Some(ErrorCode::RequestDecodeFailed.into())
-    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::RequestDecodeFailed.into());
+    assert_eq!(
+        ErrorCode::from_code(close.error_code.into_inner()),
+        Some(ErrorCode::RequestDecodeFailed)
+    );
     Ok(())
 }
 
@@ -118,7 +115,10 @@ async fn too_large_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::RequestMaxSizeExceeded.into());
+    assert_eq!(
+        ErrorCode::from_code(close.error_code.into_inner()),
+        Some(ErrorCode::RequestMaxSizeExceeded)
+    );
     Ok(())
 }
 
@@ -135,10 +135,7 @@ async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
         .rpc(client::Shout("a".into()))
         .await
         .expect_err("server does not know the request");
-    assert_eq!(
-        err.remote_code(),
-        Some(ErrorCode::RequestDecodeFailed.into())
-    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     Ok(())
 }
@@ -156,10 +153,7 @@ async fn bad_request_update_sender() -> TestResult<()> {
         .client_streaming(client::ShoutStream("a".into()), 1)
         .await?;
     let err = rx.await.expect_err("server does not know the request");
-    assert_eq!(
-        err.remote_code(),
-        Some(ErrorCode::RequestDecodeFailed.into())
-    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     let err = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Err(err) = tx.send(1).await {
@@ -168,10 +162,7 @@ async fn bad_request_update_sender() -> TestResult<()> {
         }
     })
     .await?;
-    assert_eq!(
-        err.remote_code(),
-        Some(ErrorCode::RequestDecodeFailed.into())
-    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
     Ok(())
 }
 
@@ -202,9 +193,9 @@ async fn too_large_rpc_resets_with_reason() -> TestResult<()> {
     let (_send, mut recv) = server_conn.accept_bi().await?;
     assert_eq!(
         recv.read(&mut [0]).await,
-        Err(noq::ReadError::Reset(
-            ErrorCode::RequestMaxSizeExceeded.into()
-        ))
+        Err(noq::ReadError::Reset(noq::VarInt::from_u64(
+            ErrorCode::RequestMaxSizeExceeded.to_code()
+        )?))
     );
     Ok(())
 }
@@ -238,7 +229,10 @@ async fn truncated_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::RequestDecodeFailed.into());
+    assert_eq!(
+        ErrorCode::from_code(close.error_code.into_inner()),
+        Some(ErrorCode::RequestDecodeFailed)
+    );
     Ok(())
 }
 
@@ -279,12 +273,12 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     // The server reset its side of both streams, so the mpsc response fails instead of ending.
     let err = upload_rx.await.expect_err("server skips the upload");
-    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted.into()));
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
     let err = exchange_rx
         .recv()
         .await
         .expect_err("server skips the exchange");
-    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted.into()));
+    assert_eq!(err.remote_code(), Some(ErrorCode::RequestAborted));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
@@ -402,7 +396,7 @@ async fn close_with_code_returns_connection_closed() -> TestResult<()> {
     let ReadRequestError::ConnectionClosed { close, .. } = err else {
         panic!("expected ConnectionClosed, got {err:?}");
     };
-    assert_eq!(close.code(), Some(RemoteCode::Other(401)));
+    assert_eq!(close.code(), Some(ErrorCode::Other(401)));
 
     // A client that opens a request on the closed connection gets the same close.
     let client = Client::<client::EchoProtocol>::boxed(server_conn);
@@ -410,6 +404,6 @@ async fn close_with_code_returns_connection_closed() -> TestResult<()> {
         .rpc(client::Echo("a".into()))
         .await
         .expect_err("the connection is closed");
-    assert_eq!(err.remote_code(), Some(RemoteCode::Other(401)));
+    assert_eq!(err.remote_code(), Some(ErrorCode::Other(401)));
     Ok(())
 }

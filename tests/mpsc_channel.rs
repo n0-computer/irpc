@@ -55,7 +55,7 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
     // the server stops the stream with code 1 and then closes the connection, so a
     // later send gets one of these, not an io error
     match send1.send(vec![4, 5, 6]).await {
-        Err(SendError::Remote { code, .. }) => assert_eq!(code, ErrorCode::RequestAborted.into()),
+        Err(SendError::Remote { code, .. }) => assert_eq!(code, ErrorCode::RequestAborted),
         Err(SendError::ConnectionClosed { close, .. }) => assert_eq!(close.code(), None),
         e => panic!("Expected Remote or ConnectionClosed, got {e:?}"),
     };
@@ -356,10 +356,7 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert_eq!(
-        cause.remote_code(),
-        Some(ErrorCode::MessageMaxSizeExceeded.into())
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
     Ok(())
 }
 
@@ -378,10 +375,7 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert_eq!(
-        cause.remote_code(),
-        Some(ErrorCode::MessageMaxSizeExceeded.into())
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
     Ok(())
 }
 
@@ -439,10 +433,7 @@ async fn mpsc_serialize_error_send() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert_eq!(
-        cause.remote_code(),
-        Some(ErrorCode::MessageEncodeFailed.into())
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
     Ok(())
 }
 
@@ -495,7 +486,7 @@ async fn mpsc_decode_error_reaches_sender() -> TestResult<()> {
         }
     })
     .await?;
-    let decode_failed = Some(ErrorCode::MessageDecodeFailed.into());
+    let decode_failed = Some(ErrorCode::MessageDecodeFailed);
     assert_eq!(err.remote_code(), decode_failed);
     // later sends, also on a clone that did not see the stop
     assert_eq!(send.send(2).await.unwrap_err().remote_code(), decode_failed);
@@ -518,7 +509,8 @@ async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     // an odd number does not decode as `NoSer`
     send.write_length_prefixed(1u64).await?;
     let code = timeout(Duration::from_secs(5), send.stopped()).await??;
-    assert_eq!(code, Some(ErrorCode::MessageDecodeFailed.into()));
+    let code = code.and_then(|code| ErrorCode::from_code(code.into_inner()));
+    assert_eq!(code, Some(ErrorCode::MessageDecodeFailed));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())

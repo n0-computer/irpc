@@ -8,7 +8,7 @@ use n0_error::{e, stack_error};
 
 use super::SendError;
 #[cfg(feature = "rpc")]
-use crate::rpc::{self, ConnectionClose, RemoteCode};
+use crate::rpc::{self, ConnectionClose, ErrorCode};
 
 /// Error when receiving an mpsc message.
 ///
@@ -29,13 +29,13 @@ use crate::rpc::{self, ConnectionClose, RemoteCode};
 pub enum RecvError {
     /// The sender reset the stream with a code, and the channel is closed.
     ///
-    /// The `code` says why, see [`RemoteCode`], and the [`rpc`] module for an overview.
+    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
     ///
-    /// [`RemoteCode`]: crate::rpc::RemoteCode
+    /// [`ErrorCode`]: crate::rpc::ErrorCode
     /// [`rpc`]: crate::rpc
     #[cfg(feature = "rpc")]
     #[error("Sender closed the channel: {code}")]
-    Remote { code: crate::rpc::RemoteCode },
+    Remote { code: crate::rpc::ErrorCode },
     /// The sender reset the stream with code 0, and the channel is closed.
     ///
     /// Unlike the end of the stream, which is `Ok(None)`, a reset can drop
@@ -124,7 +124,7 @@ impl RecvError {
     ///
     /// This is the code of a [`Remote`](Self::Remote) error, or the code that
     /// the peer closed the connection with.
-    pub fn remote_code(&self) -> Option<RemoteCode> {
+    pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
             Self::ConnectionClosed { close, .. } => close.code(),
