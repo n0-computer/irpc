@@ -742,7 +742,7 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
         let span = tracing::Span::current();
         let fut = async move {
             // A sender that is dropped without sending finishes the stream.
-            let Some(size) = read.read_varint_u64().await? else {
+            let Some(size) = read_size(&mut read).await? else {
                 return Err(e!(oneshot::RecvError::SenderClosed));
             };
             if size > MAX_MESSAGE_SIZE {
@@ -765,6 +765,20 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
 /// Returns the noq read error in `err`, if the stream failed.
 fn read_error(err: &io::Error) -> Option<&noq::ReadError> {
     err.get_ref()?.downcast_ref()
+}
+
+/// Reads the size prefix of a message, or returns `None` at the end of the stream.
+///
+/// A size prefix that does not fit in a `u64` is larger than
+/// [`MAX_MESSAGE_SIZE`], so this returns `u64::MAX` for it.
+async fn read_size(recv: &mut noq::RecvStream) -> io::Result<Option<u64>> {
+    match recv.read_varint_u64().await {
+        // The only error of the varint itself: all others are from the stream.
+        Err(err) if err.kind() == io::ErrorKind::InvalidData && read_error(&err).is_none() => {
+            Ok(Some(u64::MAX))
+        }
+        res => res,
+    }
 }
 
 /// Returns whether `err` is the end of a stream in the middle of a message.
@@ -904,20 +918,18 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                             io::Error::from(io::ErrorKind::UnexpectedEof).into()
                         ));
                     };
-                    if *shift >= 64 {
-                        let error = io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Varint is too large for u64",
-                        );
-                        return Poll::Ready(Err(error.into()));
-                    }
-                    *value |= u64::from(byte & 0x7F) << *shift;
-                    if byte & 0x80 != 0 {
-                        *shift += 7;
-                        continue;
+                    let bits = u64::from(byte & 0x7F);
+                    // A size that does not fit in a u64 is larger than MAX_MESSAGE_SIZE.
+                    let too_large = *shift > 63 || (*shift == 63 && bits > 1);
+                    if !too_large {
+                        *value |= bits << *shift;
+                        if byte & 0x80 != 0 {
+                            *shift += 7;
+                            continue;
+                        }
                     }
                     let size = *value;
-                    if size > MAX_MESSAGE_SIZE {
+                    if too_large || size > MAX_MESSAGE_SIZE {
                         self.recv
                             .stop(ErrorCode::MessageMaxSizeExceeded.into())
                             .ok();
@@ -1564,7 +1576,7 @@ enum ReadFrame<S> {
     Request(Option<crate::span_propagation::SpanContextCarrier>, S),
     /// The request is larger than [`MAX_MESSAGE_SIZE`].
     MaxSizeExceeded,
-    /// The stream ended before the request was complete, or the size prefix is too long.
+    /// The stream ended before the request was complete.
     Malformed(io::Error),
     /// The request does not decode.
     DecodeFailed(postcard::Error),
@@ -1592,7 +1604,7 @@ impl<S> ReadFrame<S> {
 
 /// Reads and decodes a request.
 async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame<S> {
-    let size = match recv.read_varint_u64().await {
+    let size = match read_size(recv).await {
         Ok(Some(size)) => size,
         Ok(None) => {
             return ReadFrame::Malformed(io::Error::new(
@@ -1603,7 +1615,7 @@ async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame
         Err(err) => {
             return match read_error(&err) {
                 Some(read_err) => ReadFrame::from_read_err(read_err),
-                // The varint is longer than a u64, or the stream ended inside it.
+                // The stream ended inside the size prefix.
                 None => ReadFrame::Malformed(err),
             };
         }
