@@ -7,7 +7,7 @@ use irpc::{
         SendError,
         oneshot::{self, RecvError},
     },
-    rpc::ErrorCode,
+    rpc::{ConnectionClose, ErrorCode},
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
@@ -31,6 +31,87 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
     let recv = oneshot::Receiver::<Vec<u8>>::from(recv);
     recv.await?;
     Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
+}
+
+/// Checks that a connection that the peer closes with an application code is not an io error.
+#[tokio::test]
+async fn oneshot_connection_closed_with_app_code() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let _streams = conn.accept_bi().await?;
+        conn.close(401u32.into(), b"permission denied");
+        TestResult::Ok(())
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, recv) = conn.open_bi().await?;
+    // the server sees the stream only after the first byte
+    send.write_all(&[0]).await?;
+    let err = oneshot::Receiver::<Vec<u8>>::from(recv)
+        .await
+        .expect_err("the server closed the connection");
+    let RecvError::ConnectionClosed { close, .. } = &err else {
+        panic!("expected ConnectionClosed, got {err:?}");
+    };
+    assert_eq!(
+        *close,
+        ConnectionClose::Remote {
+            code: Some(ErrorCode::Other(401)),
+            reason: b"permission denied".to_vec(),
+        }
+    );
+    assert_eq!(err.remote_code(), Some(ErrorCode::Other(401)));
+    server.await??;
+    Ok(())
+}
+
+/// Checks that a stream that ends in the middle of a message is `Truncated`, not an io error.
+#[tokio::test]
+async fn oneshot_truncated_message() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The size prefix says 100 bytes, but only 3 follow.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of a message");
+    };
+    assert!(matches!(cause, RecvError::Truncated { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a stream that ends in the middle of the size prefix is `Truncated`.
+#[tokio::test]
+async fn oneshot_truncated_size() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The high bit says that more bytes of the size prefix follow.
+    send.write_all(&[0x80]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of the size prefix");
+    };
+    assert!(matches!(cause, RecvError::Truncated { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a reset with code 0 is a closed channel, not an io error.
+#[tokio::test]
+async fn oneshot_reset_with_code_0() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    send.reset(0u32.into())?;
+    let Err(cause) = server.await? else {
+        panic!("the sender reset the stream");
+    };
+    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
+    Ok(())
 }
 
 /// Checks that a receiver gets `SenderClosed` if the remote sender is dropped without sending, as for a local one.

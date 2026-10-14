@@ -1,9 +1,6 @@
 #![cfg(feature = "noq_endpoint_setup")]
 
-use std::{
-    io::{self, ErrorKind},
-    time::Duration,
-};
+use std::{io, time::Duration};
 
 use irpc::{
     Client, WithChannels,
@@ -26,7 +23,7 @@ mod common;
 use common::*;
 
 /// Checks that all clones of a `Sender` will get the closed signal as soon as
-/// a send fails with an io error.
+/// a send fails because the receiver ended the channel.
 #[tokio::test]
 async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
@@ -47,21 +44,20 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
         send2.closed().await;
     });
     let third_client = tokio::spawn(async move {
-        // this should fail with an io error, since the stream was stopped
-        loop {
-            match send3.send(vec![1, 2, 3]).await {
-                Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {
-                    break;
-                }
-                _ => {}
-            };
-        }
+        // this fails eventually, since the server stops the stream and closes the connection
+        while !matches!(
+            send3.send(vec![1, 2, 3]).await,
+            Err(SendError::Remote { .. } | SendError::ConnectionClosed { .. })
+        ) {}
     });
     // send until we get an error because the remote side stopped the stream
     while send1.send(vec![1, 2, 3]).await.is_ok() {}
+    // the server stops the stream with code 1 and then closes the connection, so a
+    // later send gets one of these, not an io error
     match send1.send(vec![4, 5, 6]).await {
-        Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {}
-        e => panic!("Expected SendError::Io with kind BrokenPipe, got {e:?}"),
+        Err(SendError::Remote { code, .. }) => assert_eq!(code, ErrorCode::RequestAborted),
+        Err(SendError::ConnectionClosed { close, .. }) => assert_eq!(close.code(), None),
+        e => panic!("Expected Remote or ConnectionClosed, got {e:?}"),
     };
     // check that closed signal was received by the second sender
     second_client.await?;
@@ -95,15 +91,11 @@ async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
         send2.closed().await;
     });
     let third_client = tokio::spawn(async move {
-        // this should fail with an io error, since the stream was stopped
-        loop {
-            match send3.send(vec![1, 2, 3]).await {
-                Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {
-                    break;
-                }
-                _ => {}
-            };
-        }
+        // this fails eventually, since a cancelled send closes the sender
+        while !matches!(
+            send3.send(vec![1, 2, 3]).await,
+            Err(SendError::Closed { .. })
+        ) {}
     });
     // send a lot of data with a tiny timeout, this will cause the send future to be dropped
     loop {
@@ -302,6 +294,73 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
     Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
 }
 
+/// Checks that a stream that ends in the middle of a message is `Truncated`, not an io error.
+#[tokio::test]
+async fn mpsc_truncated_message() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The size prefix says 100 bytes, but only 3 follow.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of a message");
+    };
+    assert!(matches!(cause, RecvError::Truncated { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a stream that ends in the middle of the size prefix is `Truncated`.
+#[tokio::test]
+async fn mpsc_truncated_size() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The high bit says that more bytes of the size prefix follow.
+    send.write_all(&[0x80]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of the size prefix");
+    };
+    assert!(matches!(cause, RecvError::Truncated { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a size prefix that does not fit in a u64 is `MaxSizeExceeded`, not an io error.
+#[tokio::test]
+async fn mpsc_too_long_size_prefix() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    send.write_all(&[0xff; 11]).await?;
+    let Err(cause) = server.await? else {
+        panic!("the size prefix is too long");
+    };
+    assert!(
+        matches!(cause, RecvError::MaxSizeExceeded { .. }),
+        "{cause:?}"
+    );
+    Ok(())
+}
+
+/// Checks that a reset with code 0 is a closed channel, not an io error.
+#[tokio::test]
+async fn mpsc_reset_with_code_0() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    send.reset(0u32.into())?;
+    let Err(cause) = server.await? else {
+        panic!("the sender reset the stream");
+    };
+    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
+    Ok(())
+}
+
 /// Checks that the max message size is enforced on the sender side and that errors are propagated to the receiver side.
 #[tokio::test]
 async fn mpsc_max_message_size_send() -> TestResult<()> {
@@ -317,10 +376,10 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
         panic!("client should have failed due to max message size");
     };
     assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
-    // later sends get a broken pipe, also for a message that is small enough
+    // later sends fail because the sender is closed, also for a message that is small enough
     assert!(matches!(
         send.send(vec![0u8; 1]).await,
-        Err(SendError::Io { source, .. }) if source.kind() == io::ErrorKind::BrokenPipe
+        Err(SendError::Closed { .. })
     ));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
@@ -478,7 +537,8 @@ async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     // an odd number does not decode as `NoSer`
     send.write_length_prefixed(1u64).await?;
     let code = timeout(Duration::from_secs(5), send.stopped()).await??;
-    assert_eq!(code, Some(ErrorCode::MessageDecodeFailed.into()));
+    let code = code.and_then(|code| ErrorCode::from_code(code.into_inner()));
+    assert_eq!(code, Some(ErrorCode::MessageDecodeFailed));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())

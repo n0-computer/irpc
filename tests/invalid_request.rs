@@ -95,7 +95,10 @@ async fn bad_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::RequestDecodeFailed.into());
+    assert_eq!(
+        ErrorCode::from_code(close.error_code.into_inner()),
+        Some(ErrorCode::RequestDecodeFailed)
+    );
     Ok(())
 }
 
@@ -112,7 +115,10 @@ async fn too_large_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::RequestMaxSizeExceeded.into());
+    assert_eq!(
+        ErrorCode::from_code(close.error_code.into_inner()),
+        Some(ErrorCode::RequestMaxSizeExceeded)
+    );
     Ok(())
 }
 
@@ -187,9 +193,9 @@ async fn too_large_rpc_resets_with_reason() -> TestResult<()> {
     let (_send, mut recv) = server_conn.accept_bi().await?;
     assert_eq!(
         recv.read(&mut [0]).await,
-        Err(noq::ReadError::Reset(
-            ErrorCode::RequestMaxSizeExceeded.into()
-        ))
+        Err(noq::ReadError::Reset(noq::VarInt::from_u64(
+            ErrorCode::RequestMaxSizeExceeded.to_code()
+        )?))
     );
     Ok(())
 }
@@ -223,7 +229,10 @@ async fn truncated_request_closes_connection() -> TestResult<()> {
     let ConnectionError::ApplicationClosed(close) = conn.closed().await else {
         panic!("server closes the connection");
     };
-    assert_eq!(close.error_code, ErrorCode::RequestDecodeFailed.into());
+    assert_eq!(
+        ErrorCode::from_code(close.error_code.into_inner()),
+        Some(ErrorCode::RequestDecodeFailed)
+    );
     Ok(())
 }
 
@@ -295,6 +304,26 @@ async fn read_request_returns_truncated_request() -> TestResult<()> {
 
 /// A close in the middle of a request ends `read_request` as a close between requests does.
 #[tokio::test]
+async fn read_request_returns_too_long_size_prefix() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let connecting = client_endpoint.connect(server_addr, "localhost")?;
+    let accepting = async { server.accept().await.expect("endpoint is open").await };
+    let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+
+    let (mut send, _recv) = client_conn.open_bi().await?;
+    // A size prefix that does not fit in a u64.
+    send.write_all(&[0xff; 11]).await?;
+    let err = read_request::<server::EchoProtocol>(&server_conn)
+        .await
+        .expect_err("the size prefix is too long");
+    assert!(
+        matches!(err, ReadRequestError::MaxSizeExceeded { .. }),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn close_during_request_returns_none() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let connecting = client_endpoint.connect(server_addr, "localhost")?;
@@ -350,5 +379,31 @@ async fn read_request_returns_bad_request() -> TestResult<()> {
     assert_eq!(client.rpc(client::Echo("b".into())).await?, "b");
     conn.close(0u32.into(), b"");
     server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn close_with_code_returns_connection_closed() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let connecting = client_endpoint.connect(server_addr, "localhost")?;
+    let accepting = async { server.accept().await.expect("endpoint is open").await };
+    let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+
+    client_conn.close(401u32.into(), b"bye");
+    let err = read_request::<server::EchoProtocol>(&server_conn)
+        .await
+        .expect_err("the client closed the connection with a code");
+    let ReadRequestError::ConnectionClosed { close, .. } = err else {
+        panic!("expected ConnectionClosed, got {err:?}");
+    };
+    assert_eq!(close.code(), Some(ErrorCode::Other(401)));
+
+    // A client that opens a request on the closed connection gets the same close.
+    let client = Client::<client::EchoProtocol>::boxed(server_conn);
+    let err = client
+        .rpc(client::Echo("a".into()))
+        .await
+        .expect_err("the connection is closed");
+    assert_eq!(err.remote_code(), Some(ErrorCode::Other(401)));
     Ok(())
 }
