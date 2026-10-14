@@ -35,6 +35,13 @@ pub enum RecvError {
     #[cfg(feature = "rpc")]
     #[error("Sender closed the channel: {code}")]
     Remote { code: crate::rpc::RemoteCode },
+    /// The sender reset the stream with code 0, and the channel is closed.
+    ///
+    /// Unlike the end of the stream, which is `Ok(None)`, a reset can drop
+    /// messages that this receiver did not read yet.
+    #[cfg(feature = "rpc")]
+    #[error("Sender reset the channel")]
+    SenderClosed,
     /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
@@ -59,13 +66,15 @@ pub enum RecvError {
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
-/// A reset with a code other than 0 becomes [`RecvError::Remote`], and any
-/// other io error becomes [`RecvError::Io`].
+/// A reset becomes [`RecvError::Remote`], or [`RecvError::SenderClosed`]
+/// for code 0, and any other io error becomes [`RecvError::Io`].
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
         #[cfg(feature = "rpc")]
-        if let Some(code) = rpc::reset_code(&err) {
-            return e!(RecvError::Remote { code });
+        match rpc::reset_code(&err) {
+            Some(Some(code)) => return e!(RecvError::Remote { code }),
+            Some(None) => return e!(RecvError::SenderClosed),
+            None => {}
         }
         e!(RecvError::Io, err)
     }
@@ -76,7 +85,9 @@ impl From<RecvError> for io::Error {
         match e {
             RecvError::Io { source, .. } => source,
             #[cfg(feature = "rpc")]
-            RecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
+            RecvError::Remote { .. } | RecvError::SenderClosed { .. } => {
+                io::Error::new(io::ErrorKind::ConnectionReset, e)
+            }
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
         }
     }

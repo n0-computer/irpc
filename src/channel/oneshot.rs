@@ -30,7 +30,8 @@ pub enum RecvError {
     ///
     /// This is the only error that can occur for local communication. For
     /// remote communication, this means that the sender finished the stream
-    /// without sending, for example because it was dropped.
+    /// without sending, for example because it was dropped, or reset it with
+    /// code 0.
     #[error("Sender closed")]
     SenderClosed,
     /// The sender reset the stream with a code, and the channel is closed.
@@ -66,13 +67,15 @@ pub enum RecvError {
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
-/// A reset with a code other than 0 becomes [`RecvError::Remote`], and any
-/// other io error becomes [`RecvError::Io`].
+/// A reset becomes [`RecvError::Remote`], or [`RecvError::SenderClosed`]
+/// for code 0, and any other io error becomes [`RecvError::Io`].
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
         #[cfg(feature = "rpc")]
-        if let Some(code) = rpc::reset_code(&err) {
-            return e!(RecvError::Remote { code });
+        match rpc::reset_code(&err) {
+            Some(Some(code)) => return e!(RecvError::Remote { code }),
+            Some(None) => return e!(RecvError::SenderClosed),
+            None => {}
         }
         e!(RecvError::Io, err)
     }
