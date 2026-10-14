@@ -31,9 +31,9 @@ pub enum RecvError {
     /// This is the only error that can occur for local communication. For
     /// remote communication, this means that the sender finished the stream
     /// without sending, for example because it was dropped, or reset it with
-    /// [`ErrorCode::MessageAborted`]. A sender whose send was cancelled in the
-    /// middle of the message is also closed, like a sender that was dropped
-    /// before it sent.
+    /// code 0 or [`ErrorCode::MessageAborted`]. A sender whose send was
+    /// cancelled in the middle of the message is also closed, like a sender
+    /// that was dropped before it sent.
     ///
     /// [`ErrorCode::MessageAborted`]: crate::rpc::ErrorCode::MessageAborted
     #[error("Sender closed")]
@@ -69,9 +69,9 @@ pub enum RecvError {
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
-/// A reset with [`ErrorCode::MessageAborted`], and the end of the stream in the
-/// middle of a message, become [`RecvError::SenderClosed`]. A reset with
-/// another code other than 0 becomes [`RecvError::Remote`], and any other io
+/// A reset with code 0 or [`ErrorCode::MessageAborted`], and the end of the
+/// stream in the middle of a message, become [`RecvError::SenderClosed`]. A
+/// reset with another code becomes [`RecvError::Remote`], and any other io
 /// error becomes [`RecvError::Io`].
 ///
 /// [`ErrorCode::MessageAborted`]: crate::rpc::ErrorCode::MessageAborted
@@ -79,10 +79,10 @@ impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
         #[cfg(feature = "rpc")]
         match rpc::reset_code(&err) {
-            Some(RemoteCode::Irpc(ErrorCode::MessageAborted)) => {
+            Some(None | Some(RemoteCode::Irpc(ErrorCode::MessageAborted))) => {
                 return e!(RecvError::SenderClosed);
             }
-            Some(code) => return e!(RecvError::Remote { code }),
+            Some(Some(code)) => return e!(RecvError::Remote { code }),
             None => {}
         }
         #[cfg(feature = "rpc")]
