@@ -371,6 +371,12 @@ pub enum ReadRequestError {
         #[error(std_err)]
         source: postcard::Error,
     },
+    /// The peer closed the connection with a code other than 0.
+    ///
+    /// A close with code 0, or by this side, is not an error: [`read_request`]
+    /// returns `None`.
+    #[error("Connection {close}")]
+    ConnectionClosed { close: ConnectionClose },
     /// The connection failed.
     #[error("Connection failed")]
     Connection {
@@ -387,7 +393,7 @@ impl ReadRequestError {
             Self::Malformed { .. } | Self::DecodeFailed { .. } => {
                 Some(ErrorCode::RequestDecodeFailed)
             }
-            Self::Connection { .. } => None,
+            Self::ConnectionClosed { .. } | Self::Connection { .. } => None,
         }
     }
 }
@@ -396,6 +402,9 @@ impl From<ReadRequestError> for io::Error {
     fn from(err: ReadRequestError) -> Self {
         match err {
             ReadRequestError::Connection { source, .. } => source.into(),
+            ReadRequestError::ConnectionClosed { .. } => {
+                io::Error::new(io::ErrorKind::ConnectionAborted, err)
+            }
             err => io::Error::new(io::ErrorKind::InvalidData, err),
         }
     }
@@ -1323,7 +1332,10 @@ async fn read_request_inner<S: Service>(
                 return Ok(None);
             }
             Err(ConnectionError::LocallyClosed) => return Ok(None),
-            Err(cause) => return Err(e!(ReadRequestError::Connection, cause)),
+            Err(cause) => match ConnectionClose::from_error(&cause) {
+                Some(close) => return Err(e!(ReadRequestError::ConnectionClosed { close })),
+                None => return Err(e!(ReadRequestError::Connection, cause)),
+            },
         };
         let err = match read_request_frame::<S>(&mut recv).await {
             ReadFrame::Request(carrier, msg) => return Ok(Some((msg, carrier, recv, send))),
