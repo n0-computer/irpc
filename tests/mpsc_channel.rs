@@ -300,6 +300,24 @@ async fn mpsc_truncated_size() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that a size prefix that does not fit in a u64 is `MaxSizeExceeded`, not an io error.
+#[tokio::test]
+async fn mpsc_too_long_size_prefix() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    send.write_all(&[0xff; 11]).await?;
+    let Err(cause) = server.await? else {
+        panic!("the size prefix is too long");
+    };
+    assert!(
+        matches!(cause, RecvError::MaxSizeExceeded { .. }),
+        "{cause:?}"
+    );
+    Ok(())
+}
+
 /// Checks that a reset with code 0 is a closed channel, not an io error.
 #[tokio::test]
 async fn mpsc_reset_with_code_0() -> TestResult<()> {

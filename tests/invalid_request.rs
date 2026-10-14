@@ -310,6 +310,26 @@ async fn read_request_returns_truncated_request() -> TestResult<()> {
 
 /// A close in the middle of a request ends `read_request` as a close between requests does.
 #[tokio::test]
+async fn read_request_returns_too_long_size_prefix() -> TestResult<()> {
+    let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
+    let connecting = client_endpoint.connect(server_addr, "localhost")?;
+    let accepting = async { server.accept().await.expect("endpoint is open").await };
+    let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+
+    let (mut send, _recv) = client_conn.open_bi().await?;
+    // A size prefix that does not fit in a u64.
+    send.write_all(&[0xff; 11]).await?;
+    let err = read_request::<server::EchoProtocol>(&server_conn)
+        .await
+        .expect_err("the size prefix is too long");
+    assert!(
+        matches!(err, ReadRequestError::MaxSizeExceeded { .. }),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn close_during_request_returns_none() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let connecting = client_endpoint.connect(server_addr, "localhost")?;
