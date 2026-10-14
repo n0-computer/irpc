@@ -17,7 +17,6 @@ use irpc::{
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
-use n0_future::future::poll_once;
 use noq::Endpoint;
 use serde::{Deserialize, Serialize};
 use testresult::TestResult;
@@ -318,26 +317,6 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
         panic!("server should have failed due to max message size");
     };
     assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
-    Ok(())
-}
-
-/// Checks that a send that is cancelled in the middle of a message resets the stream.
-#[tokio::test]
-async fn mpsc_cancelled_send_resets_stream() -> TestResult<()> {
-    let (server, client, server_addr) = create_connected_endpoints()?;
-    let server = tokio::spawn(vec_receiver(server));
-    let conn = client.connect(server_addr, "localhost")?.await?;
-    let (send, _) = conn.open_bi().await?;
-    let send = mpsc::Sender::<Vec<u8>>::from(send);
-    // The message is larger than the flow control window, so one poll cannot write all of it.
-    let mut fut = Box::pin(send.send(vec![0u8; 8 * 1024 * 1024]));
-    assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
-    drop(fut);
-    drop(send);
-    let Err(cause) = server.await? else {
-        panic!("the send was cancelled");
-    };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageAborted));
     Ok(())
 }
 

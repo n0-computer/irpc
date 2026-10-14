@@ -65,9 +65,11 @@
 //! [`SendError::Remote`]. A reset can drop messages that the receiver did not
 //! read yet.
 //!
-//! A sender that drops a message before it wrote all of it, for example because
-//! the future of the send was dropped, resets its stream with
-//! [`ErrorCode::MessageAborted`].
+//! A oneshot sender that drops its message before it wrote all of it, for
+//! example because the future of the send was dropped, resets its stream with
+//! [`ErrorCode::MessageAborted`]. An mpsc sender does not: a reset can drop
+//! earlier messages that the receiver did not read yet, so the receiver reads a
+//! part of the message instead.
 //!
 //! # Error codes
 //!
@@ -81,7 +83,8 @@
 //!
 //! [`Client::rpc`]: crate::Client::rpc
 use std::{
-    fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut, pin::Pin, sync::Arc,
+    borrow::BorrowMut, fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut,
+    pin::Pin, sync::Arc,
 };
 
 use n0_error::{e, stack_error};
@@ -175,9 +178,9 @@ pub enum ErrorCode {
     /// A channel message does not decode.
     #[display("message does not decode")]
     MessageDecodeFailed = 7,
-    /// The sender dropped a channel message before it wrote all of it.
+    /// The oneshot sender dropped its message before it wrote all of it.
     ///
-    /// For example, the future of a send was dropped while it wrote a large
+    /// For example, the future of the send was dropped while it wrote a large
     /// message.
     #[display("message aborted")]
     MessageAborted = 8,
@@ -412,35 +415,49 @@ pub trait RemoteConnection: Send + Sync + Debug + 'static {
 #[derive(Debug)]
 pub struct RemoteSender<S>(ResetOnDrop, noq::RecvStream, std::marker::PhantomData<S>);
 
-/// A send stream that resets with [`ErrorCode::RequestAborted`] if it drops before [`Self::into_inner`].
+/// A send stream that resets with its code if it drops before [`Self::into_inner`].
+///
+/// It owns the stream, or borrows it for a single write.
 #[derive(Debug)]
-struct ResetOnDrop(Option<noq::SendStream>);
+struct ResetOnDrop<S: BorrowMut<noq::SendStream> = noq::SendStream> {
+    send: Option<S>,
+    /// The code that the stream resets with on drop.
+    code: ErrorCode,
+}
 
-impl ResetOnDrop {
-    fn get_mut(&mut self) -> &mut noq::SendStream {
-        self.0
-            .as_mut()
-            .expect("only `into_inner` and `reset` take the stream")
+impl<S: BorrowMut<noq::SendStream>> ResetOnDrop<S> {
+    fn new(send: S, code: ErrorCode) -> Self {
+        Self {
+            send: Some(send),
+            code,
+        }
     }
 
-    fn into_inner(mut self) -> noq::SendStream {
-        self.0
+    fn get_mut(&mut self) -> &mut noq::SendStream {
+        self.send
+            .as_mut()
+            .expect("only `into_inner` and `reset` take the stream")
+            .borrow_mut()
+    }
+
+    fn into_inner(mut self) -> S {
+        self.send
             .take()
             .expect("only `into_inner` and `reset` take the stream")
     }
 
-    /// Resets the stream with `code`, instead of [`ErrorCode::RequestAborted`] on drop.
+    /// Resets the stream with `code`, instead of the code of this guard on drop.
     fn reset(&mut self, code: ErrorCode) {
-        if let Some(mut send) = self.0.take() {
-            send.reset(code.into()).ok();
+        if let Some(mut send) = self.send.take() {
+            send.borrow_mut().reset(code.into()).ok();
         }
     }
 }
 
-impl Drop for ResetOnDrop {
+impl<S: BorrowMut<noq::SendStream>> Drop for ResetOnDrop<S> {
     fn drop(&mut self) {
-        if let Some(send) = &mut self.0 {
-            send.reset(ErrorCode::RequestAborted.into()).ok();
+        if let Some(send) = &mut self.send {
+            send.borrow_mut().reset(self.code.into()).ok();
         }
     }
 }
@@ -514,32 +531,13 @@ fn encode_message(
     })
 }
 
-/// Writes all of the channel message in `buf` to `send`.
-///
-/// Resets `send` with [`ErrorCode::MessageAborted`] if the write is dropped
-/// before it is done, so the receiver gets an error instead of a part of the
-/// message.
-async fn write_message(send: &mut noq::SendStream, buf: &[u8]) -> Result<(), noq::WriteError> {
-    let mut guard = AbortOnDrop(Some(send));
-    let res = guard.0.as_mut().expect("set above").write_all(buf).await;
-    guard.0 = None;
-    res
-}
-
-/// Resets a send stream with [`ErrorCode::MessageAborted`] if it drops while it holds the stream.
-struct AbortOnDrop<'a>(Option<&'a mut noq::SendStream>);
-
-impl Drop for AbortOnDrop<'_> {
-    fn drop(&mut self) {
-        if let Some(send) = self.0.take() {
-            send.reset(ErrorCode::MessageAborted.into()).ok();
-        }
-    }
-}
-
 impl<S: Service> RemoteSender<S> {
     pub fn new(send: noq::SendStream, recv: noq::RecvStream) -> Self {
-        Self(ResetOnDrop(Some(send)), recv, PhantomData)
+        Self(
+            ResetOnDrop::new(send, ErrorCode::RequestAborted),
+            recv,
+            PhantomData,
+        )
     }
 
     /// Writes the request `msg`, and returns the streams of the request.
@@ -646,7 +644,12 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
                 // write via a small buffer to avoid allocation for small values
                 let mut buf = SmallVec::new();
                 encode_message(&value, &mut buf, &mut writer)?;
-                write_message(&mut writer, &buf).await?;
+                // If this send drops in the middle of the message, reset the
+                // stream, so the receiver gets an error instead of a part of it.
+                let mut guard = ResetOnDrop::new(&mut writer, ErrorCode::MessageAborted);
+                let res = guard.get_mut().write_all(&buf).await;
+                guard.into_inner();
+                res?;
                 Ok(())
             })
         }))
@@ -719,7 +722,10 @@ impl<T: RpcMessage> NoqSenderInner<T> {
     ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + Sync + '_>> {
         Box::pin(async move {
             encode_message(&value, &mut self.buffer, &mut self.send)?;
-            write_message(&mut self.send, &self.buffer).await?;
+            // Unlike the oneshot sender, this does not reset the stream if the
+            // send drops in the middle of the message: a reset can drop earlier
+            // messages that the receiver did not read yet.
+            self.send.write_all(&self.buffer).await?;
             self.buffer.clear();
             Ok(())
         })
@@ -736,7 +742,7 @@ impl<T: RpcMessage> NoqSenderInner<T> {
                 return Ok(false);
             };
             let n = n?;
-            write_message(&mut self.send, &self.buffer[n..]).await?;
+            self.send.write_all(&self.buffer[n..]).await?;
             self.buffer.clear();
             Ok(true)
         })
