@@ -31,8 +31,9 @@
 //! response, for example [`oneshot::RecvError::Remote`] from [`Client::rpc`],
 //! and from the sender of its updates, [`SendError::Remote`].
 //! When the server also closes the connection, as a [`Handler`] does by
-//! default, the close usually arrives first, and the client gets an `Io` error
-//! with the connection error instead. In both cases, `remote_code` returns the
+//! default, the close usually arrives first, and the client gets a
+//! `ConnectionClosed` error with the code instead, for example
+//! [`SendError::ConnectionClosed`]. In both cases, `remote_code` returns the
 //! code, for example [`crate::Error::remote_code`].
 //!
 //! [`read_request`] returns a bad request as a [`ReadRequestError`]. A server
@@ -267,6 +268,75 @@ impl From<ErrorCode> for RemoteCode {
     }
 }
 
+/// How a connection was closed on purpose, by the peer or by this side.
+///
+/// A connection that failed, for example because the peer is gone, is an `Io`
+/// error instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConnectionClose {
+    /// The peer closed the connection.
+    Remote {
+        /// The code of the close, or `None` for code 0, a normal close.
+        code: Option<RemoteCode>,
+        /// The reason that the peer gave.
+        reason: Vec<u8>,
+    },
+    /// This side closed the connection.
+    Local,
+}
+
+impl ConnectionClose {
+    /// Returns the code that the peer closed the connection with, if it was not 0.
+    pub fn code(&self) -> Option<RemoteCode> {
+        match self {
+            Self::Remote { code, .. } => *code,
+            Self::Local => None,
+        }
+    }
+
+    /// Returns how the connection was closed, or `None` if it failed.
+    pub(crate) fn from_error(err: &ConnectionError) -> Option<Self> {
+        match err {
+            ConnectionError::ApplicationClosed(close) => Some(Self::Remote {
+                code: RemoteCode::from_varint(close.error_code),
+                reason: close.reason.to_vec(),
+            }),
+            ConnectionError::LocallyClosed => Some(Self::Local),
+            _ => None,
+        }
+    }
+
+    /// Returns how the connection was closed, if `err` is from a stream of a closed connection.
+    pub(crate) fn from_io(err: &io::Error) -> Option<Self> {
+        let err = err.get_ref()?;
+        if let Some(noq::ReadError::ConnectionLost(err)) = err.downcast_ref() {
+            Self::from_error(err)
+        } else if let Some(noq::WriteError::ConnectionLost(err)) = err.downcast_ref() {
+            Self::from_error(err)
+        } else {
+            None
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectionClose {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Remote { code: None, .. } => write!(f, "closed by the peer"),
+            Self::Remote {
+                code: Some(code),
+                reason,
+            } => write!(
+                f,
+                "closed by the peer with {code}: {}",
+                String::from_utf8_lossy(reason)
+            ),
+            Self::Local => write!(f, "closed by this side"),
+        }
+    }
+}
+
 /// Error when reading a request with [`read_request`].
 ///
 /// For [`MaxSizeExceeded`], [`Malformed`], and [`DecodeFailed`], irpc stops
@@ -354,6 +424,9 @@ pub enum WriteError {
     /// The `code` says why, see [`RemoteCode`], and the [`rpc`](self) module for an overview.
     #[error("Server rejected the request: {code}")]
     Remote { code: RemoteCode },
+    /// The connection was closed on purpose while this client wrote the request.
+    #[error("Connection {close}")]
+    ConnectionClosed { close: ConnectionClose },
     /// An io error, for example because the connection was lost.
     #[error("Io error")]
     Io {
@@ -373,26 +446,6 @@ impl WriteError {
     }
 }
 
-/// Returns the code that the peer closed the connection with, if any, other than 0.
-pub(crate) fn close_code(err: &ConnectionError) -> Option<RemoteCode> {
-    match err {
-        ConnectionError::ApplicationClosed(close) => RemoteCode::from_varint(close.error_code),
-        _ => None,
-    }
-}
-
-/// Returns the code that the peer closed the connection with, if `err` comes from that close.
-pub(crate) fn io_close_code(err: &io::Error) -> Option<RemoteCode> {
-    let err = err.get_ref()?;
-    if let Some(noq::ReadError::ConnectionLost(err)) = err.downcast_ref() {
-        close_code(err)
-    } else if let Some(noq::WriteError::ConnectionLost(err)) = err.downcast_ref() {
-        close_code(err)
-    } else {
-        None
-    }
-}
-
 impl From<noq::WriteError> for WriteError {
     fn from(err: noq::WriteError) -> Self {
         match err {
@@ -400,6 +453,12 @@ impl From<noq::WriteError> for WriteError {
                 Some(code) => e!(WriteError::Remote { code }),
                 None => e!(WriteError::ReceiverClosed),
             },
+            noq::WriteError::ConnectionLost(ref cause) => {
+                match ConnectionClose::from_error(cause) {
+                    Some(close) => e!(WriteError::ConnectionClosed { close }),
+                    None => e!(WriteError::Io, err.into()),
+                }
+            }
             err => e!(WriteError::Io, err.into()),
         }
     }
@@ -411,6 +470,7 @@ impl From<WriteError> for io::Error {
             WriteError::Io { source, .. } => source,
             WriteError::ReceiverClosed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
             WriteError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
+            WriteError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
         }
     }
@@ -424,7 +484,7 @@ impl WriteError {
     pub fn remote_code(&self) -> Option<RemoteCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
-            Self::Io { source, .. } => io_close_code(source),
+            Self::ConnectionClosed { close, .. } => close.code(),
             _ => None,
         }
     }
@@ -780,12 +840,14 @@ enum NoqSenderState<T> {
 }
 
 /// Why a remote sender is closed, so that later sends fail with the same error.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum CloseReason {
     /// The receiver closed the channel.
     ReceiverClosed,
-    /// The peer stopped the stream or closed the connection with a code.
+    /// The receiver stopped the stream with a code.
     Remote(RemoteCode),
+    /// The connection was closed on purpose.
+    ConnectionClosed(ConnectionClose),
     /// This sender closed the channel after an error or a cancelled send.
     Other,
 }
@@ -795,6 +857,7 @@ impl CloseReason {
         match self {
             Self::ReceiverClosed => e!(SendError::ReceiverClosed),
             Self::Remote(code) => e!(SendError::Remote { code }),
+            Self::ConnectionClosed(close) => e!(SendError::ConnectionClosed { close }),
             Self::Other => io::Error::from(io::ErrorKind::BrokenPipe).into(),
         }
     }
@@ -814,10 +877,11 @@ impl<T> NoqSenderState<T> {
         match res {
             Ok(_) => Self::Open(sender),
             Err(SendError::ReceiverClosed { .. }) => Self::Closed(CloseReason::ReceiverClosed),
-            Err(err) => Self::Closed(
-                err.remote_code()
-                    .map_or(CloseReason::Other, CloseReason::Remote),
-            ),
+            Err(SendError::Remote { code, .. }) => Self::Closed(CloseReason::Remote(*code)),
+            Err(SendError::ConnectionClosed { close, .. }) => {
+                Self::Closed(CloseReason::ConnectionClosed(close.clone()))
+            }
+            Err(_) => Self::Closed(CloseReason::Other),
         }
     }
 }
@@ -842,7 +906,7 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
                     res
                 }
                 NoqSenderState::Closed(reason) => {
-                    *guard = NoqSenderState::Closed(reason);
+                    *guard = NoqSenderState::Closed(reason.clone());
                     Err(reason.error())
                 }
             }
@@ -863,7 +927,7 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
                     res
                 }
                 NoqSenderState::Closed(reason) => {
-                    *guard = NoqSenderState::Closed(reason);
+                    *guard = NoqSenderState::Closed(reason.clone());
                     Err(reason.error())
                 }
             }

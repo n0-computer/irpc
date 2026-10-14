@@ -971,7 +971,7 @@ impl Error {
             Self::Request {
                 source: RequestError::Connection { source, .. },
                 ..
-            } => rpc::close_code(source),
+            } => rpc::ConnectionClose::from_error(source).and_then(|close| close.code()),
             Self::Request { .. } => None,
             Self::Send { source, .. } => source.remote_code(),
             Self::MpscRecv { source, .. } => source.remote_code(),

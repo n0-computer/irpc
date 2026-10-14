@@ -26,7 +26,7 @@ mod common;
 use common::*;
 
 /// Checks that all clones of a `Sender` will get the closed signal as soon as
-/// a send fails with an io error.
+/// a send fails because the receiver ended the channel.
 #[tokio::test]
 async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
@@ -47,21 +47,20 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
         send2.closed().await;
     });
     let third_client = tokio::spawn(async move {
-        // this should fail with an io error, since the stream was stopped
-        loop {
-            match send3.send(vec![1, 2, 3]).await {
-                Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {
-                    break;
-                }
-                _ => {}
-            };
-        }
+        // this fails eventually, since the server stops the stream and closes the connection
+        while !matches!(
+            send3.send(vec![1, 2, 3]).await,
+            Err(SendError::Remote { .. } | SendError::ConnectionClosed { .. })
+        ) {}
     });
     // send until we get an error because the remote side stopped the stream
     while send1.send(vec![1, 2, 3]).await.is_ok() {}
+    // the server stops the stream with code 1 and then closes the connection, so a
+    // later send gets one of these, not an io error
     match send1.send(vec![4, 5, 6]).await {
-        Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {}
-        e => panic!("Expected SendError::Io with kind BrokenPipe, got {e:?}"),
+        Err(SendError::Remote { code, .. }) => assert_eq!(code, ErrorCode::RequestAborted.into()),
+        Err(SendError::ConnectionClosed { close, .. }) => assert_eq!(close.code(), None),
+        e => panic!("Expected Remote or ConnectionClosed, got {e:?}"),
     };
     // check that closed signal was received by the second sender
     second_client.await?;

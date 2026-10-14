@@ -7,7 +7,7 @@ use irpc::{
         SendError,
         oneshot::{self, RecvError},
     },
-    rpc::ErrorCode,
+    rpc::{ConnectionClose, ErrorCode, RemoteCode},
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
@@ -31,6 +31,38 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
     let recv = oneshot::Receiver::<Vec<u8>>::from(recv);
     recv.await?;
     Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
+}
+
+/// Checks that a connection that the peer closes with an application code is not an io error.
+#[tokio::test]
+async fn oneshot_connection_closed_with_app_code() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let _streams = conn.accept_bi().await?;
+        conn.close(401u32.into(), b"permission denied");
+        TestResult::Ok(())
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, recv) = conn.open_bi().await?;
+    // the server sees the stream only after the first byte
+    send.write_all(&[0]).await?;
+    let err = oneshot::Receiver::<Vec<u8>>::from(recv)
+        .await
+        .expect_err("the server closed the connection");
+    let RecvError::ConnectionClosed { close, .. } = &err else {
+        panic!("expected ConnectionClosed, got {err:?}");
+    };
+    assert_eq!(
+        *close,
+        ConnectionClose::Remote {
+            code: Some(RemoteCode::Other(401)),
+            reason: b"permission denied".to_vec(),
+        }
+    );
+    assert_eq!(err.remote_code(), Some(RemoteCode::Other(401)));
+    server.await??;
+    Ok(())
 }
 
 /// Checks that a reset with code 0 is a closed channel, not an io error.
