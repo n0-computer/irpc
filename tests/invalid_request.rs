@@ -9,6 +9,7 @@ use irpc::{
     rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, WriteError, read_request},
 };
 use n0_future::{future::poll_once, task::AbortOnDropHandle};
+use n0_tracing_test::traced_test;
 use noq::ConnectionError;
 use testresult::TestResult;
 
@@ -80,6 +81,7 @@ fn echo_handler() -> Handler<server::EchoProtocol> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn bad_request_closes_connection() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, echo_handler())));
@@ -100,6 +102,7 @@ async fn bad_request_closes_connection() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn too_large_request_closes_connection() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, echo_handler())));
@@ -117,6 +120,7 @@ async fn too_large_request_closes_connection() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn skip_bad_requests_keeps_connection() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let handler = echo_handler().skip_bad_requests(true);
@@ -195,6 +199,7 @@ async fn too_large_rpc_resets_with_reason() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn dropped_rpc_keeps_connection() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, echo_handler())));
@@ -211,6 +216,7 @@ async fn dropped_rpc_keeps_connection() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn truncated_request_closes_connection() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let _server = AbortOnDropHandle::new(tokio::spawn(listen(server, echo_handler())));
@@ -229,6 +235,7 @@ async fn truncated_request_closes_connection() -> TestResult<()> {
 
 /// The update senders reset the streams of their requests before the server reads them.
 #[tokio::test]
+#[traced_test]
 async fn reset_before_read_skips_request() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -276,6 +283,7 @@ async fn reset_before_read_skips_request() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn read_request_returns_truncated_request() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let connecting = client_endpoint.connect(server_addr, "localhost")?;
@@ -295,6 +303,7 @@ async fn read_request_returns_truncated_request() -> TestResult<()> {
 
 /// A close in the middle of a request ends `read_request` as a close between requests does.
 #[tokio::test]
+#[traced_test]
 async fn close_during_request_returns_none() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let connecting = client_endpoint.connect(server_addr, "localhost")?;
@@ -319,6 +328,7 @@ async fn close_during_request_returns_none() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn read_request_returns_bad_request() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
