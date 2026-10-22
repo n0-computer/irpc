@@ -25,7 +25,7 @@ irpc = { version = "0.17.0", path = "..", features = ["iroh", "derive", "spans",
 n0-error = { workspace = true }
 n0-future = { workspace = true }
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 rand = "0.10.3"
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
