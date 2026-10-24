@@ -2,7 +2,15 @@
 //!
 //! For the rpc case, the send side can not be cloned, hence mpsc instead of mpsc.
 
-use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::Arc};
+use std::{
+    fmt::Debug,
+    future::{Future, poll_fn},
+    io,
+    marker::PhantomData,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, ready},
+};
 
 use n0_error::{e, stack_error};
 
@@ -241,9 +249,17 @@ pub trait DynSender<T>: Debug + Send + Sync + 'static {
 
 /// A receiver that can be wrapped in a `Box<dyn DynReceiver<T>>`.
 pub trait DynReceiver<T>: Debug + Send + Sync + 'static {
+    /// Polls for the next message, keeping a message read in part for the next poll.
+    ///
+    /// Returns `Ok(None)` once the sender has closed the channel.
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, RecvError>>;
+
+    /// Receives the next message.
     fn recv(
         &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<T>, RecvError>> + Send + Sync + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<T>, RecvError>> + Send + Sync + '_>> {
+        Box::pin(poll_fn(move |cx| self.poll_recv(cx)))
+    }
 }
 
 impl<T> Debug for Sender<T> {
@@ -328,10 +344,23 @@ impl<T: Send + Sync + 'static> Receiver<T> {
     /// cleanly closed the connection.
     ///
     /// Returns an an io error if there was an error receiving the message.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This method is cancellation safe. A message read in part when the future
+    /// drops stays with the receiver, and the next call returns it whole.
     pub async fn recv(&mut self) -> Result<Option<T>, RecvError> {
+        poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// Polls for the next message, keeping a message read in part for the next poll.
+    ///
+    /// Returns `Ok(None)` if the sender has been dropped or the remote end has
+    /// cleanly closed the connection.
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, RecvError>> {
         match self {
-            Self::Tokio(rx) => Ok(rx.recv().await),
-            Self::Boxed(rx) => Ok(rx.recv().await?),
+            Self::Tokio(rx) => rx.poll_recv(cx).map(Ok),
+            Self::Boxed(rx) => rx.poll_recv(cx),
         }
     }
 
@@ -374,9 +403,16 @@ impl<T: Send + Sync + 'static> Receiver<T> {
     pub fn into_stream(
         self,
     ) -> impl n0_future::Stream<Item = Result<T, RecvError>> + Send + Sync + 'static {
-        n0_future::stream::unfold(self, |mut recv| async move {
-            recv.recv().await.transpose().map(|msg| (msg, recv))
-        })
+        self
+    }
+}
+
+#[cfg(feature = "stream")]
+impl<T: Send + Sync + 'static> n0_future::Stream for Receiver<T> {
+    type Item = Result<T, RecvError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().poll_recv(cx).map(Result::transpose)
     }
 }
 
@@ -485,17 +521,15 @@ where
     T: Send + Sync + 'static,
     U: Send + Sync + 'static,
 {
-    fn recv(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<U>, RecvError>> + Send + Sync + '_>> {
-        Box::pin(async move {
-            while let Some(msg) = self.receiver.recv().await? {
-                if let Some(v) = (self.f)(msg) {
-                    return Ok(Some(v));
-                }
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<U>, RecvError>> {
+        loop {
+            let Some(msg) = ready!(self.receiver.poll_recv(cx))? else {
+                return Poll::Ready(Ok(None));
+            };
+            if let Some(v) = (self.f)(msg) {
+                return Poll::Ready(Ok(Some(v)));
             }
-            Ok(None)
-        })
+        }
     }
 }
 

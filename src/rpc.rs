@@ -76,14 +76,23 @@
 //! 16 works, but a later version of irpc can give it a different meaning.
 //!
 //! [`Client::rpc`]: crate::Client::rpc
-use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::Arc};
+use std::{
+    fmt::Debug,
+    future::Future,
+    io,
+    marker::PhantomData,
+    mem,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, ready},
+};
 
 use n0_error::{e, stack_error};
 use n0_future::future::Boxed as BoxFuture;
 use noq::{ConnectionError, VarInt};
 use serde::{Serialize, de::DeserializeOwned};
 use smallvec::SmallVec;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tracing::{Instrument, debug, trace, warn};
 
 #[cfg(feature = "iroh")]
@@ -622,6 +631,7 @@ impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
             span: tracing::Span::current(),
             received: 0,
             finished: false,
+            progress: ReadProgress::default(),
             _marker: PhantomData,
         }))
     }
@@ -673,7 +683,24 @@ struct NoqReceiver<T> {
     span: tracing::Span,
     received: u64,
     finished: bool,
+    /// How much of the next message the receiver has read, kept across polls.
+    progress: ReadProgress,
     _marker: std::marker::PhantomData<T>,
+}
+
+/// How much of a length-prefixed message a remote receiver has read.
+#[derive(Debug)]
+enum ReadProgress {
+    /// The varint length so far: `value` holds the bits below `shift`.
+    Length { value: u64, shift: u32 },
+    /// The body, of which the first `filled` bytes have arrived.
+    Body { buf: Vec<u8>, filled: usize },
+}
+
+impl Default for ReadProgress {
+    fn default() -> Self {
+        Self::Length { value: 0, shift: 0 }
+    }
 }
 
 impl<T> Debug for NoqReceiver<T> {
@@ -683,37 +710,77 @@ impl<T> Debug for NoqReceiver<T> {
 }
 
 impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
-    fn recv(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<T>, mpsc::RecvError>> + Send + Sync + '_>> {
-        Box::pin(async {
-            let read = &mut self.recv;
-            let Some(size) = read.read_varint_u64().await? else {
-                if !self.finished {
-                    self.finished = true;
-                    let received = self.received;
-                    self.span.in_scope(|| debug!(received, "stream finished"));
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, mpsc::RecvError>> {
+        loop {
+            match &mut self.progress {
+                ReadProgress::Length { value, shift } => {
+                    let mut byte = [0u8; 1];
+                    let mut read = ReadBuf::new(&mut byte);
+                    ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
+                    let Some(&byte) = read.filled().first() else {
+                        // The stream may end between messages, but not inside a length.
+                        if *shift == 0 {
+                            if !self.finished {
+                                self.finished = true;
+                                let received = self.received;
+                                self.span.in_scope(|| debug!(received, "stream finished"));
+                            }
+                            return Poll::Ready(Ok(None));
+                        }
+                        return Poll::Ready(Err(
+                            io::Error::from(io::ErrorKind::UnexpectedEof).into()
+                        ));
+                    };
+                    if *shift >= 64 {
+                        let error = io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Varint is too large for u64",
+                        );
+                        return Poll::Ready(Err(error.into()));
+                    }
+                    *value |= u64::from(byte & 0x7F) << *shift;
+                    if byte & 0x80 != 0 {
+                        *shift += 7;
+                        continue;
+                    }
+                    let size = *value;
+                    if size > MAX_MESSAGE_SIZE {
+                        self.recv
+                            .stop(ErrorCode::MessageMaxSizeExceeded.into())
+                            .ok();
+                        return Poll::Ready(Err(e!(mpsc::RecvError::MaxSizeExceeded)));
+                    }
+                    self.progress = ReadProgress::Body {
+                        buf: vec![0; size as usize],
+                        filled: 0,
+                    };
                 }
-                return Ok(None);
-            };
-            if size > MAX_MESSAGE_SIZE {
-                self.recv
-                    .stop(ErrorCode::MessageMaxSizeExceeded.into())
-                    .ok();
-                return Err(e!(mpsc::RecvError::MaxSizeExceeded));
+                ReadProgress::Body { buf, filled } => {
+                    while *filled < buf.len() {
+                        let mut read = ReadBuf::new(&mut buf[*filled..]);
+                        ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
+                        let n = read.filled().len();
+                        if n == 0 {
+                            let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
+                            return Poll::Ready(Err(eof.into()));
+                        }
+                        *filled += n;
+                    }
+                    let ReadProgress::Body { buf, .. } = mem::take(&mut self.progress) else {
+                        continue;
+                    };
+                    let msg = postcard::from_bytes(&buf).map_err(|err| {
+                        self.recv.stop(ErrorCode::MessageDecodeFailed.into()).ok();
+                        e!(mpsc::RecvError::DecodeFailed, err)
+                    })?;
+                    self.received += 1;
+                    if self.received == 1 {
+                        self.span.in_scope(|| debug!("first message received"));
+                    }
+                    return Poll::Ready(Ok(Some(msg)));
+                }
             }
-            let mut buf = vec![0; size as usize];
-            AsyncReadExt::read_exact(read, &mut buf).await?;
-            let msg: T = postcard::from_bytes(&buf).map_err(|err| {
-                read.stop(ErrorCode::MessageDecodeFailed.into()).ok();
-                e!(mpsc::RecvError::DecodeFailed, err)
-            })?;
-            self.received += 1;
-            if self.received == 1 {
-                self.span.in_scope(|| debug!("first message received"));
-            }
-            Ok(Some(msg))
-        })
+        }
     }
 }
 
