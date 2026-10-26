@@ -1,4 +1,4 @@
-#![cfg(all(feature = "noq_endpoint_setup", feature = "derive", feature = "spans"))]
+#![cfg(all(feature = "noq_endpoint_setup", feature = "derive"))]
 
 use std::{
     sync::{

@@ -1,1 +1,4 @@
+# irpc and irpc-derive share one version. irpc-opentelemetry has its own
+# version, which follows the opentelemetry releases. It sets
+# `shared-version = false` in its Cargo.toml.
 shared-version = true

@@ -1,0 +1,45 @@
+[package]
+name = "irpc-opentelemetry"
+version = "0.1.0"
+edition = "2024"
+authors = ["n0 team"]
+keywords = ["rpc", "opentelemetry", "tracing"]
+categories = ["network-programming"]
+license = "Apache-2.0/MIT"
+repository = "https://github.com/n0-computer/irpc"
+description = "OpenTelemetry span propagation for irpc"
+rust-version = "1.91"
+
+[dependencies]
+irpc = { version = "0.17.0", path = "..", default-features = false, features = ["tracing-subscriber-03"] }
+opentelemetry = "0.33"
+tracing = { workspace = true }
+tracing-opentelemetry = { version = "0.34", default-features = false }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+clap = { version = "4.5.41", features = ["derive"] }
+iroh = { workspace = true, default-features = true }
+irpc = { version = "0.17.0", path = "..", features = ["iroh", "derive", "noq_endpoint_setup"] }
+n0-error = { workspace = true }
+n0-future = { workspace = true }
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+rand = "0.10.3"
+serde = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+    "irpc::*",
+    # `layer` returns a tracing layer
+    "tracing_core::subscriber::Subscriber",
+    "tracing_subscriber::layer::Layer",
+    "tracing_subscriber::registry::LookupSpan",
+]
+
+[package.metadata.release]
+# own version, follows opentelemetry
+shared-version = false

@@ -17,6 +17,21 @@ A streaming rpc system for iroh
 
 See the [module docs](https://docs.rs/irpc/latest/irpc/).
 
+# Feature flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `rpc` | yes | Remote transport over noq. Without it, irpc only has in-process channels. |
+| `iroh` | yes | Remote transport over iroh. Enables `rpc`. |
+| `stream` | yes | Convert channels to [`Stream`] and [`Sink`]. |
+| `derive` | yes | The `rpc_requests` macro. |
+| `noq_endpoint_setup` | no | Helpers to create noq endpoints, for tests and for rpc on localhost. |
+| `varint-util` | no | Varint helpers in `irpc::util`, without `rpc`. |
+| `tracing-subscriber-03` | no | Span propagation to the remote, with a layer for `tracing-subscriber` 0.3. [`irpc-opentelemetry`](irpc-opentelemetry) enables it. |
+
+[`Stream`]: https://docs.rs/futures-core/latest/futures_core/stream/trait.Stream.html
+[`Sink`]: https://docs.rs/futures-sink/latest/futures_sink/trait.Sink.html
+
 # Docs
 
 Properly building docs for this crate is quite complex. For all the gory details,

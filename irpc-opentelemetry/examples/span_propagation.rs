@@ -1,4 +1,4 @@
-//! Distributed span propagation across irpc-iroh, visualized in Jaeger.
+//! Distributed span propagation over irpc with iroh, visualized in Jaeger.
 //!
 //! Start Jaeger (UI on 16686, OTLP HTTP on 4318):
 //!
@@ -9,13 +9,13 @@
 //! Server (prints its endpoint id):
 //!
 //! ```sh
-//! cargo run --features tracing-opentelemetry --example span_propagation -- server
+//! cargo run -p irpc-opentelemetry --example span_propagation -- server
 //! ```
 //!
 //! Client:
 //!
 //! ```sh
-//! cargo run --features tracing-opentelemetry --example span_propagation -- client <ENDPOINT_ID>
+//! cargo run -p irpc-opentelemetry --example span_propagation -- client <ENDPOINT_ID>
 //! ```
 //!
 //! Open <http://localhost:16686>, pick the `example-client` service, and each
@@ -49,7 +49,7 @@ const ALPN: &[u8] = b"irpc-iroh/span_propagation/1";
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4318/v1/traces";
 
 #[derive(Parser, Debug)]
-#[command(about = "Distributed span propagation demo over irpc-iroh")]
+#[command(about = "Distributed span propagation demo over irpc with iroh")]
 struct Cli {
     /// OTLP HTTP/protobuf endpoint to export spans to. Defaults to Jaeger's standard port.
     #[arg(long, global = true, default_value = DEFAULT_OTLP_ENDPOINT)]
@@ -118,18 +118,24 @@ fn init_tracing(
     //     through the `tracing-opentelemetry` layer (which forwards to OTLP
     //     and is filtered to `info` so noisy debug spans don't ship to
     //     Jaeger), in parallel with a plain fmt layer that prints to stderr
-    //     under `RUST_LOG`.
+    //     under `RUST_LOG`. irpc creates the request spans at debug level,
+    //     with the target of this example, which defines the protocol, so the
+    //     filter lets them through.
     let tracer = opentelemetry::global::tracer(service_name);
     let telemetry = tracing_opentelemetry::layer()
         .with_tracer(tracer)
-        .with_filter(EnvFilter::new("info"));
+        .with_filter(EnvFilter::new("info,span_propagation=debug"));
     let fmt_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("span_propagation=info"));
-    let subscriber = Registry::default().with(telemetry).with(
-        tracing_subscriber::fmt::layer()
-            .with_target(false)
-            .with_filter(fmt_filter),
-    );
+    // The irpc layer writes the span context into each request.
+    let subscriber = Registry::default()
+        .with(telemetry)
+        .with(irpc_opentelemetry::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_filter(fmt_filter),
+        );
     tracing::subscriber::set_global_default(subscriber)?;
     Ok(provider)
 }
@@ -151,10 +157,10 @@ async fn server(otlp_endpoint: &str) -> Result<()> {
     let protocol = IrohProtocol::<Proto>::new(Handler::sequential(|msg: Message| async move {
         match msg {
             Message::Get(msg) => {
-                // `WithChannels` carries a `span` field that the derive
-                // macro builds as `info_span!("Get")` with its parent set
-                // from the propagated remote context, so the handler's
-                // work shows up under the originating client trace.
+                // irpc runs this handler in the request span `Get`, with its
+                // parent set from the propagated remote context, and
+                // `WithChannels::span` is that span. So the handler's work
+                // shows up under the originating client trace.
                 let WithChannels {
                     inner, tx, span, ..
                 } = msg;
@@ -183,7 +189,7 @@ async fn server(otlp_endpoint: &str) -> Result<()> {
     println!("server endpoint id: {}", router.endpoint().id());
     println!("run the client with:");
     println!(
-        "    cargo run --features tracing-opentelemetry --example span_propagation -- client {}",
+        "    cargo run -p irpc-opentelemetry --example span_propagation -- client {}",
         router.endpoint().id()
     );
     println!("press ctrl+c to stop");

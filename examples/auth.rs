@@ -136,10 +136,10 @@ mod storage {
                     StorageMessage::Auth(msg) => {
                         let WithChannels { inner, tx, .. } = msg;
                         if authed {
-                            conn.close(1u32.into(), b"invalid message");
+                            conn.close(400u32.into(), b"invalid message");
                             break;
                         } else if inner.token != self.auth_token {
-                            conn.close(1u32.into(), b"permission denied");
+                            conn.close(401u32.into(), b"permission denied");
                             break;
                         } else {
                             authed = true;
@@ -148,7 +148,7 @@ mod storage {
                     }
                     msg => {
                         if !authed {
-                            conn.close(1u32.into(), b"permission denied");
+                            conn.close(401u32.into(), b"permission denied");
                             break;
                         } else {
                             self.handle_authenticated(msg).await;

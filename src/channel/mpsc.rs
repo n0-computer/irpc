@@ -2,26 +2,62 @@
 //!
 //! For the rpc case, the send side can not be cloned, hence mpsc instead of mpsc.
 
-use std::{fmt::Debug, future::Future, io, marker::PhantomData, pin::Pin, sync::Arc};
+use std::{
+    fmt::Debug,
+    future::{Future, poll_fn},
+    io,
+    marker::PhantomData,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, ready},
+};
 
 use n0_error::{e, stack_error};
 
 use super::SendError;
+#[cfg(feature = "rpc")]
+use crate::rpc::{self, ErrorCode};
 
-/// Error when receiving a oneshot or mpsc message. For local communication,
-/// the only thing that can go wrong is that the sender has been closed.
+/// Error when receiving an mpsc message.
 ///
-/// For rpc communication, there can be any number of errors, so this is a
-/// generic io error.
-#[stack_error(derive, add_meta, from_sources)]
+/// A local channel has no errors.
+///
+/// For a remote channel, the sender is on the other side of the connection:
+/// the server for a response stream, and the client for the updates of a request.
+///
+/// If the server rejects the request and also closes the connection, the close
+/// usually arrives first, and the receiver gets [`Io`] instead of [`Remote`].
+/// [`Self::remote_code`] returns the code in both cases.
+///
+/// [`Io`]: Self::Io
+/// [`Remote`]: Self::Remote
+#[stack_error(derive, add_meta)]
+#[non_exhaustive]
 pub enum RecvError {
-    /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+    /// The sender reset the stream with an irpc error code, and the channel is closed.
+    ///
+    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
+    ///
+    /// [`ErrorCode`]: crate::rpc::ErrorCode
+    /// [`rpc`]: crate::rpc
+    #[cfg(feature = "rpc")]
+    #[error("Sender closed the channel: {code}")]
+    Remote { code: crate::rpc::ErrorCode },
+    /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
-    #[error("Maximum message size exceeded")]
-    MaxMessageSizeExceeded,
-    /// An io error occurred. This can occur for remote communication,
-    /// due to a network error or deserialization error.
+    #[error("Message too large")]
+    MaxSizeExceeded,
+    /// The message does not decode, so this receiver closed the channel.
+    #[cfg(feature = "rpc")]
+    #[error("Message does not decode")]
+    DecodeFailed {
+        #[error(std_err)]
+        source: postcard::Error,
+    },
+    /// An io error, for example because the connection was lost.
+    ///
+    /// A stream that ends in the middle of a message also gives an io error.
     #[error("Io error")]
     Io {
         #[error(std_err)]
@@ -29,13 +65,42 @@ pub enum RecvError {
     },
 }
 
+/// Converts an io error from reading the stream of a remote channel.
+///
+/// A reset with an irpc error code becomes [`RecvError::Remote`], and any
+/// other io error becomes [`RecvError::Io`].
+impl From<io::Error> for RecvError {
+    fn from(err: io::Error) -> Self {
+        #[cfg(feature = "rpc")]
+        if let Some(code) = rpc::reset_code(&err) {
+            return e!(RecvError::Remote { code });
+        }
+        e!(RecvError::Io, err)
+    }
+}
+
 impl From<RecvError> for io::Error {
     fn from(e: RecvError) -> Self {
         match e {
             RecvError::Io { source, .. } => source,
-            RecvError::MaxMessageSizeExceeded { .. } => {
-                io::Error::new(io::ErrorKind::InvalidData, e)
-            }
+            #[cfg(feature = "rpc")]
+            RecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
+            _ => io::Error::new(io::ErrorKind::InvalidData, e),
+        }
+    }
+}
+
+#[cfg(feature = "rpc")]
+impl RecvError {
+    /// Returns the irpc error code that the peer sent, if any.
+    ///
+    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
+    /// the peer closed the connection with.
+    pub fn remote_code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::Remote { code, .. } => Some(*code),
+            Self::Io { source, .. } => rpc::io_close_code(source),
+            _ => None,
         }
     }
 }
@@ -184,9 +249,17 @@ pub trait DynSender<T>: Debug + Send + Sync + 'static {
 
 /// A receiver that can be wrapped in a `Box<dyn DynReceiver<T>>`.
 pub trait DynReceiver<T>: Debug + Send + Sync + 'static {
+    /// Polls for the next message, keeping a message read in part for the next poll.
+    ///
+    /// Returns `Ok(None)` once the sender has closed the channel.
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, RecvError>>;
+
+    /// Receives the next message.
     fn recv(
         &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<T>, RecvError>> + Send + Sync + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<T>, RecvError>> + Send + Sync + '_>> {
+        Box::pin(poll_fn(move |cx| self.poll_recv(cx)))
+    }
 }
 
 impl<T> Debug for Sender<T> {
@@ -271,10 +344,23 @@ impl<T: Send + Sync + 'static> Receiver<T> {
     /// cleanly closed the connection.
     ///
     /// Returns an an io error if there was an error receiving the message.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This method is cancellation safe. A message read in part when the future
+    /// drops stays with the receiver, and the next call returns it whole.
     pub async fn recv(&mut self) -> Result<Option<T>, RecvError> {
+        poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// Polls for the next message, keeping a message read in part for the next poll.
+    ///
+    /// Returns `Ok(None)` if the sender has been dropped or the remote end has
+    /// cleanly closed the connection.
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, RecvError>> {
         match self {
-            Self::Tokio(rx) => Ok(rx.recv().await),
-            Self::Boxed(rx) => Ok(rx.recv().await?),
+            Self::Tokio(rx) => rx.poll_recv(cx).map(Ok),
+            Self::Boxed(rx) => rx.poll_recv(cx),
         }
     }
 
@@ -317,9 +403,16 @@ impl<T: Send + Sync + 'static> Receiver<T> {
     pub fn into_stream(
         self,
     ) -> impl n0_future::Stream<Item = Result<T, RecvError>> + Send + Sync + 'static {
-        n0_future::stream::unfold(self, |mut recv| async move {
-            recv.recv().await.transpose().map(|msg| (msg, recv))
-        })
+        self
+    }
+}
+
+#[cfg(feature = "stream")]
+impl<T: Send + Sync + 'static> n0_future::Stream for Receiver<T> {
+    type Item = Result<T, RecvError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().poll_recv(cx).map(Result::transpose)
     }
 }
 
@@ -428,17 +521,15 @@ where
     T: Send + Sync + 'static,
     U: Send + Sync + 'static,
 {
-    fn recv(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<U>, RecvError>> + Send + Sync + '_>> {
-        Box::pin(async move {
-            while let Some(msg) = self.receiver.recv().await? {
-                if let Some(v) = (self.f)(msg) {
-                    return Ok(Some(v));
-                }
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<U>, RecvError>> {
+        loop {
+            let Some(msg) = ready!(self.receiver.poll_recv(cx))? else {
+                return Poll::Ready(Ok(None));
+            };
+            if let Some(v) = (self.f)(msg) {
+                return Poll::Ready(Ok(Some(v)));
             }
-            Ok(None)
-        })
+        }
     }
 }
 
