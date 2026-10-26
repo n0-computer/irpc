@@ -21,7 +21,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 anyhow = { workspace = true }
 clap = { version = "4.5.41", features = ["derive"] }
 iroh = { workspace = true, default-features = true }
-irpc = { version = "0.17.0", path = "..", features = ["iroh", "derive", "spans", "noq_endpoint_setup"] }
+irpc = { version = "0.17.0", path = "..", features = ["iroh", "derive", "noq_endpoint_setup"] }
 n0-error = { workspace = true }
 n0-future = { workspace = true }
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
