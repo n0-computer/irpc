@@ -441,15 +441,13 @@ impl Drop for ResetOnDrop {
     }
 }
 
-/// Frames up to this size, length prefix included, are encoded and received without allocating.
-const INLINE_FRAME_SIZE: usize = 128;
-
-/// A buffer for one frame, inline up to [`INLINE_FRAME_SIZE`].
+/// The inline size of the buffers that frames are encoded and received in.
 ///
-/// A larger frame moves it to the heap. Buffers that live as long as a stream
-/// move back inline once they are empty again, so that one large message does
-/// not pin its allocation for the stream's life.
-type FrameBuf = SmallVec<[u8; INLINE_FRAME_SIZE]>;
+/// Frames up to this size, length prefix included, need no allocation. A larger
+/// frame moves a buffer to the heap. Buffers that live as long as a stream move
+/// back inline once they are empty again, so that one large message does not
+/// pin its allocation for the stream's life.
+const INLINE_FRAME_SIZE: usize = 128;
 
 /// Serialize a message for sending over the wire.
 ///
@@ -459,9 +457,9 @@ type FrameBuf = SmallVec<[u8; INLINE_FRAME_SIZE]>;
 fn prepare_write<S: Service>(
     msg: impl Into<S>,
     span: &tracing::Span,
-) -> Result<FrameBuf, WriteError> {
+) -> Result<SmallVec<[u8; INLINE_FRAME_SIZE]>, WriteError> {
     let msg = msg.into();
-    let mut buf = FrameBuf::new();
+    let mut buf = SmallVec::new();
     let res = if S::SPAN_PROPAGATION {
         // Include span context in wire format
         let span_ctx = crate::span_propagation::SpanContextCarrier::from_span_or_current(span);
@@ -486,7 +484,10 @@ enum EncodeError {
 }
 
 /// Encodes `value` with its size prefix into `buf`.
-fn encode(value: &impl Serialize, buf: &mut FrameBuf) -> Result<(), EncodeError> {
+fn encode(
+    value: &impl Serialize,
+    buf: &mut SmallVec<[u8; INLINE_FRAME_SIZE]>,
+) -> Result<(), EncodeError> {
     let size = postcard::experimental::serialized_size(value).map_err(EncodeError::Failed)? as u64;
     if size > MAX_MESSAGE_SIZE {
         return Err(EncodeError::MaxSizeExceeded);
@@ -504,7 +505,7 @@ fn encode(value: &impl Serialize, buf: &mut FrameBuf) -> Result<(), EncodeError>
 /// gets an error instead of the end of the stream.
 fn encode_message(
     value: &impl Serialize,
-    buf: &mut FrameBuf,
+    buf: &mut SmallVec<[u8; INLINE_FRAME_SIZE]>,
     send: &mut noq::SendStream,
 ) -> Result<(), SendError> {
     encode(value, buf).map_err(|err| {
@@ -565,7 +566,7 @@ impl<S: Service> RemoteSender<S> {
     pub(crate) fn prepare(
         &mut self,
         msg: impl Into<S>,
-    ) -> std::result::Result<(tracing::Span, FrameBuf), WriteError> {
+    ) -> std::result::Result<(tracing::Span, SmallVec<[u8; INLINE_FRAME_SIZE]>), WriteError> {
         let msg = msg.into();
         let span = msg.new_request_span(self.req_id());
         let buf = prepare_write::<S>(msg, &span).inspect_err(|err| {
@@ -662,7 +663,7 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
         oneshot::Sender::Boxed(Box::new(move |value| {
             Box::pin(async move {
                 // write via a small buffer to avoid allocation for small values
-                let mut buf = FrameBuf::new();
+                let mut buf = SmallVec::new();
                 encode_message(&value, &mut buf, &mut writer)?;
                 writer.write_all(&buf).await?;
                 span.in_scope(|| debug!("response sent"));
@@ -677,7 +678,7 @@ impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
         mpsc::Sender::Boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
             NoqSenderState::Open(NoqSenderInner {
                 send: write,
-                buffer: FrameBuf::new(),
+                buffer: SmallVec::new(),
                 span: tracing::Span::current(),
                 sent: 0,
                 _marker: PhantomData,
@@ -695,7 +696,7 @@ struct NoqReceiver<T> {
     received: u64,
     finished: bool,
     /// Zero-initialized space the receiver reads into, so the most it reads ahead.
-    buf: FrameBuf,
+    buf: SmallVec<[u8; INLINE_FRAME_SIZE]>,
     /// `buf[..end]` holds the bytes read but not yet consumed as a message.
     end: usize,
     _marker: std::marker::PhantomData<T>,
@@ -804,7 +805,7 @@ impl<T> Drop for NoqReceiver<T> {
 }
 
 /// Empties a frame buffer that lives as long as a stream, moving it back inline.
-fn clear_frame(buf: &mut FrameBuf) {
+fn clear_frame(buf: &mut SmallVec<[u8; INLINE_FRAME_SIZE]>) {
     buf.clear();
     if buf.spilled() {
         buf.shrink_to_fit();
@@ -813,7 +814,7 @@ fn clear_frame(buf: &mut FrameBuf) {
 
 struct NoqSenderInner<T> {
     send: noq::SendStream,
-    buffer: FrameBuf,
+    buffer: SmallVec<[u8; INLINE_FRAME_SIZE]>,
     /// The span in which the sender was created, for the logs of the first message and the end.
     span: tracing::Span,
     sent: u64,
