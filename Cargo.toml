@@ -22,11 +22,8 @@ serde = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros"] }
 # for PollSender (which for some reason is not available in the main tokio api)
 tokio-util = { version = "0.7.14", default-features = false }
-# errors
 n0-error = { workspace = true }
-
-# used in the endpoint handler code when using rpc
-tracing = { workspace = true, optional = true }
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"], optional = true }
 # used to ser/de messages when using rpc
 postcard = { workspace = true, features = ["alloc", "use-std"], optional = true }
@@ -81,23 +78,21 @@ clap = { version = "4.5.41", features = ["derive"] }
 futures-util.workspace = true
 hex = "0.4.3"
 rand = "0.10.3"
-n0-tracing-test = "0.3.0"
+n0-tracing-test = { version = "0.3.0", features = ["no-env-filter"] }
 
 [features]
 # enable the remote transport
-rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:tracing", "dep:derive_more", "tokio/io-util"]
+rpc = ["dep:noq", "dep:postcard", "dep:smallvec", "dep:derive_more", "tokio/io-util"]
 # span propagation layer for tracing-subscriber 0.3
-tracing-subscriber-03 = ["rpc", "dep:tracing-subscriber", "tokio/rt"]
+tracing-subscriber-03 = ["rpc", "dep:tracing-subscriber"]
 # enable the iroh transport
 iroh = ["rpc", "dep:iroh", "dep:portable-atomic", "dep:getrandom"]
 # add helpers to create noq endpoints, for tests and for rpc on localhost
 noq_endpoint_setup = ["rpc", "dep:rustls", "dep:rcgen", "dep:futures-buffered", "noq/rustls-ring"]
-# pick up parent span when creating channel messages
-spans = ["dep:tracing"]
 stream = ["dep:futures-util"]
 derive = ["dep:irpc-derive"]
 varint-util = ["dep:postcard", "dep:smallvec", "tokio/io-util"]
-default = ["rpc", "iroh", "spans", "stream", "derive"]
+default = ["rpc", "iroh", "stream", "derive"]
 
 [[example]]
 name = "derive"
@@ -117,35 +112,35 @@ required-features = ["rpc", "noq_endpoint_setup"]
 
 [[example]]
 name = "0rtt"
-required-features = ["iroh", "spans", "stream", "derive"]
+required-features = ["iroh", "stream", "derive"]
 
 [[example]]
 name = "auth"
-required-features = ["iroh", "spans", "stream", "derive"]
+required-features = ["iroh", "stream", "derive"]
 
 [[example]]
 name = "authorized-request"
-required-features = ["iroh", "spans", "stream", "derive"]
+required-features = ["iroh", "stream", "derive"]
 
 [[example]]
 name = "bidi"
-required-features = ["iroh", "spans", "stream", "derive"]
+required-features = ["iroh", "stream", "derive"]
 
 [[example]]
 name = "remote-and-local"
-required-features = ["iroh", "spans", "stream", "derive"]
+required-features = ["iroh", "stream", "derive"]
 
 [[example]]
 name = "server-actor"
-required-features = ["iroh", "spans", "stream", "derive"]
+required-features = ["iroh", "stream", "derive"]
 
 [[example]]
 name = "server-shared-state"
-required-features = ["iroh", "spans", "stream", "derive"]
+required-features = ["iroh", "stream", "derive"]
 
 [[test]]
 name = "span_propagator"
-required-features = ["noq_endpoint_setup", "derive", "spans", "tracing-subscriber-03"]
+required-features = ["noq_endpoint_setup", "derive", "tracing-subscriber-03"]
 
 [workspace]
 resolver = "2"
@@ -197,12 +192,12 @@ allowed_external_types = [
     "tokio::sync::mpsc::bounded::Sender",
     "tokio::sync::oneshot::Receiver",
     "tokio::sync::oneshot::Sender",
-    "tracing::span::Span",
 
     # stable-ish non-1.0 crates that we accept in the public API
     "futures_core::stream::Stream",
     "futures_lite::future::Boxed",
     "futures_sink::Sink",
+    "tracing::span::Span",
     # `span_propagation::layer`, with `tracing-subscriber-03`
     "tracing_core::subscriber::Subscriber",
     "tracing_subscriber::layer::Layer",

@@ -83,8 +83,15 @@
 //!
 //! [`Client::rpc`]: crate::Client::rpc
 use std::{
-    borrow::BorrowMut, fmt::Debug, future::Future, io, marker::PhantomData, ops::DerefMut,
-    pin::Pin, sync::Arc,
+    borrow::BorrowMut,
+    fmt::Debug,
+    future::Future,
+    io,
+    marker::PhantomData,
+    mem,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, ready},
 };
 
 use n0_error::{e, stack_error};
@@ -92,8 +99,8 @@ use n0_future::future::Boxed as BoxFuture;
 use noq::{ConnectionError, VarInt};
 use serde::{Serialize, de::DeserializeOwned};
 use smallvec::SmallVec;
-use tokio::io::AsyncReadExt;
-use tracing::{debug, trace, warn};
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
+use tracing::{Instrument, debug, trace, warn};
 
 #[cfg(feature = "iroh")]
 pub(crate) mod iroh_impl;
@@ -465,14 +472,17 @@ impl<S: BorrowMut<noq::SendStream>> Drop for ResetOnDrop<S> {
 /// Serialize a message for sending over the wire.
 ///
 /// When `S::SPAN_PROPAGATION` is true, the message is wrapped in a tuple with
-/// span context: `(Option<SpanContextCarrier>, msg)`.
+/// the context of `span`: `(Option<SpanContextCarrier>, msg)`.
 /// When false, the message is serialized directly.
-fn prepare_write<S: Service>(msg: impl Into<S>) -> Result<SmallVec<[u8; 128]>, WriteError> {
+fn prepare_write<S: Service>(
+    msg: impl Into<S>,
+    span: &tracing::Span,
+) -> Result<SmallVec<[u8; 128]>, WriteError> {
     let msg = msg.into();
     let mut buf = SmallVec::new();
     let res = if S::SPAN_PROPAGATION {
         // Include span context in wire format
-        let span_ctx = crate::span_propagation::SpanContextCarrier::from_current();
+        let span_ctx = crate::span_propagation::SpanContextCarrier::from_span_or_current(span);
         encode(&(span_ctx, msg), &mut buf)
     } else {
         // Original wire format without span context
@@ -540,31 +550,52 @@ impl<S: Service> RemoteSender<S> {
         )
     }
 
-    /// Writes the request `msg`, and returns the streams of the request.
+    /// Writes the request `msg` in its span from [`Service::new_request_span`],
+    /// and returns the streams of the request.
     ///
     /// If `msg` is too large or does not encode, this resets the stream with the
     /// code of the error.
     pub async fn write(
-        mut self,
+        self,
         msg: impl Into<S>,
     ) -> std::result::Result<(noq::SendStream, noq::RecvStream), WriteError> {
-        let buf = self.prepare(msg)?;
-        self.write_raw(&buf).await
+        let (send, recv, _span) = self.write_in_span(msg).await?;
+        Ok((send, recv))
     }
 
-    /// Encodes `msg` for this request.
+    /// Writes the request like [`Self::write`], and also returns its span.
+    pub(crate) async fn write_in_span(
+        mut self,
+        msg: impl Into<S>,
+    ) -> std::result::Result<(noq::SendStream, noq::RecvStream, tracing::Span), WriteError> {
+        let (span, buf) = self.prepare(msg)?;
+        let (send, recv) = self.write_raw(&buf).instrument(span.clone()).await?;
+        Ok((send, recv, span))
+    }
+
+    /// Returns the index of the stream, which the server also uses as the request id.
+    pub(crate) fn req_id(&self) -> u64 {
+        self.1.id().index()
+    }
+
+    /// Creates the span of the request, and encodes the request.
     ///
-    /// If `msg` is too large or does not encode, this resets the stream with the
-    /// code of the error, so the server learns why the request is missing.
+    /// With span propagation, the request carries the context of this span, or
+    /// of the current span if the tracing backend does not record this span.
+    /// If `msg` is too large or does not encode, this resets the stream with
+    /// the code of the error, so the server learns why the request is missing.
     pub(crate) fn prepare(
         &mut self,
         msg: impl Into<S>,
-    ) -> std::result::Result<SmallVec<[u8; 128]>, WriteError> {
-        prepare_write(msg).inspect_err(|err| {
+    ) -> std::result::Result<(tracing::Span, SmallVec<[u8; 128]>), WriteError> {
+        let msg = msg.into();
+        let span = msg.new_request_span(self.req_id());
+        let buf = prepare_write::<S>(msg, &span).inspect_err(|err| {
             if let Some(code) = err.reset_code() {
                 self.0.reset(code);
             }
-        })
+        })?;
+        Ok((span, buf))
     }
 
     pub(crate) async fn write_raw(
@@ -573,12 +604,15 @@ impl<S: Service> RemoteSender<S> {
     ) -> std::result::Result<(noq::SendStream, noq::RecvStream), WriteError> {
         let RemoteSender(mut send, recv, _) = self;
         send.get_mut().write_all(buf).await?;
+        debug!("request sent");
         Ok((send.into_inner(), recv))
     }
 }
 
 impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
     fn from(mut read: noq::RecvStream) -> Self {
+        // A client creates the receiver in the request span, and logs the response in it.
+        let span = tracing::Span::current();
         let fut = async move {
             // A sender that is dropped without sending finishes the stream.
             let Some(size) = read.read_varint_u64().await? else {
@@ -594,6 +628,7 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
                 read.stop(ErrorCode::MessageDecodeFailed.into()).ok();
                 e!(oneshot::RecvError::DecodeFailed, err)
             })?;
+            span.in_scope(|| debug!("response received"));
             Ok(msg)
         };
         oneshot::Receiver::from(|| fut)
@@ -625,6 +660,10 @@ impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
     fn from(read: noq::RecvStream) -> Self {
         mpsc::Receiver::Boxed(Box::new(NoqReceiver {
             recv: read,
+            span: tracing::Span::current(),
+            received: 0,
+            finished: false,
+            progress: ReadProgress::default(),
             _marker: PhantomData,
         }))
     }
@@ -639,6 +678,8 @@ impl From<noq::SendStream> for NoSender {
 
 impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
     fn from(mut writer: noq::SendStream) -> Self {
+        // A server creates the sender in the request span, and logs the response in it.
+        let span = tracing::Span::current();
         oneshot::Sender::Boxed(Box::new(move |value| {
             Box::pin(async move {
                 // write via a small buffer to avoid allocation for small values
@@ -650,6 +691,7 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
                 let res = guard.get_mut().write_all(&buf).await;
                 guard.into_inner();
                 res?;
+                span.in_scope(|| debug!("response sent"));
                 Ok(())
             })
         }))
@@ -662,15 +704,40 @@ impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
             NoqSenderState::Open(NoqSenderInner {
                 send: write,
                 buffer: SmallVec::new(),
+                span: tracing::Span::current(),
+                sent: 0,
                 _marker: PhantomData,
             }),
         ))))
     }
 }
 
+/// The receiver of a remote [`mpsc`] channel.
+///
+/// It logs the first message and the end of the stream in the span in which it was created.
 struct NoqReceiver<T> {
     recv: noq::RecvStream,
+    span: tracing::Span,
+    received: u64,
+    finished: bool,
+    /// How much of the next message the receiver has read, kept across polls.
+    progress: ReadProgress,
     _marker: std::marker::PhantomData<T>,
+}
+
+/// How much of a length-prefixed message a remote receiver has read.
+#[derive(Debug)]
+enum ReadProgress {
+    /// The varint length so far: `value` holds the bits below `shift`.
+    Length { value: u64, shift: u32 },
+    /// The body, of which the first `filled` bytes have arrived.
+    Body { buf: Vec<u8>, filled: usize },
+}
+
+impl Default for ReadProgress {
+    fn default() -> Self {
+        Self::Length { value: 0, shift: 0 }
+    }
 }
 
 impl<T> Debug for NoqReceiver<T> {
@@ -680,28 +747,77 @@ impl<T> Debug for NoqReceiver<T> {
 }
 
 impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
-    fn recv(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<T>, mpsc::RecvError>> + Send + Sync + '_>> {
-        Box::pin(async {
-            let read = &mut self.recv;
-            let Some(size) = read.read_varint_u64().await? else {
-                return Ok(None);
-            };
-            if size > MAX_MESSAGE_SIZE {
-                self.recv
-                    .stop(ErrorCode::MessageMaxSizeExceeded.into())
-                    .ok();
-                return Err(e!(mpsc::RecvError::MaxSizeExceeded));
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, mpsc::RecvError>> {
+        loop {
+            match &mut self.progress {
+                ReadProgress::Length { value, shift } => {
+                    let mut byte = [0u8; 1];
+                    let mut read = ReadBuf::new(&mut byte);
+                    ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
+                    let Some(&byte) = read.filled().first() else {
+                        // The stream may end between messages, but not inside a length.
+                        if *shift == 0 {
+                            if !self.finished {
+                                self.finished = true;
+                                let received = self.received;
+                                self.span.in_scope(|| debug!(received, "stream finished"));
+                            }
+                            return Poll::Ready(Ok(None));
+                        }
+                        return Poll::Ready(Err(
+                            io::Error::from(io::ErrorKind::UnexpectedEof).into()
+                        ));
+                    };
+                    if *shift >= 64 {
+                        let error = io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Varint is too large for u64",
+                        );
+                        return Poll::Ready(Err(error.into()));
+                    }
+                    *value |= u64::from(byte & 0x7F) << *shift;
+                    if byte & 0x80 != 0 {
+                        *shift += 7;
+                        continue;
+                    }
+                    let size = *value;
+                    if size > MAX_MESSAGE_SIZE {
+                        self.recv
+                            .stop(ErrorCode::MessageMaxSizeExceeded.into())
+                            .ok();
+                        return Poll::Ready(Err(e!(mpsc::RecvError::MaxSizeExceeded)));
+                    }
+                    self.progress = ReadProgress::Body {
+                        buf: vec![0; size as usize],
+                        filled: 0,
+                    };
+                }
+                ReadProgress::Body { buf, filled } => {
+                    while *filled < buf.len() {
+                        let mut read = ReadBuf::new(&mut buf[*filled..]);
+                        ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
+                        let n = read.filled().len();
+                        if n == 0 {
+                            let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
+                            return Poll::Ready(Err(eof.into()));
+                        }
+                        *filled += n;
+                    }
+                    let ReadProgress::Body { buf, .. } = mem::take(&mut self.progress) else {
+                        continue;
+                    };
+                    let msg = postcard::from_bytes(&buf).map_err(|err| {
+                        self.recv.stop(ErrorCode::MessageDecodeFailed.into()).ok();
+                        e!(mpsc::RecvError::DecodeFailed, err)
+                    })?;
+                    self.received += 1;
+                    if self.received == 1 {
+                        self.span.in_scope(|| debug!("first message received"));
+                    }
+                    return Poll::Ready(Ok(Some(msg)));
+                }
             }
-            let mut buf = vec![0; size as usize];
-            AsyncReadExt::read_exact(read, &mut buf).await?;
-            let msg: T = postcard::from_bytes(&buf).map_err(|err| {
-                read.stop(ErrorCode::MessageDecodeFailed.into()).ok();
-                e!(mpsc::RecvError::DecodeFailed, err)
-            })?;
-            Ok(Some(msg))
-        })
+        }
     }
 }
 
@@ -712,10 +828,21 @@ impl<T> Drop for NoqReceiver<T> {
 struct NoqSenderInner<T> {
     send: noq::SendStream,
     buffer: SmallVec<[u8; 128]>,
+    /// The span in which the sender was created, for the logs of the first message and the end.
+    span: tracing::Span,
+    sent: u64,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<T: RpcMessage> NoqSenderInner<T> {
+    /// Counts a sent message, and logs the first one.
+    fn record_sent(&mut self) {
+        self.sent += 1;
+        if self.sent == 1 {
+            self.span.in_scope(|| debug!("first message sent"));
+        }
+    }
+
     fn send(
         &mut self,
         value: T,
@@ -727,6 +854,7 @@ impl<T: RpcMessage> NoqSenderInner<T> {
             // messages that the receiver did not read yet.
             self.send.write_all(&self.buffer).await?;
             self.buffer.clear();
+            self.record_sent();
             Ok(())
         })
     }
@@ -744,17 +872,14 @@ impl<T: RpcMessage> NoqSenderInner<T> {
             let n = n?;
             self.send.write_all(&self.buffer[n..]).await?;
             self.buffer.clear();
+            self.record_sent();
             Ok(true)
-        })
-    }
-
-    fn closed(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
-        Box::pin(async move {
-            self.send.stopped().await.ok();
         })
     }
 }
 
+// A sender has one state, so the size of the open state costs nothing.
+#[allow(clippy::large_enum_variant)]
 enum NoqSenderState<T> {
     Open(NoqSenderInner<T>),
     /// Closed by an error, with the code that the receiver stopped the stream with if it did.
@@ -781,6 +906,18 @@ impl<T> NoqSenderState<T> {
 }
 
 struct NoqSender<T>(tokio::sync::Mutex<NoqSenderState<T>>);
+
+impl<T> Drop for NoqSender<T> {
+    /// Logs the end of the stream, which the send stream finishes when it drops.
+    ///
+    /// A sender that failed is closed, and logs nothing: the failed send returned the error.
+    fn drop(&mut self) {
+        if let NoqSenderState::Open(sender) = self.0.get_mut() {
+            let sent = sender.sent;
+            sender.span.in_scope(|| debug!(sent, "stream finished"));
+        }
+    }
+}
 
 impl<T> Debug for NoqSender<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -830,11 +967,12 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
 
     fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
         Box::pin(async {
-            let mut guard = self.0.lock().await;
-            match guard.deref_mut() {
-                NoqSenderState::Open(sender) => sender.closed().await,
-                NoqSenderState::Closed(_) => {}
-            }
+            // Wait without the lock, so that other clones can send meanwhile.
+            let stopped = match &*self.0.lock().await {
+                NoqSenderState::Open(sender) => sender.send.stopped(),
+                NoqSenderState::Closed(_) => return,
+            };
+            stopped.await.ok();
         })
     }
 
@@ -993,9 +1131,9 @@ impl<S> Clone for Handler<S> {
 impl<S: Service> Handler<S> {
     /// Creates a handler that runs `f` on the protocol enum and the streams of each request.
     ///
-    /// The requests of a connection run one after the other. If `f` needs the
-    /// message enum, call [`RemoteService::with_remote_channels`] inside its
-    /// future: the remote span context is only set while the future runs.
+    /// The requests of a connection run one after the other, each in its span
+    /// from [`Service::new_request_span`]. If `f` calls
+    /// [`RemoteService::with_remote_channels`], the message gets this span.
     pub fn raw<F, Fut>(f: F) -> Self
     where
         F: Fn(S, noq::RecvStream, noq::SendStream) -> Fut + Send + Sync + 'static,
@@ -1040,13 +1178,17 @@ impl<S: Service> Handler<S> {
         &self,
         connection: &impl IncomingRemoteConnection,
     ) -> io::Result<()> {
-        debug!("connection accepted");
         loop {
             let Some((msg, carrier, rx, tx)) = self.read_next(connection).await? else {
                 return Ok(());
             };
-            let fut = (self.f)(msg, rx, tx);
-            let fut = crate::span_propagation::scope_remote(carrier, fut);
+            let span = new_request_span(&msg, &rx, carrier.as_ref());
+            let fut = span
+                .in_scope(|| {
+                    debug!("request received");
+                    (self.f)(msg, rx, tx)
+                })
+                .instrument(span);
             if let Err(err) = fut.await {
                 match err.inner {
                     HandlerErrorInner::CloseConnection { code, reason } => {
@@ -1107,10 +1249,7 @@ impl<S: RemoteService> Handler<S> {
         let f = Arc::new(f);
         Self::raw(move |msg, rx, tx| {
             let f = f.clone();
-            async move {
-                // Inside the future: the remote span context is only set while it runs.
-                f(S::with_remote_channels(msg, rx, tx)).await
-            }
+            async move { f(S::with_remote_channels(msg, rx, tx)).await }
         })
     }
 }
@@ -1168,21 +1307,32 @@ pub async fn read_request<S: RemoteService>(
     let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
         return Ok(None);
     };
-    Ok(Some(
-        crate::span_propagation::scope_remote(carrier, async move {
-            S::with_remote_channels(msg, rx, tx)
-        })
-        .await,
-    ))
+    let span = new_request_span(&msg, &rx, carrier.as_ref());
+    Ok(Some(span.in_scope(|| {
+        debug!("request received");
+        S::with_remote_channels(msg, rx, tx)
+    })))
+}
+
+/// Creates the span of a request, and sets its parent from the span context of the client.
+fn new_request_span<S: Service>(
+    msg: &S,
+    recv: &noq::RecvStream,
+    carrier: Option<&crate::span_propagation::SpanContextCarrier>,
+) -> tracing::Span {
+    let span = msg.new_request_span(recv.id().index());
+    if let Some(carrier) = carrier {
+        carrier.set_parent_of(&span);
+    }
+    span
 }
 
 /// Reads a single request from the connection.
 ///
 /// This accepts a bi-directional stream from the connection and reads and parses the request.
 ///
-/// When `S::SPAN_PROPAGATION` is true, any propagated span context on the wire is
-/// silently dropped. Use [`Handler::handle_connection`] (or [`read_request`]) if you need
-/// the propagated context to reach the generated handler spans.
+/// Unlike [`read_request`] and a [`Handler`], this creates no request span, and
+/// drops the span context of the client.
 ///
 /// Returns `None` in the same cases as [`read_request`].
 pub async fn read_request_raw<S: Service>(
