@@ -532,3 +532,37 @@ async fn mpsc_receiver_is_a_stream() -> TestResult<()> {
     assert_eq!(received, [1, 2, 3]);
     Ok(())
 }
+
+/// Checks that a receiver splits messages of mixed sizes, written back to back, into the right
+/// messages, while its buffer grows for the large ones and shrinks back after.
+#[tokio::test]
+async fn mpsc_receive_mixed_sizes() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let messages: Vec<Vec<u8>> = [
+        10, 120, 3, 124, 125, 126, 127, 5000, 0, 200, 300, 1, 100_000, 7,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, len)| vec![i as u8; len])
+    .collect();
+    let mut frames = Vec::new();
+    for message in &messages {
+        WriteVarintExt::write_length_prefixed(&mut frames, message)?;
+    }
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let mut recv = Receiver::<Vec<u8>>::from(recv);
+        let mut received = Vec::new();
+        while let Some(message) = recv.recv().await? {
+            received.push(message);
+        }
+        TestResult::Ok(received)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    send.write_all(&frames).await?;
+    send.finish()?;
+    assert_eq!(server.await??, messages);
+    Ok(())
+}
