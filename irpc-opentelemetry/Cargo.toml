@@ -12,9 +12,9 @@ rust-version = "1.91"
 
 [dependencies]
 irpc = { version = "0.17.0", path = "..", default-features = false, features = ["tracing-subscriber-03"] }
-opentelemetry = "0.32"
+opentelemetry = "0.33"
 tracing = { workspace = true }
-tracing-opentelemetry = { version = "0.33", default-features = false }
+tracing-opentelemetry = { version = "0.34", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
 
 [dev-dependencies]
@@ -24,8 +24,8 @@ iroh = { workspace = true, default-features = true }
 irpc = { version = "0.17.0", path = "..", features = ["iroh", "derive", "noq_endpoint_setup"] }
 n0-error = { workspace = true }
 n0-future = { workspace = true }
-opentelemetry_sdk = { version = "0.32", features = ["testing"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 rand = "0.10.3"
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

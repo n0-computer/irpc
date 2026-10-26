@@ -13,7 +13,7 @@ Your application must use semver-compatible versions of `irpc`,
 
 | irpc-opentelemetry | irpc | opentelemetry | tracing-opentelemetry |
 |--------------------|------|---------------|-----------------------|
-| 0.1                | 0.17 | 0.32          | 0.33                  |
+| 0.1                | 0.17 | 0.33          | 0.34                  |
 
 With a second copy of one of them in your dependency tree, everything
 compiles, but no span context reaches the remote:
