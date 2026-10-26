@@ -14,7 +14,7 @@ use irpc::{
     },
     rpc::{ErrorCode, Handler},
     rpc_requests,
-    util::AsyncWriteVarintExt,
+    util::{AsyncWriteVarintExt, WriteVarintExt},
 };
 use n0_error::e;
 use noq::Endpoint;
@@ -481,5 +481,54 @@ async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     assert_eq!(code, Some(ErrorCode::MessageDecodeFailed.into()));
     conn.close(0u32.into(), b"");
     server.await??;
+    Ok(())
+}
+
+/// Checks that a receive cancelled in the middle of a message keeps the part it read, so that the
+/// next receive returns the whole message.
+#[tokio::test]
+async fn mpsc_receive_resumes_a_message_read_in_part() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let message = vec![7u8; 1000];
+    let mut frame = Vec::new();
+    WriteVarintExt::write_length_prefixed(&mut frame, &message)?;
+    let (first, rest) = frame.split_at(frame.len() / 2);
+    let (half_read, rest_wanted) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let mut recv = Receiver::<Vec<u8>>::from(recv);
+        assert!(
+            timeout(Duration::from_millis(200), recv.recv())
+                .await
+                .is_err()
+        );
+        half_read.send(()).unwrap();
+        TestResult::Ok(recv.recv().await?)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    send.write_all(first).await?;
+    rest_wanted.await?;
+    send.write_all(rest).await?;
+    send.finish()?;
+    assert_eq!(server.await??, Some(message));
+    Ok(())
+}
+
+/// Checks that a receiver reads as a stream of its messages, ending when the sender drops.
+#[tokio::test]
+async fn mpsc_receiver_is_a_stream() -> TestResult<()> {
+    use n0_future::StreamExt;
+
+    let (send, recv) = tokio::sync::mpsc::channel(4);
+    let recv = Receiver::<u8>::from(recv);
+    for value in 1..=3 {
+        send.send(value).await?;
+    }
+    drop(send);
+    let received: Vec<Result<u8, RecvError>> = recv.collect().await;
+    let received: Vec<u8> = received.into_iter().map(Result::unwrap).collect();
+    assert_eq!(received, [1, 2, 3]);
     Ok(())
 }
