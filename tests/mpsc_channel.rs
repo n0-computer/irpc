@@ -538,13 +538,7 @@ async fn mpsc_receiver_is_a_stream() -> TestResult<()> {
 #[tokio::test]
 async fn mpsc_receive_mixed_sizes() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
-    let messages: Vec<Vec<u8>> = [
-        10, 120, 3, 124, 125, 126, 127, 5000, 0, 200, 300, 1, 100_000, 7,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(i, len)| vec![i as u8; len])
-    .collect();
+    let messages = mixed_size_messages();
     let mut frames = Vec::new();
     for message in &messages {
         WriteVarintExt::write_length_prefixed(&mut frames, message)?;
@@ -563,6 +557,46 @@ async fn mpsc_receive_mixed_sizes() -> TestResult<()> {
     let (mut send, _) = conn.open_bi().await?;
     send.write_all(&frames).await?;
     send.finish()?;
+    assert_eq!(server.await??, messages);
+    Ok(())
+}
+
+/// Messages of sizes around the inline frame buffer, and a few much larger ones.
+fn mixed_size_messages() -> Vec<Vec<u8>> {
+    [
+        10, 120, 3, 124, 125, 126, 127, 5000, 0, 200, 300, 1, 100_000, 7,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, len)| vec![i as u8; len])
+    .collect()
+}
+
+/// Checks that a sender sends messages of mixed sizes intact, with both `send` and `try_send`,
+/// while its buffer grows for the large ones and shrinks back after.
+#[tokio::test]
+async fn mpsc_send_mixed_sizes() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let messages = mixed_size_messages();
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let mut recv = Receiver::<Vec<u8>>::from(recv);
+        let mut received = Vec::new();
+        while let Some(message) = recv.recv().await? {
+            received.push(message);
+        }
+        TestResult::Ok(received)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    for (i, message) in messages.iter().enumerate() {
+        if i % 2 == 0 || !send.try_send(message.clone()).await? {
+            send.send(message.clone()).await?;
+        }
+    }
+    drop(send);
     assert_eq!(server.await??, messages);
     Ok(())
 }
