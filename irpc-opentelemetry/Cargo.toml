@@ -24,7 +24,7 @@ iroh = { workspace = true, default-features = true }
 irpc = { version = "0.17.0", path = "..", features = ["iroh", "derive", "noq_endpoint_setup"] }
 n0-error = { workspace = true }
 n0-future = { workspace = true }
-opentelemetry_sdk = { version = "0.32", features = ["testing"] }
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 rand = "0.10.3"
 serde = { workspace = true }
