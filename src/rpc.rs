@@ -31,8 +31,9 @@
 //! response, for example [`oneshot::RecvError::Remote`] from [`Client::rpc`],
 //! and from the sender of its updates, [`SendError::Remote`].
 //! When the server also closes the connection, as a [`Handler`] does by
-//! default, the close usually arrives first, and the client gets an `Io` error
-//! with the connection error instead. In both cases, `remote_code` returns the
+//! default, the close usually arrives first, and the client gets a
+//! `ConnectionClosed` error with the code instead, for example
+//! [`SendError::ConnectionClosed`]. In both cases, `remote_code` returns the
 //! code, for example [`crate::Error::remote_code`].
 //!
 //! [`read_request`] returns a bad request as a [`ReadRequestError`]. A server
@@ -104,33 +105,38 @@ use crate::{
 /// Default max message size (16 MiB).
 pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 
-/// An error code that irpc uses on streams and connections.
+/// An error code on streams and connections.
 ///
-/// A `Request` code is about the request, and a `Message` code is about a
-/// channel message, see [Requests and channel messages]. An application should
-/// use codes from 16 upward, see [Error codes].
+/// irpc stops and resets streams, and closes connections, with the codes of
+/// the named variants. A `Request` code is about the request, and a `Message`
+/// code is about a channel message, see [Requests and channel messages]. A code
+/// that the peer sent and that this version of irpc does not know is
+/// [`Other`](Self::Other). An application should use codes from 16 upward, see
+/// [Error codes].
+///
+/// Code 0 means no error, for example a normal close or a dropped receiver, so
+/// it is never an `ErrorCode`. irpc reports it as a closed channel instead, for
+/// example [`SendError::ReceiverClosed`].
 ///
 /// # Examples
 ///
 /// ```
 /// use irpc::rpc::ErrorCode;
 ///
-/// let code = ErrorCode::RequestDecodeFailed.to_code();
 /// assert_eq!(
-///     ErrorCode::from_code(code),
+///     ErrorCode::from_code(4),
 ///     Some(ErrorCode::RequestDecodeFailed)
 /// );
+/// assert_eq!(ErrorCode::RequestDecodeFailed.to_code(), 4);
+/// assert_eq!(ErrorCode::from_code(401), Some(ErrorCode::Other(401)));
+/// assert_eq!(ErrorCode::from_code(0), None);
 /// ```
 ///
 /// [Requests and channel messages]: self#requests-and-channel-messages
 /// [Error codes]: self#error-codes
 #[derive(Debug, derive_more::Display, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u32)]
 #[non_exhaustive]
 pub enum ErrorCode {
-    /// No error, for example a normal close or a dropped receiver.
-    #[display("closed")]
-    Closed = 0,
     /// The client reset the stream of the request before the server read the request.
     ///
     /// For example, the client dropped the request before it wrote all of it.
@@ -139,7 +145,7 @@ pub enum ErrorCode {
     ///
     /// [Abandoned requests]: self#abandoned-requests
     #[display("request aborted")]
-    RequestAborted = 1,
+    RequestAborted,
     /// The request is larger than [`MAX_MESSAGE_SIZE`].
     ///
     /// The server rejects such a request, see [Bad requests]. A client that
@@ -147,34 +153,42 @@ pub enum ErrorCode {
     ///
     /// [Bad requests]: self#bad-requests
     #[display("request too large")]
-    RequestMaxSizeExceeded = 2,
+    RequestMaxSizeExceeded,
     /// The request does not encode.
     ///
     /// A client that cannot encode its request resets the stream with this code.
     #[display("request does not encode")]
-    RequestEncodeFailed = 3,
+    RequestEncodeFailed,
     /// The request does not decode, or its stream ended before it was complete.
     ///
     /// The server rejects such a request, see [Bad requests].
     ///
     /// [Bad requests]: self#bad-requests
     #[display("request does not decode")]
-    RequestDecodeFailed = 4,
+    RequestDecodeFailed,
     /// A channel message is larger than [`MAX_MESSAGE_SIZE`].
     #[display("message too large")]
-    MessageMaxSizeExceeded = 5,
+    MessageMaxSizeExceeded,
     /// A channel message does not encode.
     #[display("message does not encode")]
-    MessageEncodeFailed = 6,
+    MessageEncodeFailed,
     /// A channel message does not decode.
     #[display("message does not decode")]
-    MessageDecodeFailed = 7,
+    MessageDecodeFailed,
+    /// A code that this version of irpc does not know.
+    ///
+    /// This is a code of the application, see [Error codes], or a code that a
+    /// newer version of irpc added. It is never 0, and never the code of one of
+    /// the variants above.
+    ///
+    /// [Error codes]: self#error-codes
+    #[display("code {_0}")]
+    Other(u64),
 }
 
 impl ErrorCode {
-    /// Every error code, for [`Self::from_code`].
-    const ALL: [Self; 8] = [
-        Self::Closed,
+    /// Every error code that irpc knows, for [`Self::from_code`].
+    const KNOWN: [Self; 7] = [
         Self::RequestAborted,
         Self::RequestMaxSizeExceeded,
         Self::RequestEncodeFailed,
@@ -185,25 +199,106 @@ impl ErrorCode {
     ];
 
     /// Returns the number of this error code.
-    pub const fn to_code(self) -> u32 {
-        self as u32
+    pub const fn to_code(self) -> u64 {
+        match self {
+            Self::RequestAborted => 1,
+            Self::RequestMaxSizeExceeded => 2,
+            Self::RequestEncodeFailed => 3,
+            Self::RequestDecodeFailed => 4,
+            Self::MessageMaxSizeExceeded => 5,
+            Self::MessageEncodeFailed => 6,
+            Self::MessageDecodeFailed => 7,
+            Self::Other(code) => code,
+        }
     }
 
-    /// Returns the error code for `code`, or `None` if irpc does not use `code`.
-    pub fn from_code(code: u32) -> Option<Self> {
-        Self::ALL.into_iter().find(|c| c.to_code() == code)
+    /// Returns the error code for `code`, or `None` for code 0, which means no error.
+    pub fn from_code(code: u64) -> Option<Self> {
+        if code == 0 {
+            return None;
+        }
+        let known = Self::KNOWN.into_iter().find(|c| c.to_code() == code);
+        Some(known.unwrap_or(Self::Other(code)))
     }
 
     fn from_varint(code: VarInt) -> Option<Self> {
-        u32::try_from(code.into_inner())
-            .ok()
-            .and_then(Self::from_code)
+        Self::from_code(code.into_inner())
+    }
+
+    /// Returns the code for a stream or connection.
+    ///
+    /// irpc only sends the codes that it knows, which all fit.
+    fn to_varint(self) -> VarInt {
+        VarInt::from_u64(self.to_code()).expect("irpc sends only codes below 2^62")
     }
 }
 
-impl From<ErrorCode> for VarInt {
-    fn from(code: ErrorCode) -> Self {
-        VarInt::from_u32(code.to_code())
+/// How a connection was closed on purpose, by the peer or by this side.
+///
+/// A connection that failed, for example because the peer is gone, is an `Io`
+/// error instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConnectionClose {
+    /// The peer closed the connection.
+    Remote {
+        /// The code of the close, or `None` for code 0, a normal close.
+        code: Option<ErrorCode>,
+        /// The reason that the peer gave.
+        reason: Vec<u8>,
+    },
+    /// This side closed the connection.
+    Local,
+}
+
+impl ConnectionClose {
+    /// Returns the code that the peer closed the connection with, if it was not 0.
+    pub fn code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::Remote { code, .. } => *code,
+            Self::Local => None,
+        }
+    }
+
+    /// Returns how the connection was closed, or `None` if it failed.
+    pub(crate) fn from_error(err: &ConnectionError) -> Option<Self> {
+        match err {
+            ConnectionError::ApplicationClosed(close) => Some(Self::Remote {
+                code: ErrorCode::from_varint(close.error_code),
+                reason: close.reason.to_vec(),
+            }),
+            ConnectionError::LocallyClosed => Some(Self::Local),
+            _ => None,
+        }
+    }
+
+    /// Returns how the connection was closed, if `err` is from a stream of a closed connection.
+    pub(crate) fn from_io(err: &io::Error) -> Option<Self> {
+        let err = err.get_ref()?;
+        if let Some(noq::ReadError::ConnectionLost(err)) = err.downcast_ref() {
+            Self::from_error(err)
+        } else if let Some(noq::WriteError::ConnectionLost(err)) = err.downcast_ref() {
+            Self::from_error(err)
+        } else {
+            None
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectionClose {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Remote { code: None, .. } => write!(f, "closed by the peer"),
+            Self::Remote {
+                code: Some(code),
+                reason,
+            } => write!(
+                f,
+                "closed by the peer with {code}: {}",
+                String::from_utf8_lossy(reason)
+            ),
+            Self::Local => write!(f, "closed by this side"),
+        }
     }
 }
 
@@ -241,6 +336,12 @@ pub enum ReadRequestError {
         #[error(std_err)]
         source: postcard::Error,
     },
+    /// The peer closed the connection with a code other than 0.
+    ///
+    /// A close with code 0, or by this side, is not an error: [`read_request`]
+    /// returns `None`.
+    #[error("Connection {close}")]
+    ConnectionClosed { close: ConnectionClose },
     /// The connection failed.
     #[error("Connection failed")]
     Connection {
@@ -257,7 +358,7 @@ impl ReadRequestError {
             Self::Malformed { .. } | Self::DecodeFailed { .. } => {
                 Some(ErrorCode::RequestDecodeFailed)
             }
-            Self::Connection { .. } => None,
+            Self::ConnectionClosed { .. } | Self::Connection { .. } => None,
         }
     }
 }
@@ -266,6 +367,9 @@ impl From<ReadRequestError> for io::Error {
     fn from(err: ReadRequestError) -> Self {
         match err {
             ReadRequestError::Connection { source, .. } => source.into(),
+            ReadRequestError::ConnectionClosed { .. } => {
+                io::Error::new(io::ErrorKind::ConnectionAborted, err)
+            }
             err => io::Error::new(io::ErrorKind::InvalidData, err),
         }
     }
@@ -284,11 +388,19 @@ pub enum WriteError {
         #[error(std_err)]
         source: postcard::Error,
     },
-    /// The server stopped the stream with an irpc error code while this client wrote the request.
+    /// The server stopped the stream with code 0 while this client wrote the request.
+    ///
+    /// For example, the server dropped the stream of the request.
+    #[error("Server closed the request stream")]
+    ReceiverClosed,
+    /// The server stopped the stream with a code while this client wrote the request.
     ///
     /// The `code` says why, see [`ErrorCode`], and the [`rpc`](self) module for an overview.
     #[error("Server rejected the request: {code}")]
     Remote { code: ErrorCode },
+    /// The connection was closed on purpose while this client wrote the request.
+    #[error("Connection {close}")]
+    ConnectionClosed { close: ConnectionClose },
     /// An io error, for example because the connection was lost.
     #[error("Io error")]
     Io {
@@ -308,40 +420,20 @@ impl WriteError {
     }
 }
 
-/// Returns the irpc error code that the peer closed the connection with, if any, other than 0.
-pub(crate) fn close_code(err: &ConnectionError) -> Option<ErrorCode> {
-    match err {
-        ConnectionError::ApplicationClosed(close) => ErrorCode::from_varint(close.error_code),
-        _ => None,
-    }
-    .filter(|code| *code != ErrorCode::Closed)
-}
-
-/// Returns the irpc error code that the peer closed the connection with, if `err` comes from that close.
-pub(crate) fn io_close_code(err: &io::Error) -> Option<ErrorCode> {
-    let err = err.get_ref()?;
-    if let Some(noq::ReadError::ConnectionLost(err)) = err.downcast_ref() {
-        close_code(err)
-    } else if let Some(noq::WriteError::ConnectionLost(err)) = err.downcast_ref() {
-        close_code(err)
-    } else {
-        None
-    }
-}
-
-/// Returns the irpc error code that the receiver stopped the stream with, if any.
-pub(crate) fn stop_code(err: &noq::WriteError) -> Option<ErrorCode> {
-    match err {
-        noq::WriteError::Stopped(code) => ErrorCode::from_varint(*code),
-        _ => None,
-    }
-}
-
 impl From<noq::WriteError> for WriteError {
     fn from(err: noq::WriteError) -> Self {
-        match stop_code(&err).filter(|code| *code != ErrorCode::Closed) {
-            Some(code) => e!(WriteError::Remote { code }),
-            None => e!(WriteError::Io, err.into()),
+        match err {
+            noq::WriteError::Stopped(code) => match ErrorCode::from_varint(code) {
+                Some(code) => e!(WriteError::Remote { code }),
+                None => e!(WriteError::ReceiverClosed),
+            },
+            noq::WriteError::ConnectionLost(ref cause) => {
+                match ConnectionClose::from_error(cause) {
+                    Some(close) => e!(WriteError::ConnectionClosed { close }),
+                    None => e!(WriteError::Io, err.into()),
+                }
+            }
+            err => e!(WriteError::Io, err.into()),
         }
     }
 }
@@ -350,21 +442,23 @@ impl From<WriteError> for io::Error {
     fn from(e: WriteError) -> Self {
         match e {
             WriteError::Io { source, .. } => source,
+            WriteError::ReceiverClosed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
             WriteError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
+            WriteError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
         }
     }
 }
 
 impl WriteError {
-    /// Returns the irpc error code that the peer sent, if any.
+    /// Returns the code that the peer sent, if any.
     ///
     /// This is the code of a [`Remote`](Self::Remote) error, or the code that
     /// the peer closed the connection with.
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Remote { code, .. } => Some(*code),
-            Self::Io { source, .. } => io_close_code(source),
+            Self::ConnectionClosed { close, .. } => close.code(),
             _ => None,
         }
     }
@@ -419,7 +513,7 @@ impl ResetOnDrop {
     /// Resets the stream with `code`, instead of [`ErrorCode::RequestAborted`] on drop.
     fn reset(&mut self, code: ErrorCode) {
         if let Some(mut send) = self.0.take() {
-            send.reset(code.into()).ok();
+            send.reset(code.to_varint()).ok();
         }
     }
 }
@@ -427,7 +521,7 @@ impl ResetOnDrop {
 impl Drop for ResetOnDrop {
     fn drop(&mut self) {
         if let Some(send) = &mut self.0 {
-            send.reset(ErrorCode::RequestAborted.into()).ok();
+            send.reset(ErrorCode::RequestAborted.to_varint()).ok();
         }
     }
 }
@@ -496,7 +590,7 @@ fn encode_message(
                 e!(SendError::EncodeFailed, source),
             ),
         };
-        send.reset(code.into()).ok();
+        send.reset(code.to_varint()).ok();
         err
     })
 }
@@ -547,17 +641,18 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
     fn from(mut read: noq::RecvStream) -> Self {
         let fut = async move {
             // A sender that is dropped without sending finishes the stream.
-            let Some(size) = read.read_varint_u64().await? else {
+            let Some(size) = read_size(&mut read).await? else {
                 return Err(e!(oneshot::RecvError::SenderClosed));
             };
             if size > MAX_MESSAGE_SIZE {
-                read.stop(ErrorCode::MessageMaxSizeExceeded.into()).ok();
+                read.stop(ErrorCode::MessageMaxSizeExceeded.to_varint())
+                    .ok();
                 return Err(e!(oneshot::RecvError::MaxSizeExceeded));
             }
             let mut buf = vec![0; size as usize];
             AsyncReadExt::read_exact(&mut read, &mut buf).await?;
             let msg: T = postcard::from_bytes(&buf).map_err(|err| {
-                read.stop(ErrorCode::MessageDecodeFailed.into()).ok();
+                read.stop(ErrorCode::MessageDecodeFailed.to_varint()).ok();
                 e!(oneshot::RecvError::DecodeFailed, err)
             })?;
             Ok(msg)
@@ -571,13 +666,36 @@ fn read_error(err: &io::Error) -> Option<&noq::ReadError> {
     err.get_ref()?.downcast_ref()
 }
 
-/// Returns the irpc error code that the sender reset the stream with, if any, other than 0.
-pub(crate) fn reset_code(err: &io::Error) -> Option<ErrorCode> {
+/// Reads the size prefix of a message, or returns `None` at the end of the stream.
+///
+/// A size prefix that does not fit in a `u64` is larger than
+/// [`MAX_MESSAGE_SIZE`], so this returns `u64::MAX` for it.
+async fn read_size(recv: &mut noq::RecvStream) -> io::Result<Option<u64>> {
+    match recv.read_varint_u64().await {
+        // The only error of the varint itself: all others are from the stream.
+        Err(err) if err.kind() == io::ErrorKind::InvalidData && read_error(&err).is_none() => {
+            Ok(Some(u64::MAX))
+        }
+        res => res,
+    }
+}
+
+/// Returns whether `err` is the end of a stream in the middle of a message.
+///
+/// The reads of a message return an `UnexpectedEof` error that is not from noq
+/// when the stream finishes early.
+pub(crate) fn is_truncated(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::UnexpectedEof && read_error(err).is_none()
+}
+
+/// Returns the code that the sender reset the stream with, if it did.
+///
+/// The inner `None` is code 0.
+pub(crate) fn reset_code(err: &io::Error) -> Option<Option<ErrorCode>> {
     match read_error(err)? {
-        noq::ReadError::Reset(code) => ErrorCode::from_varint(*code),
+        noq::ReadError::Reset(code) => Some(ErrorCode::from_varint(*code)),
         _ => None,
     }
-    .filter(|code| *code != ErrorCode::Closed)
 }
 
 impl From<noq::RecvStream> for crate::channel::none::NoReceiver {
@@ -646,19 +764,19 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
     ) -> Pin<Box<dyn Future<Output = Result<Option<T>, mpsc::RecvError>> + Send + Sync + '_>> {
         Box::pin(async {
             let read = &mut self.recv;
-            let Some(size) = read.read_varint_u64().await? else {
+            let Some(size) = read_size(read).await? else {
                 return Ok(None);
             };
             if size > MAX_MESSAGE_SIZE {
                 self.recv
-                    .stop(ErrorCode::MessageMaxSizeExceeded.into())
+                    .stop(ErrorCode::MessageMaxSizeExceeded.to_varint())
                     .ok();
                 return Err(e!(mpsc::RecvError::MaxSizeExceeded));
             }
             let mut buf = vec![0; size as usize];
             AsyncReadExt::read_exact(read, &mut buf).await?;
             let msg: T = postcard::from_bytes(&buf).map_err(|err| {
-                read.stop(ErrorCode::MessageDecodeFailed.into()).ok();
+                read.stop(ErrorCode::MessageDecodeFailed.to_varint()).ok();
                 e!(mpsc::RecvError::DecodeFailed, err)
             })?;
             Ok(Some(msg))
@@ -709,8 +827,31 @@ impl<T: RpcMessage> NoqSenderInner<T> {
 
 enum NoqSenderState<T> {
     Open(NoqSenderInner<T>),
-    /// Closed by an error, with the code that the receiver stopped the stream with if it did.
-    Closed(Option<ErrorCode>),
+    Closed(CloseReason),
+}
+
+/// Why a remote sender is closed, so that later sends fail with the same error.
+#[derive(Debug, Clone)]
+enum CloseReason {
+    /// The receiver closed the channel.
+    ReceiverClosed,
+    /// The receiver stopped the stream with a code.
+    Remote(ErrorCode),
+    /// The connection was closed on purpose.
+    ConnectionClosed(ConnectionClose),
+    /// This sender closed the channel after an error or a cancelled send.
+    Other,
+}
+
+impl CloseReason {
+    fn error(self) -> SendError {
+        match self {
+            Self::ReceiverClosed => e!(SendError::ReceiverClosed),
+            Self::Remote(code) => e!(SendError::Remote { code }),
+            Self::ConnectionClosed(close) => e!(SendError::ConnectionClosed { close }),
+            Self::Other => e!(SendError::Closed),
+        }
+    }
 }
 
 impl<T> NoqSenderState<T> {
@@ -719,15 +860,19 @@ impl<T> NoqSenderState<T> {
     /// A cancelled send never puts it back, so the sender stays closed: the
     /// stream can hold part of a message.
     fn take_for_send(&mut self) -> Self {
-        std::mem::replace(self, Self::Closed(None))
+        std::mem::replace(self, Self::Closed(CloseReason::Other))
     }
 
     /// Returns the state after a send, so that later sends fail with the same error.
     fn after_send<R>(sender: NoqSenderInner<T>, res: &Result<R, SendError>) -> Self {
         match res {
             Ok(_) => Self::Open(sender),
-            Err(SendError::ReceiverClosed { .. }) => Self::Closed(Some(ErrorCode::Closed)),
-            Err(err) => Self::Closed(err.remote_code()),
+            Err(SendError::ReceiverClosed { .. }) => Self::Closed(CloseReason::ReceiverClosed),
+            Err(SendError::Remote { code, .. }) => Self::Closed(CloseReason::Remote(*code)),
+            Err(SendError::ConnectionClosed { close, .. }) => {
+                Self::Closed(CloseReason::ConnectionClosed(close.clone()))
+            }
+            Err(_) => Self::Closed(CloseReason::Other),
         }
     }
 }
@@ -751,9 +896,9 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
                     *guard = NoqSenderState::after_send(sender, &res);
                     res
                 }
-                NoqSenderState::Closed(code) => {
-                    *guard = NoqSenderState::Closed(code);
-                    Err(SendError::closed(code))
+                NoqSenderState::Closed(reason) => {
+                    *guard = NoqSenderState::Closed(reason.clone());
+                    Err(reason.error())
                 }
             }
         })
@@ -772,9 +917,9 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
                     *guard = NoqSenderState::after_send(sender, &res);
                     res
                 }
-                NoqSenderState::Closed(code) => {
-                    *guard = NoqSenderState::Closed(code);
-                    Err(SendError::closed(code))
+                NoqSenderState::Closed(reason) => {
+                    *guard = NoqSenderState::Closed(reason.clone());
+                    Err(reason.error())
                 }
             }
         })
@@ -1024,7 +1169,7 @@ impl<S: Service> Handler<S> {
                     None => return Err(err.into()), // A connection error.
                     Some(_) if self.skip_bad_requests => debug!("skipped bad request: {err:#}"),
                     Some(code) => {
-                        connection.close(code.into(), err.to_string().as_bytes());
+                        connection.close(code.to_varint(), err.to_string().as_bytes());
                         return Err(err.into());
                     }
                 },
@@ -1045,7 +1190,7 @@ impl<S: RemoteService> Handler<S> {
                 local_sender.send_raw(msg).await.map_err(|err| {
                     // The receiver is gone. Close as a dropped connection does.
                     warn!("handler stopped: {err:#}");
-                    HandlerError::close_connection(ErrorCode::Closed.to_code(), b"")
+                    HandlerError::close_connection(0, b"")
                 })
             }
         })
@@ -1164,13 +1309,16 @@ async fn read_request_inner<S: Service>(
         let (mut send, mut recv) = match connection.accept_bi().await {
             Ok(streams) => streams,
             Err(ConnectionError::ApplicationClosed(cause))
-                if cause.error_code == ErrorCode::Closed.into() =>
+                if cause.error_code == VarInt::from_u32(0) =>
             {
                 trace!("remote side closed connection {cause:?}");
                 return Ok(None);
             }
             Err(ConnectionError::LocallyClosed) => return Ok(None),
-            Err(cause) => return Err(e!(ReadRequestError::Connection, cause)),
+            Err(cause) => match ConnectionClose::from_error(&cause) {
+                Some(close) => return Err(e!(ReadRequestError::ConnectionClosed { close })),
+                None => return Err(e!(ReadRequestError::Connection, cause)),
+            },
         };
         let err = match read_request_frame::<S>(&mut recv).await {
             ReadFrame::Request(carrier, msg) => return Ok(Some((msg, carrier, recv, send))),
@@ -1181,15 +1329,15 @@ async fn read_request_inner<S: Service>(
                 debug!(?reason, "skipped request: the client reset its stream");
                 // A dropped stream finishes, which a client with an mpsc
                 // response would take for the end of the response.
-                send.reset(ErrorCode::RequestAborted.into()).ok();
+                send.reset(ErrorCode::RequestAborted.to_varint()).ok();
                 continue;
             }
             // The next `accept_bi` returns why.
             ReadFrame::ConnectionLost => continue,
         };
         if let Some(code) = err.error_code() {
-            recv.stop(code.into()).ok();
-            send.reset(code.into()).ok();
+            recv.stop(code.to_varint()).ok();
+            send.reset(code.to_varint()).ok();
         }
         return Err(err);
     }
@@ -1201,11 +1349,11 @@ enum ReadFrame<S> {
     Request(Option<crate::span_propagation::SpanContextCarrier>, S),
     /// The request is larger than [`MAX_MESSAGE_SIZE`].
     MaxSizeExceeded,
-    /// The stream ended before the request was complete, or the size prefix is too long.
+    /// The stream ended before the request was complete.
     Malformed(io::Error),
     /// The request does not decode.
     DecodeFailed(postcard::Error),
-    /// The client reset the stream before the request was complete, with the irpc code if it sent one.
+    /// The client reset the stream before the request was complete, with its code if it was not 0.
     Reset(Option<ErrorCode>),
     /// The connection was lost before the request was complete.
     ConnectionLost,
@@ -1229,7 +1377,7 @@ impl<S> ReadFrame<S> {
 
 /// Reads and decodes a request.
 async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame<S> {
-    let size = match recv.read_varint_u64().await {
+    let size = match read_size(recv).await {
         Ok(Some(size)) => size,
         Ok(None) => {
             return ReadFrame::Malformed(io::Error::new(
@@ -1240,7 +1388,7 @@ async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame
         Err(err) => {
             return match read_error(&err) {
                 Some(read_err) => ReadFrame::from_read_err(read_err),
-                // The varint is longer than a u64, or the stream ended inside it.
+                // The stream ended inside the size prefix.
                 None => ReadFrame::Malformed(err),
             };
         }
@@ -1273,20 +1421,33 @@ mod tests {
 
     #[test]
     fn error_code_round_trips() {
-        for code in ErrorCode::ALL {
+        for code in ErrorCode::KNOWN {
             assert_eq!(ErrorCode::from_code(code.to_code()), Some(code));
         }
-        assert_eq!(ErrorCode::from_code(16), None);
+        for code in [16, 401, u64::from(u32::MAX) + 1] {
+            assert_eq!(ErrorCode::from_code(code), Some(ErrorCode::Other(code)));
+        }
+        assert_eq!(ErrorCode::from_code(0), None);
     }
 
     #[test]
     fn write_error_maps_stop_codes() {
         let err = WriteError::from(noq::WriteError::Stopped(
-            ErrorCode::RequestDecodeFailed.into(),
+            ErrorCode::RequestDecodeFailed.to_varint(),
         ));
         assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
         assert_eq!(io::Error::from(err).kind(), io::ErrorKind::ConnectionReset);
+        let err = WriteError::from(noq::WriteError::Stopped(0u32.into()));
+        assert!(matches!(err, WriteError::ReceiverClosed { .. }), "{err:?}");
         let err = WriteError::from(noq::WriteError::Stopped(16u32.into()));
-        assert!(matches!(err, WriteError::Io { .. }), "{err:?}");
+        assert_eq!(err.remote_code(), Some(ErrorCode::Other(16)));
+    }
+
+    #[test]
+    fn send_error_maps_stop_codes() {
+        let err = SendError::from(noq::WriteError::Stopped(0u32.into()));
+        assert!(matches!(err, SendError::ReceiverClosed { .. }), "{err:?}");
+        let err = SendError::from(noq::WriteError::Stopped(401u32.into()));
+        assert_eq!(err.remote_code(), Some(ErrorCode::Other(401)));
     }
 }
