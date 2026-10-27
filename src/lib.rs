@@ -212,6 +212,7 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// * `message = <name>` *(optional but recommended)*:
 ///     * Generates an extended enum wrapping each type in [`WithChannels<T, Service>`].
 ///       The attribute value is the name of the message enum type.
+///       It inherits the visibility and `#[non_exhaustive]` attributes of the protocol enum.
 ///     * Generates a [`Service`] implementation for the protocol enum, with the `Message`
 ///       type set to the message enum.
 ///     * Generates a [`rpc::RemoteService`] implementation for the protocol enum.

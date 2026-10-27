@@ -33,6 +33,12 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let enum_name = &input.ident;
     let vis = &input.vis;
+    let non_exhaustive_attrs: Vec<_> = input
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("non_exhaustive"))
+        .cloned()
+        .collect();
 
     let data_enum = match &mut input.data {
         Data::Enum(data_enum) => data_enum,
@@ -146,6 +152,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         // Create the message enum definition
         let doc = format!("Message enum for [`{enum_name}`]");
         let message_enum = quote! {
+            #(#non_exhaustive_attrs)*
             #[doc = #doc]
             #[allow(missing_docs)]
             #[derive(::std::fmt::Debug)]
