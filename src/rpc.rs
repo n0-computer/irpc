@@ -89,13 +89,13 @@ use std::{
     io,
     marker::PhantomData,
     mem,
-    pin::Pin,
+    pin::{Pin, pin},
     sync::Arc,
     task::{Context, Poll, ready},
 };
 
 use n0_error::{e, stack_error};
-use n0_future::future::Boxed as BoxFuture;
+use n0_future::{FuturesUnorderedBounded, StreamExt, future::Boxed as BoxFuture};
 use noq::{ConnectionError, VarInt};
 use serde::{Serialize, de::DeserializeOwned};
 use smallvec::SmallVec;
@@ -1071,11 +1071,22 @@ impl HandlerError {
     }
 }
 
+/// How the server loop runs the requests of one connection.
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    /// Runs each request in the loop, before the loop reads the next request.
+    Sequential,
+    /// Runs at most this many requests of a connection at the same time.
+    Concurrent(usize),
+}
+
 /// Handles the requests that a server reads from a connection.
 ///
 /// A server uses one handler for all its connections. Create one with:
 ///
 /// - [`Handler::from_sender`]: sends each request to a [`LocalSender`].
+/// - [`Handler::concurrent`]: runs a function on each request, with a limit
+///   of concurrent requests per connection.
 /// - [`Handler::sequential`]: runs a function on each request, one at a time.
 /// - [`Handler::raw`]: runs a function on the protocol enum and the streams.
 ///
@@ -1102,7 +1113,7 @@ impl HandlerError {
 ///     Echo(String),
 /// }
 ///
-/// let handler: Handler<EchoProtocol> = Handler::sequential(|msg| async move {
+/// let handler: Handler<EchoProtocol> = Handler::concurrent(16, |msg| async move {
 ///     match msg {
 ///         EchoMessage::Echo(msg) => {
 ///             let WithChannels { inner, tx, .. } = msg;
@@ -1116,6 +1127,7 @@ impl HandlerError {
 pub struct Handler<S> {
     #[debug(skip)]
     f: HandlerFn<S>,
+    mode: Mode,
     skip_bad_requests: bool,
 }
 
@@ -1123,6 +1135,7 @@ impl<S> Clone for Handler<S> {
     fn clone(&self) -> Self {
         Self {
             f: self.f.clone(),
+            mode: self.mode,
             skip_bad_requests: self.skip_bad_requests,
         }
     }
@@ -1142,13 +1155,16 @@ impl<S: Service> Handler<S> {
         let f: HandlerFn<S> = Arc::new(move |msg, rx, tx| Box::pin(f(msg, rx, tx)));
         Self {
             f,
+            mode: Mode::Sequential,
             skip_bad_requests: false,
         }
     }
 
     /// Runs this handler on one request.
     ///
-    /// Use it in a [`Handler::raw`] to pass a request to another handler.
+    /// Use it in a [`Handler::raw`] to pass a request to another handler. The
+    /// request runs in the current task, so the limit of a
+    /// [`Handler::concurrent`] does not apply.
     pub fn call(
         &self,
         request: S,
@@ -1178,6 +1194,16 @@ impl<S: Service> Handler<S> {
         &self,
         connection: &impl IncomingRemoteConnection,
     ) -> io::Result<()> {
+        match self.mode {
+            Mode::Sequential => self.run_sequential(connection).await,
+            Mode::Concurrent(max_concurrent) => {
+                self.run_concurrent(connection, max_concurrent).await
+            }
+        }
+    }
+
+    /// Runs the requests of `connection` one after the other.
+    async fn run_sequential(&self, connection: &impl IncomingRemoteConnection) -> io::Result<()> {
         loop {
             let Some((msg, carrier, rx, tx)) = self.read_next(connection).await? else {
                 return Ok(());
@@ -1190,15 +1216,58 @@ impl<S: Service> Handler<S> {
                 })
                 .instrument(span);
             if let Err(err) = fut.await {
-                match err.inner {
-                    HandlerErrorInner::CloseConnection { code, reason } => {
-                        debug!(%code, "handler closed the connection");
-                        connection.close(code, &reason);
-                        return Ok(());
+                close_connection(connection, err);
+                return Ok(());
+            }
+        }
+    }
+
+    /// Runs the requests of `connection` at the same time, at most `max_concurrent` of them.
+    async fn run_concurrent(
+        &self,
+        connection: &impl IncomingRemoteConnection,
+        max_concurrent: usize,
+    ) -> io::Result<()> {
+        let mut request_futs = FuturesUnorderedBounded::new(max_concurrent);
+        // Kept across iterations, so that a partly read request is not cancelled.
+        let mut read_next = pin!(self.read_next(connection));
+        let res = loop {
+            tokio::select! {
+                biased;
+                // Poll for finished request futures.
+                Some(res) = request_futs.next(), if !request_futs.is_empty() => {
+                    if let Err(err) = res {
+                        close_connection(connection, err);
+                        break Ok(());
+                    }
+                }
+                // Only read the next request from the stream if we have room for its future.
+                res = &mut read_next, if request_futs.len() < max_concurrent => {
+                    read_next.set(self.read_next(connection));
+                    match res {
+                        Err(err) => break Err(err),
+                        Ok(None) => break Ok(()),
+                        Ok(Some((msg, carrier, rx, tx))) => {
+                            let span = new_request_span(&msg, &rx, carrier.as_ref());
+                            let fut = span
+                                .in_scope(|| {
+                                    debug!("request received");
+                                    (self.f)(msg, rx, tx)
+                                })
+                                .instrument(span);
+                            request_futs.push(fut);
+                        }
                     }
                 }
             }
+        };
+        // Always poll all running request futures to completion.
+        while let Some(res) = request_futs.next().await {
+            if let Err(err) = res {
+                close_connection(connection, err);
+            }
         }
+        res
     }
 
     /// Reads the next request, and closes the connection or skips it on a bad request.
@@ -1238,6 +1307,27 @@ impl<S: RemoteService> Handler<S> {
                 })
             }
         })
+    }
+
+    /// Creates a handler that runs `f` on each request, at most `max_concurrent` at a time.
+    ///
+    /// The limit applies per connection. The requests run in the task of the
+    /// connection, so a request that blocks delays the others. Spawn a task in
+    /// `f` for such work.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_concurrent` is zero.
+    pub fn concurrent<F, Fut>(max_concurrent: usize, f: F) -> Self
+    where
+        F: Fn(S::Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<(), HandlerError>> + Send + 'static,
+    {
+        assert!(max_concurrent > 0, "max_concurrent must not be zero");
+        Self {
+            mode: Mode::Concurrent(max_concurrent),
+            ..Self::sequential(f)
+        }
     }
 
     /// Creates a handler that runs `f` on each request, one at a time per connection.
@@ -1286,6 +1376,16 @@ pub trait IncomingRemoteConnection: crate::sealed::Sealed {
 
     /// Closes the connection.
     fn close(&self, error_code: VarInt, reason: &[u8]);
+}
+
+/// Closes `connection` as the error of a handler asks.
+fn close_connection(connection: &impl IncomingRemoteConnection, err: HandlerError) {
+    match err.inner {
+        HandlerErrorInner::CloseConnection { code, reason } => {
+            debug!(%code, "handler closed the connection");
+            connection.close(code, &reason);
+        }
+    }
 }
 
 /// Reads a request from a connection and converts it to a message enum.
