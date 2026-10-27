@@ -219,6 +219,7 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 ///       message, see [`WithChannels::span`].
 ///     * Implements [`Service::new_request_span`] to name each request span after its variant.
 /// * `alias = "<suffix>"` *(optional)*: Generate type aliases with the given suffix for each `WithChannels<T, Service>`.
+///   The aliases inherit the visibility of the protocol enum.
 /// * `rpc_feature = "<feature>"` *(optional)*: If set, the `RemoteService` implementation will be feature-flagged
 ///   with this feature. Set this if your crate only optionally enables the `rpc` feature
 ///   of `irpc`.

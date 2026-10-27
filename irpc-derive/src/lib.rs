@@ -124,7 +124,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate type aliases if requested
     let type_aliases = if let Some(suffix) = args.alias_suffix {
         // Use all variants for type aliases, not just those with rpc attributes
-        generate_type_aliases(&all_variants, enum_name, &suffix)
+        generate_type_aliases(&all_variants, enum_name, &suffix, vis)
     } else {
         quote! {}
     };
@@ -334,6 +334,7 @@ fn generate_type_aliases(
     variants: &[(Ident, Type)],
     service_name: &Ident,
     suffix: &str,
+    vis: &Visibility,
 ) -> TokenStream2 {
     variants
         .iter()
@@ -344,7 +345,7 @@ fn generate_type_aliases(
             let type_ident = Ident::new(&type_name, variant_name.span());
             quote! {
                 /// Type alias for WithChannels<#inner_type, #service_name>
-                pub type #type_ident = ::irpc::WithChannels<#inner_type, #service_name>;
+                #vis type #type_ident = ::irpc::WithChannels<#inner_type, #service_name>;
             }
         })
         .collect()
