@@ -2,7 +2,7 @@
 //!
 //! The code in this module works with all connections that use [`noq`]
 //! streams. The [`crate::noq`] module has the transport with dial by socket
-//! address. The [`crate::iroh`] module has the transport with dial by endpoint id.
+//! address. The `iroh` module has the transport with dial by endpoint id.
 //!
 //! # Requests and channel messages
 //!
@@ -102,6 +102,7 @@ use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tracing::{Instrument, debug, trace, warn};
 
+pub(crate) mod client;
 #[cfg(feature = "iroh")]
 pub(crate) mod iroh_impl;
 pub(crate) mod noq_impl;
@@ -413,6 +414,15 @@ pub trait RemoteConnection: Send + Sync + Debug + 'static {
     ///
     /// For connections that were fully authenticated before allowing to send any data, this should return `false`.
     fn zero_rtt_rejected(&self) -> BoxFuture<bool>;
+
+    /// Prepares the connection without opening an application stream.
+    ///
+    /// Lazy connections also run their initializer. The default returns
+    /// [`RequestError::ConnectUnsupported`]. Custom implementations can override
+    /// this method to establish a connection or check that it is still open.
+    fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
+        Box::pin(async { Err(e!(RequestError::ConnectUnsupported)) })
+    }
 }
 
 /// A connection to a remote service that can be used to send the initial message.
@@ -1263,7 +1273,7 @@ impl<S: RemoteService> From<LocalSender<S>> for Handler<S> {
 /// Extension trait to [`Service`] to create a [`Service::Message`] from a [`Service`]
 /// and a pair of QUIC streams.
 ///
-/// This trait is auto-implemented when using the [`crate::rpc_requests`] macro.
+/// The `rpc_requests` macro implements this trait.
 pub trait RemoteService: Service + Sized {
     /// Returns the message enum for this request by combining `self` (the protocol enum)
     /// with a pair of QUIC streams for `tx` and `rx` channels.

@@ -1,7 +1,7 @@
 //! Span context propagation across remote connections.
 //!
 //! A protocol opts in with the `span_propagation` argument of the
-//! [`rpc_requests`](crate::rpc_requests) macro. Each request then carries a
+//! `rpc_requests` macro. Each request then carries a
 //! [`SpanContextCarrier`], a map of text headers, in front of the request.
 //!
 //! irpc does not know any tracing backend. A `Propagator` writes the context

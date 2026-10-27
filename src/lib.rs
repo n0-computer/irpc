@@ -40,7 +40,7 @@
 //! This restricts the possible rpc transports to noq (QUIC with dial by
 //! socket address) and iroh (QUIC with dial by endpoint id).
 //!
-//! The [`noq`] module has the noq transport, and the [`iroh`] module has the
+//! The [`noq`] module has the noq transport, and the `iroh` module has the
 //! iroh transport.
 //!
 //! An upside of this is that the noq streams can be tuned for each rpc
@@ -62,11 +62,11 @@
 //!
 //! ## Features
 //!
-//! - `derive`: Enable the [`rpc_requests`] macro. Enabled by default.
+//! - `derive`: Enable the `rpc_requests` macro. Enabled by default.
 //! - `rpc`: Enable the rpc features. Enabled by default.
 //!   By disabling this feature, all rpc related dependencies are removed.
 //!   The remaining dependencies are just serde, tokio and tokio-util.
-//! - `iroh`: Enable the iroh transport in the [`iroh`] module. Enabled by
+//! - `iroh`: Enable the iroh transport in the `iroh` module. Enabled by
 //!   default. This feature enables `rpc`.
 //! - `noq_endpoint_setup`: Easy way to create noq endpoints, in the [`noq`]
 //!   module. This is useful both for testing and for rpc on localhost.
@@ -340,6 +340,8 @@ pub mod rpc {
 }
 #[cfg(feature = "rpc")]
 pub mod rpc;
+#[cfg(feature = "rpc")]
+pub use rpc::client::RemoteClientBuilder;
 /// RPC over iroh connections, with dial by endpoint id.
 #[cfg(feature = "iroh")]
 pub mod iroh {
@@ -355,7 +357,7 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// Re-exports for the code that the [`rpc_requests`] macro generates.
+/// Re-exports for the code that the `rpc_requests` macro generates.
 ///
 /// The generated code names these items through this module, so that crates
 /// that use the macro do not need their own dependency on these crates. This
@@ -385,7 +387,7 @@ impl<T> RpcMessage for T where
 /// Trait for a service
 ///
 /// This is implemented on the protocol enum.
-/// It is usually auto-implemented via the [`rpc_requests] macro.
+/// The `rpc_requests` macro usually implements this trait.
 ///
 /// A service acts as a scope for defining the tx and rx channels for each
 /// message type, and provides some type safety when sending messages.
@@ -418,7 +420,7 @@ pub trait Service: Serialize + DeserializeOwned + Send + Sync + Debug + 'static 
     /// `req_id` is the index of the QUIC stream of the request, which counts
     /// the requests of a connection from 0, so both sides use the same id. The
     /// default span is named `request`, with `req_id` in the field `req`. The
-    /// [`rpc_requests`] macro names it after the variant.
+    /// `rpc_requests` macro names it after the variant.
     ///
     /// The span has debug level, so a filter at info level keeps it out of the
     /// logs. Span propagation needs the span: a server can only set the parent
@@ -589,36 +591,79 @@ impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for Client<S> {
 }
 
 impl<S: Service> Client<S> {
-    /// Create a new client to a remote service using the given noq `endpoint`
-    /// and a socket `addr` of the remote service.
+    /// Creates a noq client that connects and reconnects on demand.
+    ///
+    /// The client connects to `addr` through `endpoint` on its first request.
+    /// Use [`Self::noq_builder`] to initialize each new connection.
     #[cfg(feature = "rpc")]
     pub fn noq(endpoint: ::noq::Endpoint, addr: std::net::SocketAddr) -> Self {
-        Self::boxed(rpc::noq_impl::NoqLazyRemoteConnection::new(endpoint, addr))
+        Self::noq_builder(endpoint, addr).build()
     }
 
-    /// Creates a new client to a remote service using the given iroh `endpoint`.
+    /// Creates a builder for a noq client that connects on demand.
     ///
-    /// The client connects to `addr` with `alpn` on the first request, and
-    /// connects again if the connection fails.
+    /// Use [`RemoteClientBuilder::on_connect`] to authenticate each connection,
+    /// including after a reconnect. Setup runs on the built client's first
+    /// request or a call to [`Self::connect`].
+    #[cfg(feature = "rpc")]
+    pub fn noq_builder(
+        endpoint: ::noq::Endpoint,
+        addr: std::net::SocketAddr,
+    ) -> RemoteClientBuilder<S> {
+        RemoteClientBuilder::noq(endpoint, addr)
+    }
+
+    /// Creates an iroh client that connects and reconnects on demand.
+    ///
+    /// The client connects to `addr` with `alpn` through `endpoint` on its first
+    /// request. Use [`Self::iroh_builder`] to initialize each new connection.
     #[cfg(feature = "iroh")]
     pub fn iroh(
         endpoint: ::iroh::Endpoint,
         addr: impl Into<::iroh::EndpointAddr>,
         alpn: impl AsRef<[u8]>,
     ) -> Self {
-        let conn = rpc::iroh_impl::IrohLazyRemoteConnection::new(
-            endpoint,
-            addr.into(),
-            alpn.as_ref().to_vec(),
-        );
-        Self::boxed(conn)
+        Self::iroh_builder(endpoint, addr, alpn).build()
     }
 
-    /// Create a new client from a `rpc::RemoteConnection` trait object.
-    /// This is used for transports other than noq, such as the iroh transport.
+    /// Creates a builder for an iroh client that connects on demand.
+    ///
+    /// Use [`RemoteClientBuilder::on_connect`] to authenticate each connection,
+    /// including after a reconnect. Setup runs on the built client's first
+    /// request or a call to [`Self::connect`].
+    #[cfg(feature = "iroh")]
+    pub fn iroh_builder(
+        endpoint: ::iroh::Endpoint,
+        addr: impl Into<::iroh::EndpointAddr>,
+        alpn: impl AsRef<[u8]>,
+    ) -> RemoteClientBuilder<S> {
+        RemoteClientBuilder::iroh(endpoint, addr.into(), alpn.as_ref().to_vec())
+    }
+
+    /// Creates a client from a remote connection implementation.
+    ///
+    /// Pass a native noq or iroh connection to use that connection without
+    /// reconnecting. Use [`RemoteClientBuilder`] to initialize a native
+    /// connection before its first application request.
     #[cfg(feature = "rpc")]
     pub fn boxed(remote: impl rpc::RemoteConnection) -> Self {
         Self(ClientInner::Remote(Box::new(remote)), PhantomData)
+    }
+
+    /// Connects and runs setup without opening an application stream.
+    ///
+    /// Lazy clients connect on their first request. Call this to see connection
+    /// or initialization errors before making a request. An initialized
+    /// connection is reused. A fixed native connection is checked for closure.
+    /// For a local client, this returns `Ok(())` immediately. Custom remote
+    /// implementations that do not support this operation return
+    /// [`RequestError::ConnectUnsupported`].
+    #[cfg(feature = "rpc")]
+    pub async fn connect(&self) -> Result<(), RequestError> {
+        match &self.0 {
+            ClientInner::Local(_) => Ok(()),
+            ClientInner::Remote(connection) => connection.connect().await,
+        }
     }
 
     /// Creates a new client from a `tokio::sync::mpsc::Sender`.
@@ -952,29 +997,41 @@ impl<M> ClientInner<M> {
     }
 }
 
-/// Error when opening a request. When cross-process rpc is disabled, this is
-/// an empty enum since local requests can not fail.
-#[stack_error(derive, add_meta, from_sources)]
+/// An error while connecting, initializing a connection, or opening a request.
+#[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum RequestError {
-    /// Error in noq during connect
+    /// Noq could not start a connection attempt.
     #[cfg(feature = "rpc")]
     #[error("Error establishing connection")]
     Connect {
-        #[error(std_err)]
+        #[error(std_err, from)]
         source: ::noq::ConnectError,
     },
-    /// Error in noq when the connection already exists, when opening a stream pair
+    /// The connection failed during the handshake or while opening a stream.
     #[cfg(feature = "rpc")]
     #[error("Error opening stream")]
     Connection {
-        #[error(std_err)]
+        #[error(std_err, from)]
         source: ::noq::ConnectionError,
     },
-    /// Generic error for non-noq transports
+    /// A transport returned another error while establishing a connection.
     #[cfg(feature = "rpc")]
     #[error("Error opening stream")]
-    Other { source: AnyError },
+    Other {
+        #[error(from)]
+        source: AnyError,
+    },
+
+    /// Application setup for a newly established connection failed.
+    #[cfg(feature = "rpc")]
+    #[error("Error initializing connection")]
+    Initialization { source: AnyError },
+
+    /// A custom remote connection does not implement eager connection setup.
+    #[cfg(feature = "rpc")]
+    #[error("Remote connection does not support eager connection setup")]
+    ConnectUnsupported,
 
     #[cfg(not(feature = "rpc"))]
     #[error("(Without the rpc feature, requests cannot fail")]
@@ -1043,7 +1100,13 @@ impl From<RequestError> for io::Error {
             #[cfg(feature = "rpc")]
             RequestError::Connection { source, .. } => source.into(),
             #[cfg(feature = "rpc")]
-            RequestError::Other { source, .. } => io::Error::other(source),
+            RequestError::Other { source, .. } | RequestError::Initialization { source, .. } => {
+                io::Error::other(source)
+            }
+            #[cfg(feature = "rpc")]
+            err @ RequestError::ConnectUnsupported { .. } => {
+                io::Error::new(io::ErrorKind::Unsupported, err)
+            }
             #[cfg(not(feature = "rpc"))]
             RequestError::Unreachable { .. } => unreachable!(),
         }
