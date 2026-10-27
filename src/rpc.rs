@@ -658,7 +658,7 @@ impl From<noq::RecvStream> for crate::channel::none::NoReceiver {
 
 impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
     fn from(read: noq::RecvStream) -> Self {
-        mpsc::Receiver::Boxed(Box::new(NoqReceiver {
+        mpsc::Receiver::from_boxed(Box::new(NoqReceiver {
             recv: read,
             span: tracing::Span::current(),
             received: 0,
@@ -700,7 +700,7 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
 
 impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
     fn from(write: noq::SendStream) -> Self {
-        mpsc::Sender::Boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
+        mpsc::Sender::from_boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
             NoqSenderState::Open(NoqSenderInner {
                 send: write,
                 buffer: SmallVec::new(),
