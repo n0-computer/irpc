@@ -1065,7 +1065,6 @@ impl From<RequestError> for io::Error {
 /// that adds nice syntax for sending messages that can be converted into
 /// [`WithChannels`].
 #[derive(Debug)]
-#[repr(transparent)]
 pub struct LocalSender<S: Service>(crate::channel::mpsc::Sender<S::Message>);
 
 impl<S: Service> Clone for LocalSender<S> {
