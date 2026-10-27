@@ -1228,21 +1228,23 @@ impl<S: Service> Handler<S> {
         connection: &impl IncomingRemoteConnection,
         max_concurrent: usize,
     ) -> io::Result<()> {
-        let mut futs = FuturesUnorderedBounded::new(max_concurrent);
+        let mut request_futs = FuturesUnorderedBounded::new(max_concurrent);
         // Kept across iterations, so that a partly read request is not cancelled.
-        let mut read = pin!(self.read_next(connection));
+        let mut read_next = pin!(self.read_next(connection));
         let res = loop {
             tokio::select! {
                 biased;
-                Some(res) = futs.next(), if !futs.is_empty() => {
+                // Poll for finished request futures.
+                Some(res) = request_futs.next(), if !request_futs.is_empty() => {
                     if let Err(err) = res {
                         close_connection(connection, err);
                         break Ok(());
                     }
                 }
-                next = &mut read, if futs.len() < max_concurrent => {
-                    read.set(self.read_next(connection));
-                    match next {
+                // Only read the next request from the stream if we have room for its future.
+                res = &mut read_next, if request_futs.len() < max_concurrent => {
+                    read_next.set(self.read_next(connection));
+                    match res {
                         Err(err) => break Err(err),
                         Ok(None) => break Ok(()),
                         Ok(Some((msg, carrier, rx, tx))) => {
@@ -1253,15 +1255,14 @@ impl<S: Service> Handler<S> {
                                     (self.f)(msg, rx, tx)
                                 })
                                 .instrument(span);
-                            futs.push(fut);
+                            request_futs.push(fut);
                         }
                     }
                 }
             }
         };
-        // Complete the running requests, also after a graceful close: the remote
-        // can close right after a `Client::notify`.
-        while let Some(res) = futs.next().await {
+        // Always poll all running request futures to completion.
+        while let Some(res) = request_futs.next().await {
             if let Err(err) = res {
                 close_connection(connection, err);
             }
