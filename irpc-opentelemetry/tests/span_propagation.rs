@@ -2,10 +2,7 @@ mod span_propagation {
 
     use iroh::{Endpoint, endpoint::presets, protocol::Router};
     use irpc::{
-        Client, Service, WithChannels,
-        channel::oneshot,
-        iroh::{IrohLazyRemoteConnection, IrohProtocol},
-        rpc::Handler,
+        Client, Service, WithChannels, channel::oneshot, iroh::IrohProtocol, rpc::Handler,
         rpc_requests,
     };
     use n0_error::{Result, StdResultExt};
@@ -107,11 +104,7 @@ mod span_propagation {
 
         let server = listen().instrument(info_span!("server")).await?;
         let client_ep = Endpoint::bind(presets::N0).await?;
-        let client = Client::<Proto>::boxed(IrohLazyRemoteConnection::new(
-            client_ep.clone(),
-            server.endpoint().addr(),
-            ALPN.to_vec(),
-        ));
+        let client = Client::<Proto>::iroh(client_ep.clone(), server.endpoint().addr(), ALPN);
 
         async {
             async {
@@ -125,11 +118,8 @@ mod span_propagation {
             .await?;
 
             async {
-                let client = Client::<Proto>::boxed(IrohLazyRemoteConnection::new(
-                    client_ep.clone(),
-                    server.endpoint().addr(),
-                    ALPN.to_vec(),
-                ));
+                let client =
+                    Client::<Proto>::iroh(client_ep.clone(), server.endpoint().addr(), ALPN);
                 info!("send request: bye");
                 let res = client.rpc(GetRequest("bye".to_string())).await?;
                 info!("got response: {res:?}");
