@@ -680,7 +680,7 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
     fn from(mut writer: noq::SendStream) -> Self {
         // A server creates the sender in the request span, and logs the response in it.
         let span = tracing::Span::current();
-        oneshot::Sender::Boxed(Box::new(move |value| {
+        oneshot::Sender::from_boxed(Box::new(move |value| {
             Box::pin(async move {
                 // write via a small buffer to avoid allocation for small values
                 let mut buf = SmallVec::new();
