@@ -4,7 +4,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{ToTokens, quote};
 use syn::{
-    Attribute, Data, DeriveInput, Error, Fields, Ident, LitStr, Token, Type, Visibility,
+    Attribute, Data, DeriveInput, Error, Fields, Ident, LitStr, Meta, Token, Type, Visibility,
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
@@ -28,19 +28,35 @@ const DEFAULT_TX_TYPE: &str = "::irpc::channel::none::NoSender";
 // See `irpc::rpc_requests` for docs.
 #[proc_macro_attribute]
 pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut input = parse_macro_input!(item as DeriveInput);
+    let input = parse_macro_input!(item as DeriveInput);
     let args = parse_macro_input!(attr as MacroArgs);
+    match expand_rpc_requests(input, args) {
+        Ok(output) => output.into(),
+        Err(err) => err.into_compile_error().into(),
+    }
+}
 
+#[derive(Clone)]
+struct RequestVariant {
+    ident: Ident,
+    ty: Type,
+    /// Conditions for both the protocol and this variant.
+    cfg_attrs: Vec<Attribute>,
+}
+
+fn expand_rpc_requests(mut input: DeriveInput, args: MacroArgs) -> syn::Result<TokenStream2> {
     let enum_name = &input.ident;
     let vis = &input.vis;
+    let enum_cfg_attrs = filtered_attributes(&input.attrs, &["cfg"])?;
+    let message_attrs = filtered_attributes(&input.attrs, &["cfg", "non_exhaustive"])?;
 
     let data_enum = match &mut input.data {
         Data::Enum(data_enum) => data_enum,
         _ => {
-            return error_tokens(
+            return Err(Error::new(
                 input.span(),
                 "The rpc_requests macro can only be applied to enums",
-            );
+            ));
         }
     };
 
@@ -49,22 +65,20 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         Some(feature) => quote!(#[cfg(feature = #feature)]),
     };
 
-    // Collect trait implementations
     let mut channel_impls = TokenStream2::new();
-    // Types to check for uniqueness
-    let mut types = HashSet::new();
-    // All variant names and types
+    let mut unconditional_types = HashSet::new();
     let mut all_variants = Vec::new();
-    // Variants with rpc attributes (for From implementations)
     let mut variants_with_attr = Vec::new();
-    // Wrapper types (via wrap attribute)
     let mut wrapper_types = TokenStream2::new();
 
     for variant in &mut data_enum.variants {
-        let rpc_attr = match VariantRpcArgs::from_attrs(&mut variant.attrs) {
-            Ok(args) => args,
-            Err(err) => return err.into_compile_error().into(),
-        };
+        let rpc_attr = VariantRpcArgs::from_attrs(&mut variant.attrs)?;
+        let variant_cfg_attrs = filtered_attributes(&variant.attrs, &["cfg"])?;
+        let cfg_attrs: Vec<_> = enum_cfg_attrs
+            .iter()
+            .chain(&variant_cfg_attrs)
+            .cloned()
+            .collect();
 
         let request_type = match rpc_attr.wrap {
             None => match &mut variant.fields {
@@ -72,10 +86,10 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                     fields.unnamed[0].ty.clone()
                 }
                 _ => {
-                    return error_tokens(
+                    return Err(Error::new(
                         variant.span(),
                         "Each variant must either have exactly one unnamed field, or use the `wrap` argument in the `rpc` attribute.",
-                    );
+                    ));
                 }
             },
             Some(WrapArgs { ident, derive, vis }) => {
@@ -88,6 +102,7 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                     vis,
                 );
                 wrapper_types.extend(quote! {
+                    #(#enum_cfg_attrs)*
                     #[derive(
                         ::std::fmt::Debug,
                         ::irpc::__macro_exports::serde::Serialize,
@@ -102,50 +117,53 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         };
 
-        all_variants.push((variant.ident.clone(), request_type.clone()));
-
-        if !types.insert(request_type.to_token_stream().to_string()) {
-            return error_tokens(
+        // Conditional variants may use the same type under mutually exclusive
+        // conditions. Rust checks conflicting impls if both are enabled.
+        if variant_cfg_attrs.is_empty()
+            && !unconditional_types.insert(request_type.to_token_stream().to_string())
+        {
+            return Err(Error::new(
                 variant.span(),
                 "Each variant must have a unique request type",
-            );
+            ));
         }
 
+        let info = RequestVariant {
+            ident: variant.ident.clone(),
+            ty: request_type,
+            cfg_attrs,
+        };
         if let Some(args) = rpc_attr.rpc {
-            variants_with_attr.push((variant.ident.clone(), request_type.clone()));
-            channel_impls.extend(generate_channels_impl(args, enum_name, &request_type))
+            channel_impls.extend(generate_channels_impl(args, enum_name, &info));
+            variants_with_attr.push(info.clone());
         }
+        all_variants.push(info);
     }
 
-    // Generate From implementations for the original enum (only for variants with rpc attributes)
     let protocol_enum_from_impls =
         generate_protocol_enum_from_impls(enum_name, &variants_with_attr);
-
-    // Generate type aliases if requested
     let type_aliases = if let Some(suffix) = args.alias_suffix {
-        // Use all variants for type aliases, not just those with rpc attributes
-        generate_type_aliases(&all_variants, enum_name, &suffix)
+        generate_type_aliases(&all_variants, enum_name, &suffix, vis)
     } else {
         quote! {}
     };
 
-    // Generate the extended message enum if requested
     let extended_enum_code = if let Some(message_enum_name) = args.message_enum_name.as_ref() {
-        let message_variants = all_variants
-            .iter()
-            .map(|(variant_name, inner_type)| {
-                quote! {
-                    #variant_name(::irpc::WithChannels<#inner_type, #enum_name>)
-                }
-            })
-            .collect::<Vec<_>>();
+        let message_variants = all_variants.iter().map(|variant| {
+            let RequestVariant {
+                ident,
+                ty,
+                cfg_attrs,
+            } = variant;
+            quote! {
+                #(#cfg_attrs)*
+                #ident(::irpc::WithChannels<#ty, #enum_name>)
+            }
+        });
 
-        // Extract variant names for the span implementation
-        let variant_names: Vec<&Ident> = all_variants.iter().map(|(name, _)| name).collect();
-
-        // Create the message enum definition
         let doc = format!("Message enum for [`{enum_name}`]");
         let message_enum = quote! {
+            #(#message_attrs)*
             #[doc = #doc]
             #[allow(missing_docs)]
             #[derive(::std::fmt::Debug)]
@@ -154,15 +172,21 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         };
 
-        let span_impl = generate_span_impl(message_enum_name, &variant_names);
-
-        // Generate From implementations for the message enum (only for variants with rpc attributes)
+        let span_impl = generate_span_impl(message_enum_name, &all_variants, &enum_cfg_attrs);
         let message_from_impls =
             generate_message_enum_from_impls(message_enum_name, &variants_with_attr, enum_name);
 
         let span_propagation = args.span_propagation;
-        let span_names = variant_names.iter().map(|name| name.to_string());
+        let span_arms = all_variants.iter().map(|variant| {
+            let RequestVariant { ident, cfg_attrs, .. } = variant;
+            let name = ident.to_string();
+            quote! {
+                #(#cfg_attrs)*
+                Self::#ident { .. } => ::irpc::__macro_exports::tracing::debug_span!(#name, req = req_id)
+            }
+        });
         let service_impl = quote! {
+            #(#enum_cfg_attrs)*
             impl ::irpc::Service for #enum_name {
                 type Message = #message_enum_name;
                 const SPAN_PROPAGATION: bool = #span_propagation;
@@ -171,16 +195,20 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
                     &self,
                     req_id: u64,
                 ) -> ::irpc::__macro_exports::tracing::Span {
-                    match self {
-                        #(Self::#variant_names { .. } => ::irpc::__macro_exports::tracing::debug_span!(#span_names, req = req_id)),*
+                    match *self {
+                        #(#span_arms),*
                     }
                 }
             }
         };
 
         let remote_service_impl = if !args.no_rpc {
-            let block =
-                generate_remote_service_impl(message_enum_name, enum_name, &variants_with_attr);
+            let block = generate_remote_service_impl(
+                message_enum_name,
+                enum_name,
+                &variants_with_attr,
+                &enum_cfg_attrs,
+            );
             quote! {
                 #cfg_feature_rpc
                 #block
@@ -200,37 +228,85 @@ pub fn rpc_requests(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    // Combine everything
-    let output = quote! {
+    Ok(quote! {
         #input
-
-        // Wrapper types
         #wrapper_types
-
-        // Channel implementations
         #channel_impls
-
-        // From implementations for the original enum
         #protocol_enum_from_impls
-
-        // Type aliases for WithChannels
         #type_aliases
-
-        // Extended enum and its implementations
         #extended_enum_code
-    };
+    })
+}
 
-    output.into()
+/// Retains only the requested attributes, including inside nested `cfg_attr`.
+///
+/// Copying `cfg_attr` verbatim would also put unrelated attributes (for example
+/// `serde` or `derive`) onto generated impls and match arms.
+fn filtered_attributes(attrs: &[Attribute], names: &[&str]) -> syn::Result<Vec<Attribute>> {
+    attrs
+        .iter()
+        .filter_map(|attr| match filtered_meta(&attr.meta, names) {
+            Ok(Some(meta)) => Some(Ok(Attribute {
+                meta,
+                ..attr.clone()
+            })),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect()
+}
+
+fn filtered_meta(meta: &Meta, names: &[&str]) -> syn::Result<Option<Meta>> {
+    if names.iter().any(|name| meta.path().is_ident(name)) {
+        return Ok(Some(meta.clone()));
+    }
+    if !meta.path().is_ident("cfg_attr") {
+        return Ok(None);
+    }
+    let Meta::List(list) = meta else {
+        return Err(Error::new_spanned(
+            meta,
+            "expected cfg_attr(predicate, attribute)",
+        ));
+    };
+    let mut args = list
+        .parse_args_with(Punctuated::<Meta, Comma>::parse_terminated)?
+        .into_iter();
+    let condition = args
+        .next()
+        .ok_or_else(|| Error::new_spanned(meta, "expected cfg_attr(predicate, attribute)"))?;
+    let attrs = args
+        .filter_map(|meta| filtered_meta(&meta, names).transpose())
+        .collect::<syn::Result<Vec<_>>>()?;
+    if attrs.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(syn::parse_quote!(cfg_attr(#condition, #(#attrs),*))))
+    }
 }
 
 /// Generates the `span` method of the message enum.
-fn generate_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> TokenStream2 {
+fn generate_span_impl(
+    enum_name: &Ident,
+    variants: &[RequestVariant],
+    enum_cfg_attrs: &[Attribute],
+) -> TokenStream2 {
+    let arms = variants.iter().map(|variant| {
+        let RequestVariant {
+            ident, cfg_attrs, ..
+        } = variant;
+        quote! {
+            #(#cfg_attrs)*
+            #enum_name::#ident(ref inner) => &inner.span
+        }
+    });
     quote! {
+        #(#enum_cfg_attrs)*
         impl #enum_name {
             /// Returns the tracing span in which the message was created.
             pub fn span(&self) -> &::irpc::__macro_exports::tracing::Span {
-                match self {
-                    #(#enum_name::#variant_names(inner) => &inner.span),*
+                match *self {
+                    #(#arms),*
                 }
             }
         }
@@ -240,19 +316,18 @@ fn generate_span_impl(enum_name: &Ident, variant_names: &[&Ident]) -> TokenStrea
 fn generate_channels_impl(
     args: RpcArgs,
     service_name: &Ident,
-    request_type: &Type,
+    variant: &RequestVariant,
 ) -> TokenStream2 {
     let rx = args.rx.unwrap_or_else(|| {
-        // We can safely unwrap here because this is a known valid type
         syn::parse_str::<Type>(DEFAULT_RX_TYPE).expect("Failed to parse default rx type")
     });
     let tx = args.tx.unwrap_or_else(|| {
-        // We can safely unwrap here because this is a known valid type
         syn::parse_str::<Type>(DEFAULT_TX_TYPE).expect("Failed to parse default tx type")
     });
-
+    let RequestVariant { ty, cfg_attrs, .. } = variant;
     quote! {
-        impl ::irpc::Channels<#service_name> for #request_type {
+        #(#cfg_attrs)*
+        impl ::irpc::Channels<#service_name> for #ty {
             type Tx = #tx;
             type Rx = #rx;
         }
@@ -262,59 +337,70 @@ fn generate_channels_impl(
 /// Generates `From` impls for protocol enum variants with an rpc attribute.
 fn generate_protocol_enum_from_impls(
     enum_name: &Ident,
-    variants_with_attr: &[(Ident, Type)],
+    variants: &[RequestVariant],
 ) -> TokenStream2 {
-    variants_with_attr
-        .iter()
-        .map(|(variant_name, inner_type)| {
-            quote! {
-                impl From<#inner_type> for #enum_name {
-                    fn from(value: #inner_type) -> Self {
-                        #enum_name::#variant_name(value)
-                    }
+    let impls = variants.iter().map(|variant| {
+        let RequestVariant {
+            ident,
+            ty,
+            cfg_attrs,
+        } = variant;
+        quote! {
+            #(#cfg_attrs)*
+            impl From<#ty> for #enum_name {
+                fn from(value: #ty) -> Self {
+                    #enum_name::#ident(value)
                 }
             }
-        })
-        .collect()
+        }
+    });
+    quote!(#(#impls)*)
 }
 
 /// Generate `From<WithChannels<T, Service>>` impls for message enum variants.
 fn generate_message_enum_from_impls(
     message_enum_name: &Ident,
-    variants_with_attr: &[(Ident, Type)],
+    variants: &[RequestVariant],
     service_name: &Ident,
 ) -> TokenStream2 {
-    variants_with_attr
-        .iter()
-        .map(|(variant_name, inner_type)| {
-            quote! {
-                impl From<::irpc::WithChannels<#inner_type, #service_name>> for #message_enum_name {
-                    fn from(value: ::irpc::WithChannels<#inner_type, #service_name>) -> Self {
-                        #message_enum_name::#variant_name(value)
-                    }
+    let impls = variants.iter().map(|variant| {
+        let RequestVariant {
+            ident,
+            ty,
+            cfg_attrs,
+        } = variant;
+        quote! {
+            #(#cfg_attrs)*
+            impl From<::irpc::WithChannels<#ty, #service_name>> for #message_enum_name {
+                fn from(value: ::irpc::WithChannels<#ty, #service_name>) -> Self {
+                    #message_enum_name::#ident(value)
                 }
             }
-        })
-        .collect()
+        }
+    });
+    quote!(#(#impls)*)
 }
 
 /// Generate `RemoteService` impl for message enums.
 fn generate_remote_service_impl(
     message_enum_name: &Ident,
     proto_enum_name: &Ident,
-    variants_with_attr: &[(Ident, Type)],
+    variants: &[RequestVariant],
+    enum_cfg_attrs: &[Attribute],
 ) -> TokenStream2 {
-    let variants = variants_with_attr
-        .iter()
-        .map(|(variant_name, _inner_type)| {
-            quote! {
-                #proto_enum_name::#variant_name(msg) => {
-                    #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
-                }
+    let arms = variants.iter().map(|variant| {
+        let RequestVariant {
+            ident, cfg_attrs, ..
+        } = variant;
+        quote! {
+            #(#cfg_attrs)*
+            #proto_enum_name::#ident(msg) => {
+                #message_enum_name::from(::irpc::WithChannels::from((msg, tx, rx)))
             }
-        });
-
+        }
+    });
     quote! {
+        #(#enum_cfg_attrs)*
         impl ::irpc::rpc::RemoteService for #proto_enum_name {
             fn with_remote_channels(
                 self,
@@ -322,32 +408,34 @@ fn generate_remote_service_impl(
                 tx: ::irpc::__macro_exports::SendStream
             ) -> Self::Message {
                 match self {
-                    #(#variants),*
+                    #(#arms),*
                 }
             }
         }
     }
 }
 
-/// Generate type aliases for `WithChannels<T, Service>`
+/// Generate type aliases for `WithChannels<T, Service>`.
 fn generate_type_aliases(
-    variants: &[(Ident, Type)],
+    variants: &[RequestVariant],
     service_name: &Ident,
     suffix: &str,
+    vis: &Visibility,
 ) -> TokenStream2 {
-    variants
-        .iter()
-        .map(|(variant_name, inner_type)| {
-            // Create a type name using the variant name + suffix
-            // For example: Sum + "Msg" = SumMsg
-            let type_name = format!("{variant_name}{suffix}");
-            let type_ident = Ident::new(&type_name, variant_name.span());
-            quote! {
-                /// Type alias for WithChannels<#inner_type, #service_name>
-                pub type #type_ident = ::irpc::WithChannels<#inner_type, #service_name>;
-            }
-        })
-        .collect()
+    let aliases = variants.iter().map(|variant| {
+        let RequestVariant {
+            ident,
+            ty,
+            cfg_attrs,
+        } = variant;
+        let type_ident = Ident::new(&format!("{ident}{suffix}"), ident.span());
+        quote! {
+            #(#cfg_attrs)*
+            /// Type alias for WithChannels<#ty, #service_name>.
+            #vis type #type_ident = ::irpc::WithChannels<#ty, #service_name>;
+        }
+    });
+    quote!(#(#aliases)*)
 }
 
 // Parse arguments for the macro
@@ -574,11 +662,101 @@ fn set_fields_vis(fields: &mut Fields, vis: &Visibility) {
     }
 }
 
-// Helper function for error reporting
-fn error_tokens(span: Span, message: &str) -> TokenStream {
-    Error::new(span, message).to_compile_error().into()
-}
-
 fn syn_err<T>(span: Span, message: impl std::fmt::Display) -> syn::Result<T> {
     Err(Error::new(span, message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expand(input: TokenStream2) -> syn::File {
+        let input = syn::parse2(input).unwrap();
+        let args = syn::parse_quote!(message = Message, alias = "Msg", no_rpc);
+        syn::parse2(expand_rpc_requests(input, args).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn message_inherits_non_exhaustive_attributes() {
+        for attr in [
+            quote!(#[non_exhaustive]),
+            quote!(#[cfg_attr(feature = "extensible", non_exhaustive)]),
+            quote!(#[cfg_attr(all(), cfg_attr(all(), non_exhaustive))]),
+        ] {
+            let file = expand(quote! {
+                #attr
+                enum Protocol {
+                    #[rpc()]
+                    Request(Request),
+                }
+            });
+            let message = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Enum(item) if item.ident == "Message" => Some(item),
+                    _ => None,
+                })
+                .unwrap();
+            let actual = filtered_attributes(&message.attrs, &["non_exhaustive"]).unwrap();
+            assert_eq!(quote!(#(#actual)*).to_string(), attr.to_string());
+        }
+        let file = expand(quote! {
+            enum Protocol {
+                #[rpc()]
+                Request(Request),
+            }
+        });
+        let message = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Enum(item) if item.ident == "Message" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            filtered_attributes(&message.attrs, &["non_exhaustive"])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn aliases_inherit_protocol_visibility() {
+        for vis in [
+            quote!(),
+            quote!(pub),
+            quote!(pub(crate)),
+            quote!(pub(super)),
+        ] {
+            let file = expand(quote! {
+                #vis enum Protocol {
+                    #[rpc()]
+                    Request(Request),
+                }
+            });
+            let alias = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Type(item) if item.ident == "RequestMsg" => Some(item),
+                    _ => None,
+                })
+                .unwrap();
+            let actual = &alias.vis;
+            assert_eq!(quote!(#actual).to_string(), vis.to_string());
+        }
+    }
+
+    #[test]
+    fn cfg_attr_filters_unrelated_nested_attributes() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[cfg_attr(all(), doc = "docs", cfg_attr(any(), cfg(unix), derive(Clone)), non_exhaustive)]
+            enum Protocol {}
+        };
+        let attrs = filtered_attributes(&input.attrs, &["cfg"]).unwrap();
+        let expected = quote!(#[cfg_attr(all(), cfg_attr(any(), cfg(unix)))]);
+        assert_eq!(quote!(#(#attrs)*).to_string(), expected.to_string());
+    }
 }
