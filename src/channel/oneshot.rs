@@ -191,7 +191,16 @@ impl<T> Sender<T> {
         }
     }
 
-    /// Check if this is a remote sender
+    /// Returns true if sending can fail in more ways than the receiver being dropped.
+    ///
+    /// This is about which failures can occur, not about where the receiver is.
+    /// A purely in-memory sender is not rpc: it only fails with
+    /// [`SendError::ReceiverClosed`]. A sender that goes through a connection
+    /// that can break on its own is rpc, even if both ends are on the same
+    /// machine, e.g. shared memory between processes.
+    ///
+    /// Currently this returns true for every boxed sender, including in-memory
+    /// senders created with [`Self::with_map`] or [`Self::with_filter_map`].
     pub fn is_rpc(&self) -> bool
     where
         T: 'static,
