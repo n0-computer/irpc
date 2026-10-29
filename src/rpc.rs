@@ -658,7 +658,7 @@ impl From<noq::RecvStream> for crate::channel::none::NoReceiver {
 
 impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
     fn from(read: noq::RecvStream) -> Self {
-        mpsc::Receiver::Boxed(Box::new(NoqReceiver {
+        mpsc::Receiver::from_boxed(Box::new(NoqReceiver {
             recv: read,
             span: tracing::Span::current(),
             received: 0,
@@ -680,7 +680,7 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
     fn from(mut writer: noq::SendStream) -> Self {
         // A server creates the sender in the request span, and logs the response in it.
         let span = tracing::Span::current();
-        oneshot::Sender::Boxed(Box::new(move |value| {
+        oneshot::Sender::from_boxed(Box::new(move |value| {
             Box::pin(async move {
                 // write via a small buffer to avoid allocation for small values
                 let mut buf = SmallVec::new();
@@ -700,7 +700,7 @@ impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
 
 impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
     fn from(write: noq::SendStream) -> Self {
-        mpsc::Sender::Boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
+        mpsc::Sender::from_boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
             NoqSenderState::Open(NoqSenderInner {
                 send: write,
                 buffer: SmallVec::new(),
