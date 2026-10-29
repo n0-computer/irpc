@@ -1,5 +1,5 @@
 //! RPC over [`iroh`] connections, with dial by endpoint id.
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 use iroh::{
     endpoint::{
@@ -17,7 +17,10 @@ use tracing::{Instrument, debug, debug_span, warn};
 
 use crate::{
     RequestError, Service,
-    rpc::{Handler, IncomingRemoteConnection, ReadRequestError, RemoteConnection},
+    rpc::{
+        Handler, IncomingRemoteConnection, ReadRequestError, RemoteConnection,
+        client::ManagedConnection,
+    },
 };
 
 impl RemoteConnection for Connection {
@@ -35,6 +38,11 @@ impl RemoteConnection for Connection {
 
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
         Box::pin(async { false })
+    }
+
+    fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
+        let result = self.close_reason().map_or(Ok(()), |err| Err(err.into()));
+        Box::pin(async move { result })
     }
 }
 
@@ -61,31 +69,29 @@ impl RemoteConnection for OutgoingZeroRttConnection {
             }
         })
     }
+
+    fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
+        let conn = self.clone();
+        Box::pin(async move {
+            conn.handshake_completed()
+                .await
+                .map_err(|err| e!(RequestError::Other, err.into()))?;
+            conn.close_reason().map_or(Ok(()), |err| Err(err.into()))
+        })
+    }
 }
 
-/// A connection to a remote service.
+/// An iroh connection that connects and reconnects on demand.
 ///
-/// Initially this does just have the endpoint and the address. Once a
-/// connection is established, it will be stored.
+/// Clones share the same connection. Use [`crate::Client::iroh_builder`] to run
+/// authentication or other setup on each new connection.
 #[derive(Debug, Clone)]
-pub struct IrohLazyRemoteConnection(Arc<IrohRemoteConnectionInner>);
-
-#[derive(Debug)]
-struct IrohRemoteConnectionInner {
-    endpoint: iroh::Endpoint,
-    addr: iroh::EndpointAddr,
-    connection: tokio::sync::Mutex<Option<Connection>>,
-    alpn: Vec<u8>,
-}
+pub struct IrohLazyRemoteConnection(ManagedConnection);
 
 impl IrohLazyRemoteConnection {
+    /// Creates a lazy connection using the endpoint, remote address, and ALPN.
     pub fn new(endpoint: iroh::Endpoint, addr: iroh::EndpointAddr, alpn: Vec<u8>) -> Self {
-        Self(Arc::new(IrohRemoteConnectionInner {
-            endpoint,
-            addr,
-            connection: Default::default(),
-            alpn,
-        }))
+        Self(ManagedConnection::iroh(endpoint, addr, alpn))
     }
 }
 
@@ -95,46 +101,16 @@ impl RemoteConnection for IrohLazyRemoteConnection {
     }
 
     fn open_bi(&self) -> BoxFuture<std::result::Result<(SendStream, RecvStream), RequestError>> {
-        let this = self.0.clone();
-        Box::pin(async move {
-            let mut guard = this.connection.lock().await;
-            let pair = match guard.as_mut() {
-                Some(conn) => {
-                    // try to reuse the connection
-                    match conn.open_bi().await {
-                        Ok(pair) => pair,
-                        Err(_) => {
-                            // try with a new connection, just once
-                            *guard = None;
-                            connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
-                                .await?
-                        }
-                    }
-                }
-                None => connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard).await?,
-            };
-            Ok(pair)
-        })
+        self.0.open_bi()
     }
 
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
-        Box::pin(async { false })
+        self.0.zero_rtt_rejected()
     }
-}
 
-async fn connect_and_open_bi(
-    endpoint: &iroh::Endpoint,
-    addr: &iroh::EndpointAddr,
-    alpn: &[u8],
-    mut guard: tokio::sync::MutexGuard<'_, Option<Connection>>,
-) -> Result<(SendStream, RecvStream), RequestError> {
-    let conn = endpoint
-        .connect(addr.clone(), alpn)
-        .await
-        .map_err(|err| e!(RequestError::Other, err.into()))?;
-    let (send, recv) = conn.open_bi().await?;
-    *guard = Some(conn);
-    Ok((send, recv))
+    fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
+        self.0.connect()
+    }
 }
 
 impl From<ReadRequestError> for AcceptError {
