@@ -32,7 +32,9 @@ pub enum RecvError {
     /// This is the only error that can occur for local communication. For
     /// remote communication, this means that the sender finished the stream
     /// without sending, for example because it was dropped, or reset it with
-    /// code 0.
+    /// code 0 or [`ErrorCode::MessageAborted`]. A sender whose send was
+    /// cancelled in the middle of the message is also closed, like a sender
+    /// that was dropped before it sent.
     #[error("Sender closed")]
     SenderClosed,
     /// The sender reset the stream with a code, and the channel is closed.
@@ -60,13 +62,6 @@ pub enum RecvError {
     #[cfg(feature = "rpc")]
     #[error("Connection {close}")]
     ConnectionClosed { close: crate::rpc::ConnectionClose },
-    /// The stream ended in the middle of a message.
-    ///
-    /// The sender closed the channel while it wrote the message, for example
-    /// because its send was cancelled.
-    #[cfg(feature = "rpc")]
-    #[error("Stream ended in the middle of a message")]
-    Truncated,
     /// An io error, for example because the connection was lost.
     #[error("Io error")]
     Io {
@@ -78,16 +73,16 @@ pub enum RecvError {
 /// Converts an io error from reading the stream of a remote channel.
 ///
 /// A reset becomes [`RecvError::Remote`], or [`RecvError::SenderClosed`]
-/// for code 0. The close of the connection becomes
-/// [`RecvError::ConnectionClosed`], the end of the stream in the middle of a
-/// message becomes [`RecvError::Truncated`], and any other io error becomes
-/// [`RecvError::Io`].
+/// for code 0 and [`ErrorCode::MessageAborted`]. The end of the stream in the
+/// middle of a message is also [`RecvError::SenderClosed`]. The close of the
+/// connection becomes [`RecvError::ConnectionClosed`], and any other io error
+/// becomes [`RecvError::Io`].
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
         #[cfg(feature = "rpc")]
         match rpc::reset_code(&err) {
+            Some(None | Some(ErrorCode::MessageAborted)) => return e!(RecvError::SenderClosed),
             Some(Some(code)) => return e!(RecvError::Remote { code }),
-            Some(None) => return e!(RecvError::SenderClosed),
             None => {}
         }
         #[cfg(feature = "rpc")]
@@ -96,7 +91,7 @@ impl From<io::Error> for RecvError {
         }
         #[cfg(feature = "rpc")]
         if rpc::is_truncated(&err) {
-            return e!(RecvError::Truncated);
+            return e!(RecvError::SenderClosed);
         }
         e!(RecvError::Io, err)
     }
@@ -109,8 +104,6 @@ impl From<RecvError> for io::Error {
             RecvError::SenderClosed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
             #[cfg(feature = "rpc")]
             RecvError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
-            #[cfg(feature = "rpc")]
-            RecvError::Truncated { .. } => io::Error::new(io::ErrorKind::UnexpectedEof, e),
             #[cfg(feature = "rpc")]
             RecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
             _ => io::Error::new(io::ErrorKind::InvalidData, e),

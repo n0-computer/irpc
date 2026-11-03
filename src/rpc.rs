@@ -69,8 +69,11 @@
 //! A oneshot sender that drops its message before it wrote all of it, for
 //! example because the future of the send was dropped, resets its stream with
 //! [`ErrorCode::MessageAborted`]. An mpsc sender does not: a reset can drop
-//! earlier messages that the receiver did not read yet, so the receiver reads a
-//! part of the message instead.
+//! earlier messages that the receiver did not read yet, so it finishes the
+//! stream in the middle of the message instead. Either way the receiver gets
+//! the same result as for a sender that was dropped: a oneshot receiver gets
+//! [`oneshot::RecvError::SenderClosed`], and an mpsc receiver gets the end of
+//! the stream after the last complete message.
 //!
 //! # Error codes
 //!
@@ -194,7 +197,8 @@ pub enum ErrorCode {
     /// The oneshot sender dropped its message before it wrote all of it.
     ///
     /// For example, the future of the send was dropped while it wrote a large
-    /// message.
+    /// message. The receiver reports this as
+    /// [`oneshot::RecvError::SenderClosed`].
     #[display("message aborted")]
     MessageAborted,
     /// A code that this version of irpc does not know.
@@ -859,6 +863,23 @@ impl Default for ReadProgress {
     }
 }
 
+impl<T> NoqReceiver<T> {
+    /// Handles the end of the stream, and returns `None`.
+    ///
+    /// The stream can end in the middle of a message if the send of that
+    /// message was cancelled. The sender never finished that send, so this is
+    /// the same as a sender that was dropped after its last complete message.
+    fn finish(&mut self) -> Option<T> {
+        self.progress = ReadProgress::default();
+        if !self.finished {
+            self.finished = true;
+            let received = self.received;
+            self.span.in_scope(|| debug!(received, "stream finished"));
+        }
+        None
+    }
+}
+
 impl<T> Debug for NoqReceiver<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NoqReceiver").finish()
@@ -874,18 +895,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                     let mut read = ReadBuf::new(&mut byte);
                     ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
                     let Some(&byte) = read.filled().first() else {
-                        // The stream may end between messages, but not inside a length.
-                        if *shift == 0 {
-                            if !self.finished {
-                                self.finished = true;
-                                let received = self.received;
-                                self.span.in_scope(|| debug!(received, "stream finished"));
-                            }
-                            return Poll::Ready(Ok(None));
-                        }
-                        return Poll::Ready(Err(
-                            io::Error::from(io::ErrorKind::UnexpectedEof).into()
-                        ));
+                        return Poll::Ready(Ok(self.finish()));
                     };
                     let bits = u64::from(byte & 0x7F);
                     // A size that does not fit in a u64 is larger than MAX_MESSAGE_SIZE.
@@ -915,8 +925,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                         ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
                         let n = read.filled().len();
                         if n == 0 {
-                            let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
-                            return Poll::Ready(Err(eof.into()));
+                            return Poll::Ready(Ok(self.finish()));
                         }
                         *filled += n;
                     }

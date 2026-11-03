@@ -67,13 +67,6 @@ pub enum RecvError {
     #[cfg(feature = "rpc")]
     #[error("Connection {close}")]
     ConnectionClosed { close: crate::rpc::ConnectionClose },
-    /// The stream ended in the middle of a message.
-    ///
-    /// The sender closed the channel while it wrote the message, for example
-    /// because its send was cancelled.
-    #[cfg(feature = "rpc")]
-    #[error("Stream ended in the middle of a message")]
-    Truncated,
     /// An io error, for example because the connection was lost.
     #[error("Io error")]
     Io {
@@ -86,8 +79,7 @@ pub enum RecvError {
 ///
 /// A reset becomes [`RecvError::Remote`], or [`RecvError::SenderClosed`]
 /// for code 0. The close of the connection becomes
-/// [`RecvError::ConnectionClosed`], the end of the stream in the middle of a
-/// message becomes [`RecvError::Truncated`], and any other io error becomes
+/// [`RecvError::ConnectionClosed`], and any other io error becomes
 /// [`RecvError::Io`].
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
@@ -101,10 +93,6 @@ impl From<io::Error> for RecvError {
         if let Some(close) = ConnectionClose::from_io(&err) {
             return e!(RecvError::ConnectionClosed { close });
         }
-        #[cfg(feature = "rpc")]
-        if rpc::is_truncated(&err) {
-            return e!(RecvError::Truncated);
-        }
         e!(RecvError::Io, err)
     }
 }
@@ -115,8 +103,6 @@ impl From<RecvError> for io::Error {
             RecvError::Io { source, .. } => source,
             #[cfg(feature = "rpc")]
             RecvError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
-            #[cfg(feature = "rpc")]
-            RecvError::Truncated { .. } => io::Error::new(io::ErrorKind::UnexpectedEof, e),
             #[cfg(feature = "rpc")]
             RecvError::Remote { .. } | RecvError::SenderClosed { .. } => {
                 io::Error::new(io::ErrorKind::ConnectionReset, e)

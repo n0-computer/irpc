@@ -14,6 +14,7 @@ use irpc::{
     util::{AsyncWriteVarintExt, WriteVarintExt},
 };
 use n0_error::e;
+use n0_future::future::poll_once;
 use noq::Endpoint;
 use serde::{Deserialize, Serialize};
 use testresult::TestResult;
@@ -294,37 +295,72 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
     Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
 }
 
-/// Checks that a stream that ends in the middle of a message is `Truncated`, not an io error.
+/// Receives `Vec<u8>` messages on the first stream of the first connection, until the end.
+async fn collect_receiver(server: Endpoint) -> Result<Vec<Vec<u8>>, RecvError> {
+    let conn = server
+        .accept()
+        .await
+        .unwrap()
+        .await
+        .map_err(|err| e!(RecvError::Io, err.into()))?;
+    let (_, recv) = conn
+        .accept_bi()
+        .await
+        .map_err(|err| e!(RecvError::Io, err.into()))?;
+    let mut recv = Receiver::<Vec<u8>>::from(recv);
+    let mut msgs = Vec::new();
+    while let Some(msg) = recv.recv().await? {
+        msgs.push(msg);
+    }
+    Ok(msgs)
+}
+
+/// Checks that a stream that ends in the middle of a message ends after the last complete message.
 #[tokio::test]
 async fn mpsc_truncated_message() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
-    let server = tokio::spawn(vec_receiver(server));
+    let server = tokio::spawn(collect_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (mut send, _) = conn.open_bi().await?;
-    // The size prefix says 100 bytes, but only 3 follow.
-    send.write_all(&[100, 1, 2, 3]).await?;
+    // The message `[7]`, then a size prefix of 100 bytes with only 3 following.
+    send.write_all(&[2, 1, 7, 100, 1, 2, 3]).await?;
     send.finish()?;
-    let Err(cause) = server.await? else {
-        panic!("the stream ended in the middle of a message");
-    };
-    assert!(matches!(cause, RecvError::Truncated { .. }), "{cause:?}");
+    assert_eq!(server.await??, vec![vec![7]]);
     Ok(())
 }
 
-/// Checks that a stream that ends in the middle of the size prefix is `Truncated`.
+/// Checks that a stream that ends in the middle of the size prefix ends after the last complete message.
 #[tokio::test]
 async fn mpsc_truncated_size() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
-    let server = tokio::spawn(vec_receiver(server));
+    let server = tokio::spawn(collect_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (mut send, _) = conn.open_bi().await?;
-    // The high bit says that more bytes of the size prefix follow.
-    send.write_all(&[0x80]).await?;
+    // The message `[7]`, then a size prefix whose high bit says that more bytes follow.
+    send.write_all(&[2, 1, 7, 0x80]).await?;
     send.finish()?;
-    let Err(cause) = server.await? else {
-        panic!("the stream ended in the middle of the size prefix");
-    };
-    assert!(matches!(cause, RecvError::Truncated { .. }), "{cause:?}");
+    assert_eq!(server.await??, vec![vec![7]]);
+    Ok(())
+}
+
+/// Checks that a send that is cancelled in the middle of the message ends the stream for the receiver.
+#[tokio::test]
+async fn mpsc_cancelled_send_ends_stream() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(collect_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    send.send(vec![7]).await?;
+    // The message is larger than the flow control window, so one poll cannot write all of it.
+    let mut fut = Box::pin(send.send(vec![0u8; 8 * 1024 * 1024]));
+    assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
+    drop(fut);
+    assert_eq!(server.await??, vec![vec![7]]);
+    assert!(matches!(
+        send.send(vec![8]).await,
+        Err(SendError::Closed { .. })
+    ));
     Ok(())
 }
 
