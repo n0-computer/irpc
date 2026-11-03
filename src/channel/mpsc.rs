@@ -248,9 +248,9 @@ impl<T> TryFrom<Sender<T>> for tokio::sync::mpsc::Sender<T> {
 pub trait DynSender<T>: Debug + Send + Sync + 'static {
     /// Send a message.
     ///
-    /// For the remote case, a message is either sent completely or not at
-    /// all. If the send is cancelled after part of the message was written,
-    /// the next send must write the rest first.
+    /// For the remote case, the receiver gets a message either completely or
+    /// not at all. If the send is cancelled, the message must not be
+    /// delivered, and the sender must stay usable.
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>>;
 
     /// Try to send a message, returning as fast as possible if sending
@@ -303,10 +303,8 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// ## Cancellation safety
     ///
-    /// If the future is dropped before completion, the sender stays usable.
-    /// For a local sender, the message is not sent. For a remote sender, it
-    /// may or may not be sent, so re-sending a message after a cancelled send
-    /// can deliver it twice.
+    /// If the future is dropped before completion, the message is not
+    /// delivered, and the sender stays usable.
     pub async fn send(&self, value: T) -> Result<(), SendError> {
         match self {
             Sender::Tokio(tx) => tx
@@ -334,10 +332,8 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// ## Cancellation safety
     ///
-    /// If the future is dropped before completion, the sender stays usable.
-    /// For a local sender, the message is not sent. For a remote sender, it
-    /// may or may not be sent, so re-sending a message after a cancelled send
-    /// can deliver it twice.
+    /// If the future is dropped before completion, the message is not
+    /// delivered, and the sender stays usable.
     pub async fn try_send(&self, value: T) -> Result<bool, SendError> {
         match self {
             Sender::Tokio(tx) => match tx.try_send(value) {

@@ -68,12 +68,17 @@
 //!
 //! A oneshot sender that drops its message before it wrote all of it, for
 //! example because the future of the send was dropped, resets its stream with
-//! [`ErrorCode::MessageAborted`]. An mpsc sender does not: a reset can drop
-//! earlier messages that the receiver did not read yet, so it finishes the
-//! stream in the middle of the message instead. Either way the receiver gets
-//! the same result as for a sender that was dropped: a oneshot receiver gets
-//! [`oneshot::RecvError::SenderClosed`], and an mpsc receiver gets the end of
-//! the stream after the last complete message.
+//! [`ErrorCode::MessageAborted`], and the receiver gets
+//! [`oneshot::RecvError::SenderClosed`], as for a sender that was dropped.
+//!
+//! An mpsc message ends with an end byte, 0 for a message to deliver. An mpsc
+//! send that is cancelled after it wrote part of its message cannot reset the
+//! stream, which would drop earlier messages that the receiver did not read
+//! yet. The next send writes the rest with the end byte 1 instead, and the
+//! receiver drops that message, so a cancelled send is not delivered, as for a
+//! local channel. If the sender drops instead, the stream ends in the middle of
+//! the message, and the receiver gets the end of the stream after the last
+//! complete message.
 //!
 //! # Error codes
 //!
@@ -861,7 +866,14 @@ enum ReadProgress {
     Length { value: u64, shift: u32 },
     /// The body, of which the first `filled` bytes have arrived.
     Body { buf: Vec<u8>, filled: usize },
+    /// The body has arrived, and the end byte is next.
+    End { buf: Vec<u8> },
 }
+
+/// The end byte of an mpsc message that the receiver delivers.
+const MESSAGE_COMPLETE: u8 = 0;
+/// The end byte of an mpsc message whose send was cancelled, which the receiver drops.
+const MESSAGE_ABORTED: u8 = 1;
 
 impl Default for ReadProgress {
     fn default() -> Self {
@@ -943,6 +955,33 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                     let ReadProgress::Body { buf, .. } = mem::take(&mut self.progress) else {
                         continue;
                     };
+                    self.progress = ReadProgress::End { buf };
+                }
+                ReadProgress::End { .. } => {
+                    let mut byte = [0u8; 1];
+                    let mut read = ReadBuf::new(&mut byte);
+                    ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
+                    let Some(&end) = read.filled().first() else {
+                        return Poll::Ready(Ok(self.finish()));
+                    };
+                    let ReadProgress::End { buf } = mem::take(&mut self.progress) else {
+                        continue;
+                    };
+                    match end {
+                        MESSAGE_COMPLETE => {}
+                        MESSAGE_ABORTED => {
+                            self.span
+                                .in_scope(|| debug!("dropped a message whose send was cancelled"));
+                            continue;
+                        }
+                        _ => {
+                            self.recv
+                                .stop(ErrorCode::MessageDecodeFailed.to_varint())
+                                .ok();
+                            let err = postcard::Error::DeserializeBadEncoding;
+                            return Poll::Ready(Err(e!(mpsc::RecvError::DecodeFailed, err)));
+                        }
+                    }
                     let msg = postcard::from_bytes(&buf).map_err(|err| {
                         self.recv
                             .stop(ErrorCode::MessageDecodeFailed.to_varint())
@@ -972,7 +1011,8 @@ struct NoqSenderInner<T> {
     ///
     /// A send that is cancelled leaves its message here. If none of it was
     /// written, the next send drops it. Otherwise the next send writes the
-    /// rest first, so that the stream stays a sequence of whole messages. If
+    /// rest first with the end byte [`MESSAGE_ABORTED`], so that the stream
+    /// stays a sequence of whole messages and the receiver drops this one. If
     /// the sender drops instead, the stream ends in the middle of the message,
     /// which the receiver takes as the end of the channel.
     written: usize,
@@ -1000,24 +1040,38 @@ impl<T: RpcMessage> NoqSenderInner<T> {
         }
         self.buffer.clear();
         self.written = 0;
-        self.record_sent();
         Ok(())
     }
 
-    /// Prepares the buffer for a new message: sends the rest of a started
-    /// message, and drops a message that a cancelled send did not start.
+    /// Prepares the buffer for a new message.
+    ///
+    /// Drops a message that a cancelled send did not start. A message that a
+    /// cancelled send started is written to the end, but marked as aborted, so
+    /// that the receiver drops it.
     async fn prepare(&mut self) -> Result<(), SendError> {
         if self.written > 0 {
+            if let Some(end) = self.buffer.last_mut() {
+                *end = MESSAGE_ABORTED;
+            }
             self.write_rest().await?;
         }
         self.buffer.clear();
         Ok(())
     }
 
+    /// Encodes `value` into the buffer, followed by the end byte of a whole message.
+    fn encode(&mut self, value: &T) -> Result<(), SendError> {
+        encode_message(value, &mut self.buffer, &mut self.send)?;
+        self.buffer.push(MESSAGE_COMPLETE);
+        Ok(())
+    }
+
     async fn send(&mut self, value: T) -> Result<(), SendError> {
         self.prepare().await?;
-        encode_message(&value, &mut self.buffer, &mut self.send)?;
-        self.write_rest().await
+        self.encode(&value)?;
+        self.write_rest().await?;
+        self.record_sent();
+        Ok(())
     }
 
     async fn try_send(&mut self, value: T) -> Result<bool, SendError> {
@@ -1026,13 +1080,14 @@ impl<T: RpcMessage> NoqSenderInner<T> {
             return Ok(false);
         };
         res?;
-        encode_message(&value, &mut self.buffer, &mut self.send)?;
+        self.encode(&value)?;
         let Some(n) = now_or_never(self.send.write(&self.buffer)) else {
             self.buffer.clear();
             return Ok(false);
         };
         self.written = n?;
         self.write_rest().await?;
+        self.record_sent();
         Ok(true)
     }
 }
