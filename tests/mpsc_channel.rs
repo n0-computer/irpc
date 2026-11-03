@@ -2,6 +2,7 @@
 
 use std::{io, time::Duration};
 
+use irpc::noq::{configure_client, make_server_endpoint};
 use irpc::{
     Client, RpcMessage, WithChannels,
     channel::{
@@ -948,5 +949,48 @@ async fn mpsc_send_mixed_sizes() -> TestResult<()> {
     }
     drop(send);
     assert_eq!(server.await??, messages);
+    Ok(())
+}
+
+/// Checks that later sends after the connection was lost get the io error again, not `Closed`.
+#[tokio::test]
+async fn mpsc_send_after_connection_lost() -> TestResult<()> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    // The server runs on its own runtime, so that shutting the runtime down
+    // silences the server without a close, and the client times out.
+    let server_rt = tokio::runtime::Runtime::new()?;
+    let (server, cert) = {
+        let _guard = server_rt.enter();
+        make_server_endpoint(addr)?
+    };
+    let server_addr = server.local_addr()?;
+    let accepted = server_rt.spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let streams = conn.accept_bi().await.unwrap();
+        (server, conn, streams)
+    });
+    let client = noq::Endpoint::client(addr)?;
+    let mut config = configure_client(&[cert.as_slice()])?;
+    let mut transport = noq::TransportConfig::default();
+    transport.max_idle_timeout(Some(Duration::from_millis(200).try_into()?));
+    config.transport_config(std::sync::Arc::new(transport));
+    let conn = client
+        .connect_with(config, server_addr, "localhost")?
+        .await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The server accepts the stream once it sees data.
+    send.write_all(&[2, 1, 7]).await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    let accepted = accepted.await?;
+    server_rt.shutdown_background();
+    let lost = conn.closed().await;
+    assert_eq!(lost, noq::ConnectionError::TimedOut);
+    drop(accepted);
+    for _ in 0..2 {
+        let Err(cause) = send.send(vec![8]).await else {
+            panic!("the connection was lost");
+        };
+        assert!(matches!(cause, SendError::Io { .. }), "{cause:?}");
+    }
     Ok(())
 }
