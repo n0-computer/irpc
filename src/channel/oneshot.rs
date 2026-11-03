@@ -81,7 +81,11 @@ impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
         #[cfg(feature = "rpc")]
         match rpc::reset_code(&err) {
-            Some(None | Some(ErrorCode::MessageAborted)) => return e!(RecvError::SenderClosed),
+            Some(None) => return e!(RecvError::SenderClosed),
+            Some(Some(ErrorCode::MessageAborted)) => {
+                tracing::debug!("the sender reset the stream, the send was cancelled");
+                return e!(RecvError::SenderClosed);
+            }
             Some(Some(code)) => return e!(RecvError::Remote { code }),
             None => {}
         }
@@ -91,6 +95,7 @@ impl From<io::Error> for RecvError {
         }
         #[cfg(feature = "rpc")]
         if rpc::is_truncated(&err) {
+            tracing::debug!("stream ended in the middle of the message, the send was cancelled");
             return e!(RecvError::SenderClosed);
         }
         e!(RecvError::Io, err)

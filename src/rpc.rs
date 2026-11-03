@@ -875,7 +875,12 @@ impl<T> NoqReceiver<T> {
     /// message was cancelled. The sender never finished that send, so this is
     /// the same as a sender that was dropped after its last complete message.
     fn finish(&mut self) -> Option<T> {
-        self.progress = ReadProgress::default();
+        let progress = mem::take(&mut self.progress);
+        if !matches!(progress, ReadProgress::Length { shift: 0, .. }) {
+            self.span.in_scope(|| {
+                debug!("stream ended in the middle of a message, the send was cancelled")
+            });
+        }
         if !self.finished {
             self.finished = true;
             let received = self.received;
