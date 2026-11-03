@@ -298,20 +298,19 @@ async fn mpsc_partly_cancelled_send_is_completed() -> TestResult<()> {
     Ok(())
 }
 
-/// Checks that the rest of a partly cancelled send is sent also when the sender is dropped right after.
+/// Checks that a partly cancelled send is not delivered if the sender is dropped right after.
 #[tokio::test]
-async fn mpsc_partly_cancelled_send_is_completed_after_drop() -> TestResult<()> {
+async fn mpsc_partly_cancelled_send_is_dropped_with_sender() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (send, _) = conn.open_bi().await?;
     let send = mpsc::Sender::<Vec<u8>>::from(send);
-    let big = vec![9u8; 8 * 1024 * 1024];
-    let mut fut = Box::pin(send.send(big.clone()));
+    let mut fut = Box::pin(send.send(vec![9u8; 8 * 1024 * 1024]));
     assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
     drop(fut);
     drop(send);
-    assert_eq!(server.await??, vec![big]);
+    assert_eq!(server.await??, Vec::<Vec<u8>>::new());
     Ok(())
 }
 

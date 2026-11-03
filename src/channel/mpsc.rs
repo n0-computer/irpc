@@ -250,7 +250,7 @@ pub trait DynSender<T>: Debug + Send + Sync + 'static {
     ///
     /// For the remote case, a message is either sent completely or not at
     /// all. If the send is cancelled after part of the message was written,
-    /// the rest must still be sent.
+    /// the next send must write the rest first.
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>>;
 
     /// Try to send a message, returning as fast as possible if sending
@@ -304,10 +304,9 @@ impl<T: Send + 'static> Sender<T> {
     /// ## Cancellation safety
     ///
     /// If the future is dropped before completion, the sender stays usable.
-    /// For a local sender, the message is not sent. For a remote sender, the
-    /// message is not sent if none of it was written yet; otherwise the rest
-    /// of it is still sent. So re-sending a message after a cancelled send
-    /// can deliver it twice to a remote receiver.
+    /// For a local sender, the message is not sent. For a remote sender, it
+    /// may or may not be sent, so re-sending a message after a cancelled send
+    /// can deliver it twice.
     pub async fn send(&self, value: T) -> Result<(), SendError> {
         match self {
             Sender::Tokio(tx) => tx
@@ -336,10 +335,9 @@ impl<T: Send + 'static> Sender<T> {
     /// ## Cancellation safety
     ///
     /// If the future is dropped before completion, the sender stays usable.
-    /// For a local sender, the message is not sent. For a remote sender, the
-    /// message is not sent if none of it was written yet; otherwise the rest
-    /// of it is still sent. So re-sending a message after a cancelled send
-    /// can deliver it twice to a remote receiver.
+    /// For a local sender, the message is not sent. For a remote sender, it
+    /// may or may not be sent, so re-sending a message after a cancelled send
+    /// can deliver it twice.
     pub async fn try_send(&self, value: T) -> Result<bool, SendError> {
         match self {
             Sender::Tokio(tx) => match tx.try_send(value) {
