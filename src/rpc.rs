@@ -71,10 +71,11 @@
 //! [`ErrorCode::MessageAborted`], and the receiver gets
 //! [`oneshot::RecvError::SenderClosed`], as for a sender that was dropped.
 //!
-//! An mpsc message ends with an end byte, 0 for a message to deliver. An mpsc
-//! send that is cancelled after it wrote part of its message cannot reset the
-//! stream, which would drop earlier messages that the receiver did not read
-//! yet. The next send writes the rest with the end byte 1 instead, and the
+//! An mpsc frame holds the message and a marker after it, which says whether
+//! the receiver delivers the message. An mpsc send that is cancelled after it
+//! wrote part of its message cannot reset the stream, which would drop earlier
+//! messages that the receiver did not read yet. The next send writes the rest
+//! of the frame with the marker for an aborted message instead, and the
 //! receiver drops that message, so a cancelled send is not delivered, as for a
 //! local channel. If the sender drops instead, the stream ends in the middle of
 //! the message, and the receiver gets the end of the stream after the last
@@ -106,7 +107,7 @@ use std::{
 use n0_error::{e, stack_error};
 use n0_future::future::Boxed as BoxFuture;
 use noq::{ConnectionError, VarInt};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tracing::{Instrument, debug, trace, warn};
@@ -866,14 +867,19 @@ enum ReadProgress {
     Length { value: u64, shift: u32 },
     /// The body, of which the first `filled` bytes have arrived.
     Body { buf: Vec<u8>, filled: usize },
-    /// The body has arrived, and the end byte is next.
-    End { buf: Vec<u8> },
 }
 
-/// The end byte of an mpsc message that the receiver delivers.
-const MESSAGE_COMPLETE: u8 = 0;
-/// The end byte of an mpsc message whose send was cancelled, which the receiver drops.
-const MESSAGE_ABORTED: u8 = 1;
+/// How an mpsc message ends: the last part of its frame, after the message.
+///
+/// Each variant encodes as one byte, so a sender can mark a message that it
+/// already started as aborted by encoding the last byte again.
+#[derive(Debug, Serialize, Deserialize)]
+enum MessageEnd {
+    /// The receiver delivers the message.
+    Complete,
+    /// The send of the message was cancelled, so the receiver drops it.
+    Aborted,
+}
 
 impl Default for ReadProgress {
     fn default() -> Self {
@@ -955,39 +961,17 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                     let ReadProgress::Body { buf, .. } = mem::take(&mut self.progress) else {
                         continue;
                     };
-                    self.progress = ReadProgress::End { buf };
-                }
-                ReadProgress::End { .. } => {
-                    let mut byte = [0u8; 1];
-                    let mut read = ReadBuf::new(&mut byte);
-                    ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
-                    let Some(&end) = read.filled().first() else {
-                        return Poll::Ready(Ok(self.finish()));
-                    };
-                    let ReadProgress::End { buf } = mem::take(&mut self.progress) else {
-                        continue;
-                    };
-                    match end {
-                        MESSAGE_COMPLETE => {}
-                        MESSAGE_ABORTED => {
-                            self.span
-                                .in_scope(|| debug!("dropped a message whose send was cancelled"));
-                            continue;
-                        }
-                        _ => {
-                            self.recv
-                                .stop(ErrorCode::MessageDecodeFailed.to_varint())
-                                .ok();
-                            let err = postcard::Error::DeserializeBadEncoding;
-                            return Poll::Ready(Err(e!(mpsc::RecvError::DecodeFailed, err)));
-                        }
-                    }
-                    let msg = postcard::from_bytes(&buf).map_err(|err| {
+                    let (msg, end) = postcard::from_bytes(&buf).map_err(|err| {
                         self.recv
                             .stop(ErrorCode::MessageDecodeFailed.to_varint())
                             .ok();
                         e!(mpsc::RecvError::DecodeFailed, err)
                     })?;
+                    if let MessageEnd::Aborted = end {
+                        self.span
+                            .in_scope(|| debug!("dropped a message whose send was cancelled"));
+                        continue;
+                    }
                     self.received += 1;
                     if self.received == 1 {
                         self.span.in_scope(|| debug!("first message received"));
@@ -1011,7 +995,7 @@ struct NoqSenderInner<T> {
     ///
     /// A send that is cancelled leaves its message here. If none of it was
     /// written, the next send drops it. Otherwise the next send writes the
-    /// rest first with the end byte [`MESSAGE_ABORTED`], so that the stream
+    /// rest first, ending with [`MessageEnd::Aborted`], so that the stream
     /// stays a sequence of whole messages and the receiver drops this one. If
     /// the sender drops instead, the stream ends in the middle of the message,
     /// which the receiver takes as the end of the channel.
@@ -1050,20 +1034,19 @@ impl<T: RpcMessage> NoqSenderInner<T> {
     /// that the receiver drops it.
     async fn prepare(&mut self) -> Result<(), SendError> {
         if self.written > 0 {
-            if let Some(end) = self.buffer.last_mut() {
-                *end = MESSAGE_ABORTED;
-            }
+            let last = self.buffer.len() - 1;
+            postcard::to_slice(&MessageEnd::Aborted, &mut self.buffer[last..])
+                .expect("the end of a message is one byte");
             self.write_rest().await?;
         }
         self.buffer.clear();
         Ok(())
     }
 
-    /// Encodes `value` into the buffer, followed by the end byte of a whole message.
+    /// Encodes `value` into the buffer, as a message that the receiver delivers.
     fn encode(&mut self, value: &T) -> Result<(), SendError> {
-        encode_message(value, &mut self.buffer, &mut self.send)?;
-        self.buffer.push(MESSAGE_COMPLETE);
-        Ok(())
+        let frame = (value, MessageEnd::Complete);
+        encode_message(&frame, &mut self.buffer, &mut self.send)
     }
 
     async fn send(&mut self, value: T) -> Result<(), SendError> {

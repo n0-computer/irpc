@@ -21,17 +21,20 @@ use serde::{Deserialize, Serialize};
 use testresult::TestResult;
 use tokio::time::timeout;
 
+/// The marker after a message in its frame, for a message that the receiver delivers.
+const COMPLETE: u8 = 0;
+
 mod common;
 use common::*;
 
-/// Checks that an end byte other than 0 or 1 is `DecodeFailed`.
+/// Checks that a frame whose end marker is not known is `DecodeFailed`.
 #[tokio::test]
-async fn mpsc_bad_end_byte() -> TestResult<()> {
+async fn mpsc_bad_message_end() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (mut send, _) = conn.open_bi().await?;
-    send.write_all(&[2, 1, 7, 5]).await?;
+    send.write_all(&[3, 1, 7, 5]).await?;
     send.finish()?;
     let Err(cause) = server.await? else {
         panic!("the end byte is bad");
@@ -273,8 +276,8 @@ async fn mpsc_truncated_message() -> TestResult<()> {
     let server = tokio::spawn(collect_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (mut send, _) = conn.open_bi().await?;
-    // The message `[7]` with its end byte, then a size prefix of 100 bytes with only 3 following.
-    send.write_all(&[2, 1, 7, 0, 100, 1, 2, 3]).await?;
+    // The frame of the message `[7]`, then a size prefix of 100 bytes with only 3 following.
+    send.write_all(&[3, 1, 7, 0, 100, 1, 2, 3]).await?;
     send.finish()?;
     assert_eq!(server.await??, vec![vec![7]]);
     Ok(())
@@ -287,8 +290,8 @@ async fn mpsc_truncated_size() -> TestResult<()> {
     let server = tokio::spawn(collect_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (mut send, _) = conn.open_bi().await?;
-    // The message `[7]` with its end byte, then a size prefix whose high bit says that more bytes follow.
-    send.write_all(&[2, 1, 7, 0, 0x80]).await?;
+    // The frame of the message `[7]`, then a size prefix whose high bit says that more bytes follow.
+    send.write_all(&[3, 1, 7, 0, 0x80]).await?;
     send.finish()?;
     assert_eq!(server.await??, vec![vec![7]]);
     Ok(())
@@ -356,7 +359,8 @@ async fn mpsc_unstarted_cancelled_send_is_not_sent() -> TestResult<()> {
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (send, _) = conn.open_bi().await?;
     let send = mpsc::Sender::<()>::from(send);
-    // `()` is a single byte on the wire, so a send writes all of it or nothing.
+    // The frame of `()` is two bytes, size and end marker, so the 64 byte window holds
+    // a whole number of frames, and the send that does not fit writes nothing.
     let mut sent = 0;
     loop {
         let mut fut = Box::pin(send.send(()));
@@ -459,8 +463,8 @@ async fn mpsc_max_message_size_recv() -> TestResult<()> {
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (mut send, _) = conn.open_bi().await?;
     // this one should work!
-    send.write_length_prefixed(vec![0u8; 1024 * 1024]).await?;
-    send.write_all(&[0]).await?;
+    send.write_length_prefixed((vec![0u8; 1024 * 1024], COMPLETE))
+        .await?;
     // this one should fail on receive!
     send.write_length_prefixed(vec![0u8; 1024 * 1024 * 32])
         .await
@@ -517,11 +521,9 @@ async fn mpsc_serialize_error_recv() -> TestResult<()> {
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (mut send, _) = conn.open_bi().await?;
     // this one should work!
-    send.write_length_prefixed(0u64).await?;
-    send.write_all(&[0]).await?;
+    send.write_length_prefixed((0u64, COMPLETE)).await?;
     // this one should fail on receive!
-    send.write_length_prefixed(1u64).await?;
-    send.write_all(&[0]).await.ok();
+    send.write_length_prefixed((1u64, COMPLETE)).await.ok();
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
@@ -582,8 +584,7 @@ async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (mut send, _) = conn.open_bi().await?;
     // an odd number does not decode as `NoSer`
-    send.write_length_prefixed(1u64).await?;
-    send.write_all(&[0]).await?;
+    send.write_length_prefixed((1u64, COMPLETE)).await?;
     let code = timeout(Duration::from_secs(5), send.stopped()).await??;
     let code = code.and_then(|code| ErrorCode::from_code(code.into_inner()));
     assert_eq!(code, Some(ErrorCode::MessageDecodeFailed));
@@ -599,8 +600,7 @@ async fn mpsc_receive_resumes_a_message_read_in_part() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let message = vec![7u8; 1000];
     let mut frame = Vec::new();
-    WriteVarintExt::write_length_prefixed(&mut frame, &message)?;
-    frame.push(0);
+    WriteVarintExt::write_length_prefixed(&mut frame, (&message, COMPLETE))?;
     let (first, rest) = frame.split_at(frame.len() / 2);
     let (half_read, rest_wanted) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
