@@ -67,9 +67,16 @@
 //!
 //! A oneshot sender that drops its message before it wrote all of it, for
 //! example because the future of the send was dropped, resets its stream with
-//! [`ErrorCode::MessageAborted`]. An mpsc sender does not: a reset can drop
-//! earlier messages that the receiver did not read yet, so the receiver reads a
-//! part of the message instead.
+//! [`ErrorCode::MessageAborted`].
+//!
+//! An mpsc frame holds the message and a marker after it, which says whether
+//! the receiver delivers the message. An mpsc send that is cancelled after it
+//! wrote part of its message cannot reset the stream, which would drop earlier
+//! messages that the receiver did not read yet. The next send writes the rest
+//! of the frame with the marker for an aborted message instead, and the
+//! receiver drops that message, so a cancelled send is not delivered, as for a
+//! local channel. If the sender drops instead, the stream ends in the middle of
+//! the message.
 //!
 //! # Error codes
 //!
@@ -97,7 +104,7 @@ use std::{
 use n0_error::{e, stack_error};
 use n0_future::future::Boxed as BoxFuture;
 use noq::{ConnectionError, VarInt};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use smallvec::{SmallVec, smallvec};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tracing::{Instrument, debug, trace, warn};
@@ -733,6 +740,7 @@ impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
             NoqSenderState::Open(NoqSenderInner {
                 send: write,
                 buffer: SmallVec::new(),
+                written: 0,
                 span: tracing::Span::current(),
                 sent: 0,
                 _marker: PhantomData,
@@ -771,6 +779,18 @@ enum Frame {
     Whole { body: Range<usize> },
     /// The length prefix exceeds [`MAX_MESSAGE_SIZE`].
     TooLarge,
+}
+
+/// How an mpsc message ends: the last part of its frame, after the message.
+///
+/// Each variant encodes as one byte, so a sender can mark a message that it
+/// already started as aborted by encoding the last byte again.
+#[derive(Debug, Serialize, Deserialize)]
+enum MessageEnd {
+    /// The receiver delivers the message.
+    Complete,
+    /// The send of the message was cancelled, so the receiver drops it.
+    Aborted,
 }
 
 /// Finds the next length-prefixed message at the start of `buf`, if it is all there.
@@ -817,10 +837,15 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                         self.buf.truncate(INLINE_FRAME_SIZE);
                         self.buf.shrink_to_fit();
                     }
-                    let msg = msg.map_err(|err| {
+                    let (msg, end) = msg.map_err(|err| {
                         self.recv.stop(ErrorCode::MessageDecodeFailed.into()).ok();
                         e!(mpsc::RecvError::DecodeFailed, err)
                     })?;
+                    if let MessageEnd::Aborted = end {
+                        self.span
+                            .in_scope(|| debug!("dropped a message whose send was cancelled"));
+                        continue;
+                    }
                     self.received += 1;
                     if self.received == 1 {
                         self.span.in_scope(|| debug!("first message received"));
@@ -877,7 +902,16 @@ fn clear_frame(buf: &mut SmallVec<[u8; INLINE_FRAME_SIZE]>) {
 
 struct NoqSenderInner<T> {
     send: noq::SendStream,
+    /// The encoded message that is being sent.
     buffer: SmallVec<[u8; INLINE_FRAME_SIZE]>,
+    /// How many bytes of `buffer` the stream has taken.
+    ///
+    /// A send that is cancelled leaves its message here. If none of it was
+    /// written, the next send drops it. Otherwise the next send writes the
+    /// rest first, ending with [`MessageEnd::Aborted`], so that the stream
+    /// stays a sequence of whole messages and the receiver drops this one. If
+    /// the sender drops instead, the stream ends in the middle of the message.
+    written: usize,
     /// The span in which the sender was created, for the logs of the first message and the end.
     span: tracing::Span,
     sent: u64,
@@ -893,38 +927,63 @@ impl<T: RpcMessage> NoqSenderInner<T> {
         }
     }
 
-    fn send(
-        &mut self,
-        value: T,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + Sync + '_>> {
-        Box::pin(async move {
-            encode_message(&value, &mut self.buffer, &mut self.send)?;
-            // Unlike the oneshot sender, this does not reset the stream if the
-            // send drops in the middle of the message: a reset can drop earlier
-            // messages that the receiver did not read yet.
-            self.send.write_all(&self.buffer).await?;
-            clear_frame(&mut self.buffer);
-            self.record_sent();
-            Ok(())
-        })
+    /// Writes the rest of the message in `buffer`.
+    ///
+    /// Cancel safe: the progress is in `written`.
+    async fn write_rest(&mut self) -> Result<(), SendError> {
+        while self.written < self.buffer.len() {
+            self.written += self.send.write(&self.buffer[self.written..]).await?;
+        }
+        clear_frame(&mut self.buffer);
+        self.written = 0;
+        Ok(())
     }
 
-    fn try_send(
-        &mut self,
-        value: T,
-    ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + Sync + '_>> {
-        Box::pin(async move {
-            // todo: move the non-async part out of the box. Will require a new return type.
-            encode_message(&value, &mut self.buffer, &mut self.send)?;
-            let Some(n) = now_or_never(self.send.write(&self.buffer)) else {
-                return Ok(false);
-            };
-            let n = n?;
-            self.send.write_all(&self.buffer[n..]).await?;
+    /// Prepares the buffer for a new message.
+    ///
+    /// Drops a message that a cancelled send did not start. A message that a
+    /// cancelled send started is written to the end, but marked as aborted, so
+    /// that the receiver drops it.
+    async fn prepare(&mut self) -> Result<(), SendError> {
+        if self.written > 0 {
+            let last = self.buffer.len() - 1;
+            postcard::to_slice(&MessageEnd::Aborted, &mut self.buffer[last..])
+                .expect("the end of a message is one byte");
+            self.write_rest().await?;
+        }
+        clear_frame(&mut self.buffer);
+        Ok(())
+    }
+
+    /// Encodes `value` into the buffer, as a message that the receiver delivers.
+    fn encode(&mut self, value: &T) -> Result<(), SendError> {
+        let frame = (value, MessageEnd::Complete);
+        encode_message(&frame, &mut self.buffer, &mut self.send)
+    }
+
+    async fn send(&mut self, value: T) -> Result<(), SendError> {
+        self.prepare().await?;
+        self.encode(&value)?;
+        self.write_rest().await?;
+        self.record_sent();
+        Ok(())
+    }
+
+    async fn try_send(&mut self, value: T) -> Result<bool, SendError> {
+        // A started message goes first: if it cannot, this one cannot either.
+        let Some(res) = now_or_never(self.prepare()) else {
+            return Ok(false);
+        };
+        res?;
+        self.encode(&value)?;
+        let Some(n) = now_or_never(self.send.write(&self.buffer)) else {
             clear_frame(&mut self.buffer);
-            self.record_sent();
-            Ok(true)
-        })
+            return Ok(false);
+        };
+        self.written = n?;
+        self.write_rest().await?;
+        self.record_sent();
+        Ok(true)
     }
 }
 
@@ -936,22 +995,25 @@ enum NoqSenderState<T> {
     Closed(Option<ErrorCode>),
 }
 
-impl<T> NoqSenderState<T> {
-    /// Takes the state for a send, and leaves the sender closed until the send puts it back.
+impl<T: RpcMessage> NoqSenderState<T> {
+    /// Runs `f` on the open sender, and closes the sender if it fails.
     ///
-    /// A cancelled send never puts it back, so the sender stays closed: the
-    /// stream can hold part of a message.
-    fn take_for_send(&mut self) -> Self {
-        std::mem::replace(self, Self::Closed(None))
-    }
-
-    /// Returns the state after a send, so that later sends fail with the same error.
-    fn after_send<R>(sender: NoqSenderInner<T>, res: &Result<R, SendError>) -> Self {
-        match res {
-            Ok(_) => Self::Open(sender),
-            Err(SendError::ReceiverClosed { .. }) => Self::Closed(Some(ErrorCode::Closed)),
-            Err(err) => Self::Closed(err.remote_code()),
+    /// If the future is dropped, the progress of the send stays in the sender.
+    async fn run<R>(
+        &mut self,
+        f: impl AsyncFnOnce(&mut NoqSenderInner<T>) -> Result<R, SendError>,
+    ) -> Result<R, SendError> {
+        let sender = match self {
+            Self::Open(sender) => sender,
+            Self::Closed(code) => return Err(SendError::closed(*code)),
+        };
+        let res = f(sender).await;
+        match &res {
+            Ok(_) => {}
+            Err(SendError::ReceiverClosed { .. }) => *self = Self::Closed(Some(ErrorCode::Closed)),
+            Err(err) => *self = Self::Closed(err.remote_code()),
         }
+        res
     }
 }
 
@@ -978,19 +1040,8 @@ impl<T> Debug for NoqSender<T> {
 impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>> {
         Box::pin(async {
-            let mut guard = self.0.lock().await;
-            let sender = guard.take_for_send();
-            match sender {
-                NoqSenderState::Open(mut sender) => {
-                    let res = sender.send(value).await;
-                    *guard = NoqSenderState::after_send(sender, &res);
-                    res
-                }
-                NoqSenderState::Closed(code) => {
-                    *guard = NoqSenderState::Closed(code);
-                    Err(SendError::closed(code))
-                }
-            }
+            let mut state = self.0.lock().await;
+            state.run(async |sender| sender.send(value).await).await
         })
     }
 
@@ -999,19 +1050,8 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
         value: T,
     ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + '_>> {
         Box::pin(async {
-            let mut guard = self.0.lock().await;
-            let sender = guard.take_for_send();
-            match sender {
-                NoqSenderState::Open(mut sender) => {
-                    let res = sender.try_send(value).await;
-                    *guard = NoqSenderState::after_send(sender, &res);
-                    res
-                }
-                NoqSenderState::Closed(code) => {
-                    *guard = NoqSenderState::Closed(code);
-                    Err(SendError::closed(code))
-                }
-            }
+            let mut state = self.0.lock().await;
+            state.run(async |sender| sender.try_send(value).await).await
         })
     }
 

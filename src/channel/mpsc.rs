@@ -234,8 +234,9 @@ impl<T> TryFrom<Sender<T>> for tokio::sync::mpsc::Sender<T> {
 pub trait DynSender<T>: Debug + Send + Sync + 'static {
     /// Send a message.
     ///
-    /// For the remote case, if the message can not be completely sent,
-    /// this must return an error and disable the channel.
+    /// For the remote case, the receiver gets a message either completely or
+    /// not at all. If the send is cancelled, the message must not be
+    /// delivered, and the sender must stay usable.
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>>;
 
     /// Try to send a message, returning as fast as possible if sending
@@ -296,10 +297,8 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// ## Cancellation safety
     ///
-    /// If the future is dropped before completion, and if this is a remote sender,
-    /// then the sender will be closed and further sends will return an [`SendError::Io`]
-    /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
-    /// future until completion if you want to reuse the sender or any clone afterwards.
+    /// If the future is dropped before completion, the message is not
+    /// delivered, and the sender stays usable.
     pub async fn send(&self, value: T) -> Result<(), SendError> {
         match self {
             Sender::Tokio(tx) => tx
@@ -327,10 +326,8 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// ## Cancellation safety
     ///
-    /// If the future is dropped before completion, and if this is a remote sender,
-    /// then the sender will be closed and further sends will return an [`SendError::Io`]
-    /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
-    /// future until completion if you want to reuse the sender or any clone afterwards.
+    /// If the future is dropped before completion, the message is not
+    /// delivered, and the sender stays usable.
     pub async fn try_send(&self, value: T) -> Result<bool, SendError> {
         match self {
             Sender::Tokio(tx) => match tx.try_send(value) {
