@@ -248,8 +248,9 @@ impl<T> TryFrom<Sender<T>> for tokio::sync::mpsc::Sender<T> {
 pub trait DynSender<T>: Debug + Send + Sync + 'static {
     /// Send a message.
     ///
-    /// For the remote case, if the message can not be completely sent,
-    /// this must return an error and disable the channel.
+    /// For the remote case, a message is either sent completely or not at
+    /// all. If the send is cancelled after part of the message was written,
+    /// the rest must still be sent.
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>>;
 
     /// Try to send a message, returning as fast as possible if sending
@@ -302,10 +303,11 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// ## Cancellation safety
     ///
-    /// If the future is dropped before completion, and if this is a remote sender,
-    /// then the sender will be closed and further sends will return
-    /// `SendError::Closed`. Therefore, make sure to always poll the
-    /// future until completion if you want to reuse the sender or any clone afterwards.
+    /// If the future is dropped before completion, the sender stays usable.
+    /// For a local sender, the message is not sent. For a remote sender, the
+    /// message is not sent if none of it was written yet; otherwise the rest
+    /// of it is still sent. So re-sending a message after a cancelled send
+    /// can deliver it twice to a remote receiver.
     pub async fn send(&self, value: T) -> Result<(), SendError> {
         match self {
             Sender::Tokio(tx) => tx
@@ -333,10 +335,11 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// ## Cancellation safety
     ///
-    /// If the future is dropped before completion, and if this is a remote sender,
-    /// then the sender will be closed and further sends will return
-    /// `SendError::Closed`. Therefore, make sure to always poll the
-    /// future until completion if you want to reuse the sender or any clone afterwards.
+    /// If the future is dropped before completion, the sender stays usable.
+    /// For a local sender, the message is not sent. For a remote sender, the
+    /// message is not sent if none of it was written yet; otherwise the rest
+    /// of it is still sent. So re-sending a message after a cancelled send
+    /// can deliver it twice to a remote receiver.
     pub async fn try_send(&self, value: T) -> Result<bool, SendError> {
         match self {
             Sender::Tokio(tx) => match tx.try_send(value) {

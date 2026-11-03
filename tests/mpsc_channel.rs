@@ -2,7 +2,7 @@
 
 use std::{io, time::Duration};
 
-use irpc::noq::{configure_client, make_server_endpoint};
+use irpc::noq::{configure_client, configure_server, make_client_endpoint, make_server_endpoint};
 use irpc::{
     Client, WithChannels,
     channel::{
@@ -24,97 +24,31 @@ use tokio::time::timeout;
 mod common;
 use common::*;
 
-/// Checks that all clones of a `Sender` will get the closed signal as soon as
-/// a send fails because the receiver ended the channel.
+/// Checks that sends cancelled at any point leave whole messages, and the sender and its clones usable.
 #[tokio::test]
-async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
-    tracing_subscriber::fmt::try_init().ok();
+async fn mpsc_cancelled_sends_keep_clones_usable() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
-    // accept a single bidi stream on a single connection, then immediately stop it
-    let server = tokio::spawn(async move {
-        let conn = server.accept().await.unwrap().await?;
-        let (_, mut recv) = conn.accept_bi().await?;
-        recv.stop(1u8.into())?;
-        TestResult::Ok(())
-    });
+    let server = tokio::spawn(collect_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (send, _) = conn.open_bi().await?;
     let send1 = mpsc::Sender::<Vec<u8>>::from(send);
     let send2 = send1.clone();
-    let send3 = send1.clone();
-    let second_client = tokio::spawn(async move {
-        send2.closed().await;
-    });
-    let third_client = tokio::spawn(async move {
-        // this fails eventually, since the server stops the stream and closes the connection
-        while !matches!(
-            send3.send(vec![1, 2, 3]).await,
-            Err(SendError::Remote { .. } | SendError::ConnectionClosed { .. })
-        ) {}
-    });
-    // send until we get an error because the remote side stopped the stream
-    while send1.send(vec![1, 2, 3]).await.is_ok() {}
-    // the server stops the stream with code 1 and then closes the connection, so a
-    // later send gets one of these, not an io error
-    match send1.send(vec![4, 5, 6]).await {
-        Err(SendError::Remote { code, .. }) => assert_eq!(code, ErrorCode::RequestAborted),
-        Err(SendError::ConnectionClosed { close, .. }) => assert_eq!(close.code(), None),
-        e => panic!("Expected Remote or ConnectionClosed, got {e:?}"),
-    };
-    // check that closed signal was received by the second sender
-    second_client.await?;
-    // check that the third sender will get the right kind of io error eventually
-    third_client.await?;
-    // server should finish without errors
-    server.await??;
-    Ok(())
-}
-
-/// Checks that all clones of a `Sender` will get the closed signal as soon as
-/// a send future gets dropped before completing.
-#[tokio::test]
-async fn mpsc_sender_clone_drop_error() -> TestResult<()> {
-    let (server, client, server_addr) = create_connected_endpoints()?;
-    // accept a single bidi stream on a single connection, then read indefinitely
-    // until we get an error or the stream is finished
-    let server = tokio::spawn(async move {
-        let conn = server.accept().await.unwrap().await?;
-        let (_, mut recv) = conn.accept_bi().await?;
-        let mut buf = vec![0u8; 1024];
-        while let Ok(Some(_)) = recv.read(&mut buf).await {}
-        TestResult::Ok(())
-    });
-    let conn = client.connect(server_addr, "localhost")?.await?;
-    let (send, _) = conn.open_bi().await?;
-    let send1 = mpsc::Sender::<Vec<u8>>::from(send);
-    let send2 = send1.clone();
-    let send3 = send1.clone();
-    let second_client = tokio::spawn(async move {
-        send2.closed().await;
-    });
-    let third_client = tokio::spawn(async move {
-        // this fails eventually, since a cancelled send closes the sender
-        while !matches!(
-            send3.send(vec![1, 2, 3]).await,
-            Err(SendError::Closed { .. })
-        ) {}
-    });
-    // send a lot of data with a tiny timeout, this will cause the send future to be dropped
-    loop {
-        let send_future = send1.send(vec![0u8; 1024 * 1024]);
-        // not sure if there is a better way. I want to poll the future a few times so it has time to
-        // start sending, but don't want to give it enough time to complete.
-        // I don't think now_or_never would work, since it wouldn't have time to start sending
-        if timeout(Duration::from_micros(1), send_future)
-            .await
-            .is_err()
-        {
-            break;
+    let mut cancelled = 0;
+    for _ in 0..20 {
+        // A tiny timeout cancels the send before, while, or after it writes.
+        let fut = send1.send(vec![1u8; 1024 * 1024]);
+        if timeout(Duration::from_micros(1), fut).await.is_err() {
+            cancelled += 1;
         }
     }
-    server.await??;
-    second_client.await?;
-    third_client.await?;
+    assert!(cancelled > 0, "no send was cancelled");
+    send2.send(vec![2]).await?;
+    drop((send1, send2));
+    let msgs = server.await??;
+    assert_eq!(msgs.last(), Some(&vec![2]));
+    for msg in &msgs[..msgs.len() - 1] {
+        assert!(msg.len() == 1024 * 1024 && msg.iter().all(|b| *b == 1));
+    }
     Ok(())
 }
 
@@ -344,9 +278,9 @@ async fn mpsc_truncated_size() -> TestResult<()> {
     Ok(())
 }
 
-/// Checks that a send that is cancelled in the middle of the message ends the stream for the receiver.
+/// Checks that a send that is cancelled in the middle of the message still sends the rest.
 #[tokio::test]
-async fn mpsc_cancelled_send_ends_stream() -> TestResult<()> {
+async fn mpsc_partly_cancelled_send_is_completed() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
@@ -354,14 +288,73 @@ async fn mpsc_cancelled_send_ends_stream() -> TestResult<()> {
     let send = mpsc::Sender::<Vec<u8>>::from(send);
     send.send(vec![7]).await?;
     // The message is larger than the flow control window, so one poll cannot write all of it.
-    let mut fut = Box::pin(send.send(vec![0u8; 8 * 1024 * 1024]));
+    let big = vec![9u8; 8 * 1024 * 1024];
+    let mut fut = Box::pin(send.send(big.clone()));
     assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
     drop(fut);
-    assert_eq!(server.await??, vec![vec![7]]);
-    assert!(matches!(
-        send.send(vec![8]).await,
-        Err(SendError::Closed { .. })
-    ));
+    send.send(vec![8]).await?;
+    drop(send);
+    assert_eq!(server.await??, vec![vec![7], big, vec![8]]);
+    Ok(())
+}
+
+/// Checks that the rest of a partly cancelled send is sent also when the sender is dropped right after.
+#[tokio::test]
+async fn mpsc_partly_cancelled_send_is_completed_after_drop() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(collect_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    let big = vec![9u8; 8 * 1024 * 1024];
+    let mut fut = Box::pin(send.send(big.clone()));
+    assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
+    drop(fut);
+    drop(send);
+    assert_eq!(server.await??, vec![big]);
+    Ok(())
+}
+
+/// Checks that a send that is cancelled before it wrote anything is not sent, as for a local channel.
+#[tokio::test]
+async fn mpsc_unstarted_cancelled_send_is_not_sent() -> TestResult<()> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    // A small window, so that the stream is full after a few messages.
+    let (mut config, cert) = configure_server()?;
+    std::sync::Arc::get_mut(&mut config.transport)
+        .unwrap()
+        .stream_receive_window(64u32.into());
+    let server = noq::Endpoint::server(config, addr)?;
+    let server_addr = server.local_addr()?;
+    let client = make_client_endpoint(addr, &[cert.as_slice()])?;
+    let (start_reading, reading) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        reading.await?;
+        let mut recv = Receiver::<()>::from(recv);
+        let mut received = 0;
+        while recv.recv().await?.is_some() {
+            received += 1;
+        }
+        TestResult::Ok(received)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<()>::from(send);
+    // `()` is a single byte on the wire, so a send writes all of it or nothing.
+    let mut sent = 0;
+    loop {
+        let mut fut = Box::pin(send.send(()));
+        if poll_once(&mut fut).await.is_none() {
+            break;
+        }
+        sent += 1;
+    }
+    start_reading.send(()).unwrap();
+    send.send(()).await?;
+    drop(send);
+    assert_eq!(server.await??, sent + 1);
     Ok(())
 }
 
