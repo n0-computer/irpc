@@ -740,6 +740,11 @@ fn read_error(err: &io::Error) -> Option<&noq::ReadError> {
     err.get_ref()?.downcast_ref()
 }
 
+/// Returns the noq write error in `err`, if the stream failed.
+fn write_error(err: &io::Error) -> Option<&noq::WriteError> {
+    err.get_ref()?.downcast_ref()
+}
+
 /// Reads the size prefix of a message, or returns `None` at the end of the stream.
 ///
 /// A size prefix that does not fit in a `u64` is larger than
@@ -1022,6 +1027,8 @@ enum CloseReason {
     Remote(ErrorCode),
     /// The connection was closed on purpose.
     ConnectionClosed(ConnectionClose),
+    /// The stream failed, for example because the connection was lost.
+    Io(noq::WriteError),
     /// This sender closed the channel after an error or a cancelled send.
     Other,
 }
@@ -1032,6 +1039,7 @@ impl CloseReason {
             Self::ReceiverClosed => e!(SendError::ReceiverClosed),
             Self::Remote(code) => e!(SendError::Remote { code }),
             Self::ConnectionClosed(close) => e!(SendError::ConnectionClosed { close }),
+            Self::Io(err) => e!(SendError::Io, err.into()),
             Self::Other => e!(SendError::Closed),
         }
     }
@@ -1055,6 +1063,10 @@ impl<T> NoqSenderState<T> {
             Err(SendError::ConnectionClosed { close, .. }) => {
                 Self::Closed(CloseReason::ConnectionClosed(close.clone()))
             }
+            Err(SendError::Io { source, .. }) => match write_error(source) {
+                Some(err) => Self::Closed(CloseReason::Io(err.clone())),
+                None => Self::Closed(CloseReason::Other),
+            },
             Err(_) => Self::Closed(CloseReason::Other),
         }
     }

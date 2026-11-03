@@ -82,8 +82,9 @@ pub enum SendError {
     /// This sender closed the channel after an earlier send failed or was cancelled.
     ///
     /// An earlier send on this sender or a clone of it found its message bad,
-    /// failed with an io error, or was dropped before it was done. The stream
-    /// can hold part of a message, so this sender sends no more messages.
+    /// or was dropped before it was done. The stream can hold part of a
+    /// message, so this sender sends no more messages. After an io error,
+    /// later sends get the same io error instead.
     #[cfg(feature = "rpc")]
     #[error("Sender closed after an earlier error")]
     Closed,
