@@ -78,6 +78,11 @@
 //! local channel. If the sender drops instead, the stream ends in the middle of
 //! the message.
 //!
+//! The marker is compatible with earlier versions of irpc, which have no
+//! marker. Such a version decodes the message and ignores the byte after it,
+//! so it delivers a cancelled message that it gets. A frame without a marker
+//! counts as a complete message.
+//!
 //! # Error codes
 //!
 //! irpc closes connections, and stops and resets streams, with the codes of
@@ -793,6 +798,19 @@ enum MessageEnd {
     Aborted,
 }
 
+/// Decodes an mpsc frame into its message and the marker after it.
+///
+/// A frame from an earlier version of irpc ends after the message, and counts as complete.
+fn decode_frame<T: DeserializeOwned>(buf: &[u8]) -> postcard::Result<(T, MessageEnd)> {
+    let (msg, rest) = postcard::take_from_bytes(buf)?;
+    let end = match rest {
+        [] => MessageEnd::Complete,
+        [_] => postcard::from_bytes(rest)?,
+        _ => return Err(postcard::Error::DeserializeBadEncoding),
+    };
+    Ok((msg, end))
+}
+
 /// Finds the next length-prefixed message at the start of `buf`, if it is all there.
 fn parse_frame(buf: &[u8]) -> io::Result<Frame> {
     // The length prefix is a postcard varint, so postcard parses it.
@@ -827,7 +845,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
         loop {
             match parse_frame(&self.buf[..self.end])? {
                 Frame::Whole { body } => {
-                    let msg = postcard::from_bytes(&self.buf[body.clone()]);
+                    let msg = decode_frame(&self.buf[body.clone()]);
                     self.buf.copy_within(body.end..self.end, 0);
                     self.end -= body.end;
                     // For large frames, we resized the buffer to exactly the frame size.
