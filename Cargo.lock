@@ -1538,6 +1538,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "iroh",
+ "irpc 0.17.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "irpc-derive",
  "lazy_static",
  "n0-error",
@@ -1562,6 +1563,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "irpc"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3623d6ff582b415904b29bbe6ebcb4a4f9a262ccdee05a45fdd003ef0950c386"
+dependencies = [
+ "n0-error",
+ "n0-future",
+ "noq",
+ "postcard",
+ "serde",
+ "smallvec",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "irpc-derive"
 version = "0.17.0"
 dependencies = [
@@ -1577,7 +1595,7 @@ dependencies = [
  "anyhow",
  "clap",
  "iroh",
- "irpc",
+ "irpc 0.17.0",
  "n0-error",
  "n0-future",
  "opentelemetry",
