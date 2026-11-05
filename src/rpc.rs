@@ -677,24 +677,41 @@ impl From<noq::SendStream> for NoSender {
 }
 
 impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
-    fn from(mut writer: noq::SendStream) -> Self {
-        // A server creates the sender in the request span, and logs the response in it.
-        let span = tracing::Span::current();
-        oneshot::Sender::from_boxed(Box::new(move |value| {
-            Box::pin(async move {
-                // write via a small buffer to avoid allocation for small values
-                let mut buf = SmallVec::new();
-                encode_message(&value, &mut buf, &mut writer)?;
-                // If this send drops in the middle of the message, reset the
-                // stream, so the receiver gets an error instead of a part of it.
-                let mut guard = ResetOnDrop::new(&mut writer, ErrorCode::MessageAborted);
-                let res = guard.get_mut().write_all(&buf).await;
-                guard.into_inner();
-                res?;
-                span.in_scope(|| debug!("response sent"));
-                Ok(())
-            })
+    fn from(writer: noq::SendStream) -> Self {
+        oneshot::Sender::from_boxed(Box::new(NoqOneshotSender {
+            writer,
+            // A server creates the sender in the request span, and logs the response in it.
+            span: tracing::Span::current(),
         }))
+    }
+}
+
+#[derive(Debug)]
+struct NoqOneshotSender {
+    writer: noq::SendStream,
+    span: tracing::Span,
+}
+
+impl<T: RpcMessage> oneshot::DynSender<T> for NoqOneshotSender {
+    fn send(self: Box<Self>, value: T) -> BoxFuture<Result<(), SendError>> {
+        let Self { mut writer, span } = *self;
+        Box::pin(async move {
+            // write via a small buffer to avoid allocation for small values
+            let mut buf = SmallVec::new();
+            encode_message(&value, &mut buf, &mut writer)?;
+            // If this send drops in the middle of the message, reset the
+            // stream, so the receiver gets an error instead of a part of it.
+            let mut guard = ResetOnDrop::new(&mut writer, ErrorCode::MessageAborted);
+            let res = guard.get_mut().write_all(&buf).await;
+            guard.into_inner();
+            res?;
+            span.in_scope(|| debug!("response sent"));
+            Ok(())
+        })
+    }
+
+    fn is_rpc(&self) -> bool {
+        true
     }
 }
 
