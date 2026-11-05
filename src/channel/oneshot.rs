@@ -113,23 +113,24 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     (tx.into(), rx.into())
 }
 
-/// A generic boxed sender.
+/// A sender that can be wrapped in a `Box<dyn DynSender<T>>`.
 ///
 /// Remote senders are always boxed, since for remote communication the boxing
 /// overhead is negligible. However, boxing can also be used for local communication,
 /// e.g. when applying a transform or filter to the message before sending it.
-pub type BoxedSender<T> =
-    Box<dyn FnOnce(T) -> BoxFuture<Result<(), SendError>> + Send + Sync + 'static>;
+pub trait DynSender<T>: Debug + Send + Sync + 'static {
+    /// Send a message, consuming the sender.
+    fn send(self: Box<Self>, value: T) -> BoxFuture<Result<(), SendError>>;
 
-/// A sender that can be wrapped in a `Box<dyn DynSender<T>>`.
-///
-/// In addition to implementing `Future`, this provides a fn to check if the sender is
-/// an rpc sender.
-///
-/// Remote receivers are always boxed, since for remote communication the boxing
-/// overhead is negligible. However, boxing can also be used for local communication,
-/// e.g. when applying a transform or filter to the message before receiving it.
-pub trait DynSender<T>: Future<Output = Result<(), SendError>> + Send + Sync + 'static {
+    /// True if sending can fail in more ways than the receiver being dropped.
+    ///
+    /// Return false if this sender only fails with [`SendError::ReceiverClosed`],
+    /// e.g. a transform around an in-memory channel. Return true if it goes
+    /// through a connection that can break on its own, even a local one such
+    /// as shared memory between processes. Wrappers should forward the value
+    /// of the sender they wrap.
+    ///
+    /// See [`Sender::is_rpc`].
     fn is_rpc(&self) -> bool;
 }
 
@@ -147,17 +148,14 @@ pub type BoxedReceiver<T> = BoxFuture<Result<T, RecvError>>;
 /// behaves like a local oneshot sender and has no overhead in the local case.
 pub enum Sender<T> {
     Tokio(tokio::sync::oneshot::Sender<T>),
-    /// we can't yet distinguish between local and remote boxed oneshot senders.
-    /// If we ever want to have local boxed oneshot senders, we need to add a
-    /// third variant here.
-    Boxed(BoxedSender<T>),
+    Boxed(Box<dyn DynSender<T>>),
 }
 
 impl<T> Debug for Sender<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tokio(_) => f.debug_tuple("Tokio").finish(),
-            Self::Boxed(_) => f.debug_tuple("Boxed").finish(),
+            Self::Boxed(sender) => f.debug_tuple("Boxed").field(sender).finish(),
         }
     }
 }
@@ -184,10 +182,13 @@ impl<T> Sender<T> {
     ///
     /// If this is a boxed sender that represents a remote connection, sending may yield or fail with an io error.
     /// Local senders will never yield, but can fail if the receiver has been closed.
-    pub async fn send(self, value: T) -> Result<(), SendError> {
+    pub async fn send(self, value: T) -> Result<(), SendError>
+    where
+        T: 'static,
+    {
         match self {
             Sender::Tokio(tx) => tx.send(value).map_err(|_| e!(SendError::ReceiverClosed)),
-            Sender::Boxed(f) => f(value).await,
+            Sender::Boxed(sender) => sender.send(value).await,
         }
     }
 
@@ -199,15 +200,15 @@ impl<T> Sender<T> {
     /// that can break on its own is rpc, even if both ends are on the same
     /// machine, e.g. shared memory between processes.
     ///
-    /// Currently this returns true for every boxed sender, including in-memory
-    /// senders created with [`Self::with_map`] or [`Self::with_filter_map`].
+    /// A sender created with [`Self::with_map`] or [`Self::with_filter_map`]
+    /// is rpc if the sender it wraps is.
     pub fn is_rpc(&self) -> bool
     where
         T: 'static,
     {
         match self {
             Sender::Tokio(_) => false,
-            Sender::Boxed(_) => true,
+            Sender::Boxed(sender) => sender.is_rpc(),
         }
     }
 }
@@ -237,17 +238,44 @@ impl<T: Send + Sync + 'static> Sender<T> {
         F: Fn(U) -> Option<T> + Send + Sync + 'static,
         U: Send + Sync + 'static,
     {
-        let inner: BoxedSender<U> = Box::new(move |value| {
-            let opt = f(value);
-            Box::pin(async move {
-                if let Some(v) = opt {
-                    self.send(v).await
-                } else {
-                    Ok(())
-                }
-            })
-        });
-        Sender::Boxed(inner)
+        Sender::Boxed(Box::new(FilterMapSender { inner: self, f }))
+    }
+}
+
+/// A sender that applies a filter and transform before sending to the inner sender.
+struct FilterMapSender<T, F> {
+    inner: Sender<T>,
+    f: F,
+}
+
+impl<T, F> Debug for FilterMapSender<T, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilterMapSender")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T, U, F> DynSender<U> for FilterMapSender<T, F>
+where
+    T: Send + Sync + 'static,
+    U: Send + Sync + 'static,
+    F: Fn(U) -> Option<T> + Send + Sync + 'static,
+{
+    fn send(self: Box<Self>, value: U) -> BoxFuture<Result<(), SendError>> {
+        let Self { inner, f } = *self;
+        let opt = f(value);
+        Box::pin(async move {
+            if let Some(v) = opt {
+                inner.send(v).await
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn is_rpc(&self) -> bool {
+        self.inner.is_rpc()
     }
 }
 
