@@ -67,9 +67,18 @@
 //!
 //! A oneshot sender that drops its message before it wrote all of it, for
 //! example because the future of the send was dropped, resets its stream with
-//! [`ErrorCode::MessageAborted`]. An mpsc sender does not: a reset can drop
-//! earlier messages that the receiver did not read yet, so the receiver reads a
-//! part of the message instead.
+//! [`ErrorCode::MessageAborted`].
+//!
+//! An mpsc message is a [COBS] frame: the message without zero bytes, ended
+//! by a zero byte. An mpsc send that is cancelled after it wrote part of its
+//! message cannot reset the stream, which would drop earlier messages that the
+//! receiver did not read yet. The next send ends the frame with a zero in the
+//! middle of a block instead, which makes the frame invalid, and the receiver
+//! drops that message. So a cancelled send is not delivered, as for a local
+//! channel, and costs at most two bytes more on the wire. If the sender drops
+//! instead, the stream ends in the middle of the message.
+//!
+//! [COBS]: https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuffing
 //!
 //! # Error codes
 //!
@@ -88,7 +97,6 @@ use std::{
     future::Future,
     io,
     marker::PhantomData,
-    mem,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, ready},
@@ -103,6 +111,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tracing::{Instrument, debug, trace, warn};
 
 #[cfg(feature = "iroh")]
+mod cobs;
 pub(crate) mod iroh_impl;
 pub(crate) mod noq_impl;
 
@@ -505,10 +514,7 @@ enum EncodeError {
 
 /// Encodes `value` with its size prefix into `buf`.
 fn encode(value: &impl Serialize, buf: &mut SmallVec<[u8; 128]>) -> Result<(), EncodeError> {
-    let size = postcard::experimental::serialized_size(value).map_err(EncodeError::Failed)? as u64;
-    if size > MAX_MESSAGE_SIZE {
-        return Err(EncodeError::MaxSizeExceeded);
-    }
+    let size = encoded_size(value)?;
     buf.clear();
     buf.write_varint_u64(size)
         .expect("a buffer does not fail to write");
@@ -516,7 +522,25 @@ fn encode(value: &impl Serialize, buf: &mut SmallVec<[u8; 128]>) -> Result<(), E
     Ok(())
 }
 
-/// Encodes the channel message `value` with its size prefix into `buf`.
+/// Returns the size of `value` in postcard, if it is not larger than [`MAX_MESSAGE_SIZE`].
+fn encoded_size(value: &impl Serialize) -> Result<u64, EncodeError> {
+    let size = postcard::experimental::serialized_size(value).map_err(EncodeError::Failed)? as u64;
+    if size > MAX_MESSAGE_SIZE {
+        return Err(EncodeError::MaxSizeExceeded);
+    }
+    Ok(size)
+}
+
+/// Encodes `value` as a COBS frame into `buf`.
+fn encode_cobs(value: &impl Serialize, buf: &mut SmallVec<[u8; 128]>) -> Result<(), EncodeError> {
+    encoded_size(value)?;
+    let encoder =
+        postcard::to_io(value, cobs::CobsEncoder::new(buf)).map_err(EncodeError::Failed)?;
+    encoder.finish();
+    Ok(())
+}
+
+/// Encodes the oneshot message `value` with its size prefix into `buf`.
 ///
 /// Resets `send` if `value` is too large or does not encode, so the receiver
 /// gets an error instead of the end of the stream.
@@ -525,7 +549,27 @@ fn encode_message(
     buf: &mut SmallVec<[u8; 128]>,
     send: &mut noq::SendStream,
 ) -> Result<(), SendError> {
-    encode(value, buf).map_err(|err| {
+    reset_on_error(encode(value, buf), send)
+}
+
+/// Encodes the mpsc message `value` as a COBS frame into `buf`.
+///
+/// Resets `send` if `value` is too large or does not encode, so the receiver
+/// gets an error instead of the end of the stream.
+fn encode_frame(
+    value: &impl Serialize,
+    buf: &mut SmallVec<[u8; 128]>,
+    send: &mut noq::SendStream,
+) -> Result<(), SendError> {
+    reset_on_error(encode_cobs(value, buf), send)
+}
+
+/// Resets `send` with the code for an encode error.
+fn reset_on_error(
+    res: Result<(), EncodeError>,
+    send: &mut noq::SendStream,
+) -> Result<(), SendError> {
+    res.map_err(|err| {
         let (code, err) = match err {
             EncodeError::MaxSizeExceeded => (
                 ErrorCode::MessageMaxSizeExceeded,
@@ -663,7 +707,10 @@ impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
             span: tracing::Span::current(),
             received: 0,
             finished: false,
-            progress: ReadProgress::default(),
+            decoder: Default::default(),
+            read_buf: Box::default(),
+            read_pos: 0,
+            read_len: 0,
             _marker: PhantomData,
         }))
     }
@@ -704,6 +751,7 @@ impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
             NoqSenderState::Open(NoqSenderInner {
                 send: write,
                 buffer: SmallVec::new(),
+                written: 0,
                 span: tracing::Span::current(),
                 sent: 0,
                 _marker: PhantomData,
@@ -720,25 +768,17 @@ struct NoqReceiver<T> {
     span: tracing::Span,
     received: u64,
     finished: bool,
-    /// How much of the next message the receiver has read, kept across polls.
-    progress: ReadProgress,
+    /// How much of the next message the receiver has decoded, kept across polls.
+    decoder: cobs::CobsDecoder,
+    /// Bytes read from the stream, of which `read_pos..read_len` are not decoded yet.
+    read_buf: Box<[u8]>,
+    read_pos: usize,
+    read_len: usize,
     _marker: std::marker::PhantomData<T>,
 }
 
-/// How much of a length-prefixed message a remote receiver has read.
-#[derive(Debug)]
-enum ReadProgress {
-    /// The varint length so far: `value` holds the bits below `shift`.
-    Length { value: u64, shift: u32 },
-    /// The body, of which the first `filled` bytes have arrived.
-    Body { buf: Vec<u8>, filled: usize },
-}
-
-impl Default for ReadProgress {
-    fn default() -> Self {
-        Self::Length { value: 0, shift: 0 }
-    }
-}
+/// The size of the read buffer of a remote mpsc receiver.
+const READ_BUF_SIZE: usize = 8 * 1024;
 
 impl<T> Debug for NoqReceiver<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -749,74 +789,57 @@ impl<T> Debug for NoqReceiver<T> {
 impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, mpsc::RecvError>> {
         loop {
-            match &mut self.progress {
-                ReadProgress::Length { value, shift } => {
-                    let mut byte = [0u8; 1];
-                    let mut read = ReadBuf::new(&mut byte);
-                    ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
-                    let Some(&byte) = read.filled().first() else {
-                        // The stream may end between messages, but not inside a length.
-                        if *shift == 0 {
-                            if !self.finished {
-                                self.finished = true;
-                                let received = self.received;
-                                self.span.in_scope(|| debug!(received, "stream finished"));
-                            }
-                            return Poll::Ready(Ok(None));
+            if self.read_pos < self.read_len {
+                let input = &self.read_buf[self.read_pos..self.read_len];
+                let (n, frame) = self.decoder.decode(input, MAX_MESSAGE_SIZE as usize);
+                self.read_pos += n;
+                match frame {
+                    cobs::Frame::Pending => {}
+                    cobs::Frame::Complete(buf) => {
+                        let msg = postcard::from_bytes(&buf).map_err(|err| {
+                            self.recv.stop(ErrorCode::MessageDecodeFailed.into()).ok();
+                            e!(mpsc::RecvError::DecodeFailed, err)
+                        })?;
+                        self.received += 1;
+                        if self.received == 1 {
+                            self.span.in_scope(|| debug!("first message received"));
                         }
-                        return Poll::Ready(Err(
-                            io::Error::from(io::ErrorKind::UnexpectedEof).into()
-                        ));
-                    };
-                    if *shift >= 64 {
-                        let error = io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Varint is too large for u64",
-                        );
-                        return Poll::Ready(Err(error.into()));
+                        return Poll::Ready(Ok(Some(msg)));
                     }
-                    *value |= u64::from(byte & 0x7F) << *shift;
-                    if byte & 0x80 != 0 {
-                        *shift += 7;
-                        continue;
+                    cobs::Frame::Aborted => {
+                        self.span
+                            .in_scope(|| debug!("dropped a message whose send was cancelled"));
                     }
-                    let size = *value;
-                    if size > MAX_MESSAGE_SIZE {
+                    cobs::Frame::TooLarge => {
                         self.recv
                             .stop(ErrorCode::MessageMaxSizeExceeded.into())
                             .ok();
                         return Poll::Ready(Err(e!(mpsc::RecvError::MaxSizeExceeded)));
                     }
-                    self.progress = ReadProgress::Body {
-                        buf: vec![0; size as usize],
-                        filled: 0,
-                    };
                 }
-                ReadProgress::Body { buf, filled } => {
-                    while *filled < buf.len() {
-                        let mut read = ReadBuf::new(&mut buf[*filled..]);
-                        ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
-                        let n = read.filled().len();
-                        if n == 0 {
-                            let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
-                            return Poll::Ready(Err(eof.into()));
-                        }
-                        *filled += n;
-                    }
-                    let ReadProgress::Body { buf, .. } = mem::take(&mut self.progress) else {
-                        continue;
-                    };
-                    let msg = postcard::from_bytes(&buf).map_err(|err| {
-                        self.recv.stop(ErrorCode::MessageDecodeFailed.into()).ok();
-                        e!(mpsc::RecvError::DecodeFailed, err)
-                    })?;
-                    self.received += 1;
-                    if self.received == 1 {
-                        self.span.in_scope(|| debug!("first message received"));
-                    }
-                    return Poll::Ready(Ok(Some(msg)));
-                }
+                continue;
             }
+            if self.read_buf.is_empty() {
+                self.read_buf = vec![0; READ_BUF_SIZE].into_boxed_slice();
+            }
+            let mut read = ReadBuf::new(&mut self.read_buf);
+            ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
+            let n = read.filled().len();
+            if n == 0 {
+                // The stream may end between messages, but not inside one.
+                if self.decoder.in_frame() {
+                    let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
+                    return Poll::Ready(Err(eof.into()));
+                }
+                if !self.finished {
+                    self.finished = true;
+                    let received = self.received;
+                    self.span.in_scope(|| debug!(received, "stream finished"));
+                }
+                return Poll::Ready(Ok(None));
+            }
+            self.read_pos = 0;
+            self.read_len = n;
         }
     }
 }
@@ -827,7 +850,15 @@ impl<T> Drop for NoqReceiver<T> {
 
 struct NoqSenderInner<T> {
     send: noq::SendStream,
+    /// The encoded message that is being sent.
     buffer: SmallVec<[u8; 128]>,
+    /// How many bytes of `buffer` the stream has taken.
+    ///
+    /// A send that is cancelled leaves its message here. If none of it was
+    /// written, the next send drops it. Otherwise the next send ends the frame
+    /// as invalid first, so that the receiver drops this message. If the
+    /// sender drops instead, the stream ends in the middle of the message.
+    written: usize,
     /// The span in which the sender was created, for the logs of the first message and the end.
     span: tracing::Span,
     sent: u64,
@@ -843,38 +874,63 @@ impl<T: RpcMessage> NoqSenderInner<T> {
         }
     }
 
-    fn send(
-        &mut self,
-        value: T,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + Sync + '_>> {
-        Box::pin(async move {
-            encode_message(&value, &mut self.buffer, &mut self.send)?;
-            // Unlike the oneshot sender, this does not reset the stream if the
-            // send drops in the middle of the message: a reset can drop earlier
-            // messages that the receiver did not read yet.
-            self.send.write_all(&self.buffer).await?;
-            self.buffer.clear();
-            self.record_sent();
-            Ok(())
-        })
+    /// Writes the rest of the message in `buffer`.
+    ///
+    /// Cancel safe: the progress is in `written`.
+    async fn write_rest(&mut self) -> Result<(), SendError> {
+        while self.written < self.buffer.len() {
+            self.written += self.send.write(&self.buffer[self.written..]).await?;
+        }
+        self.buffer.clear();
+        self.written = 0;
+        Ok(())
     }
 
-    fn try_send(
-        &mut self,
-        value: T,
-    ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + Sync + '_>> {
-        Box::pin(async move {
-            // todo: move the non-async part out of the box. Will require a new return type.
-            encode_message(&value, &mut self.buffer, &mut self.send)?;
-            let Some(n) = now_or_never(self.send.write(&self.buffer)) else {
-                return Ok(false);
-            };
-            let n = n?;
-            self.send.write_all(&self.buffer[n..]).await?;
+    /// Prepares the buffer for a new message.
+    ///
+    /// Drops a message that a cancelled send did not start. A message that a
+    /// cancelled send started gets an invalid end instead of its rest, so that
+    /// the receiver drops it. If this is cancelled as well, the next call
+    /// replaces the rest of that end in the same way.
+    async fn prepare(&mut self) -> Result<(), SendError> {
+        if self.written > 0 {
+            let abort = cobs::abort_bytes(&self.buffer, self.written);
+            self.buffer.truncate(self.written);
+            self.buffer.extend_from_slice(abort);
+            self.write_rest().await?;
+        }
+        self.buffer.clear();
+        Ok(())
+    }
+
+    /// Encodes `value` into the buffer.
+    fn encode(&mut self, value: &T) -> Result<(), SendError> {
+        encode_frame(value, &mut self.buffer, &mut self.send)
+    }
+
+    async fn send(&mut self, value: T) -> Result<(), SendError> {
+        self.prepare().await?;
+        self.encode(&value)?;
+        self.write_rest().await?;
+        self.record_sent();
+        Ok(())
+    }
+
+    async fn try_send(&mut self, value: T) -> Result<bool, SendError> {
+        // A started message goes first: if it cannot, this one cannot either.
+        let Some(res) = now_or_never(self.prepare()) else {
+            return Ok(false);
+        };
+        res?;
+        self.encode(&value)?;
+        let Some(n) = now_or_never(self.send.write(&self.buffer)) else {
             self.buffer.clear();
-            self.record_sent();
-            Ok(true)
-        })
+            return Ok(false);
+        };
+        self.written = n?;
+        self.write_rest().await?;
+        self.record_sent();
+        Ok(true)
     }
 }
 
@@ -886,22 +942,25 @@ enum NoqSenderState<T> {
     Closed(Option<ErrorCode>),
 }
 
-impl<T> NoqSenderState<T> {
-    /// Takes the state for a send, and leaves the sender closed until the send puts it back.
+impl<T: RpcMessage> NoqSenderState<T> {
+    /// Runs `f` on the open sender, and closes the sender if it fails.
     ///
-    /// A cancelled send never puts it back, so the sender stays closed: the
-    /// stream can hold part of a message.
-    fn take_for_send(&mut self) -> Self {
-        std::mem::replace(self, Self::Closed(None))
-    }
-
-    /// Returns the state after a send, so that later sends fail with the same error.
-    fn after_send<R>(sender: NoqSenderInner<T>, res: &Result<R, SendError>) -> Self {
-        match res {
-            Ok(_) => Self::Open(sender),
-            Err(SendError::ReceiverClosed { .. }) => Self::Closed(Some(ErrorCode::Closed)),
-            Err(err) => Self::Closed(err.remote_code()),
+    /// If the future is dropped, the progress of the send stays in the sender.
+    async fn run<R>(
+        &mut self,
+        f: impl AsyncFnOnce(&mut NoqSenderInner<T>) -> Result<R, SendError>,
+    ) -> Result<R, SendError> {
+        let sender = match self {
+            Self::Open(sender) => sender,
+            Self::Closed(code) => return Err(SendError::closed(*code)),
+        };
+        let res = f(sender).await;
+        match &res {
+            Ok(_) => {}
+            Err(SendError::ReceiverClosed { .. }) => *self = Self::Closed(Some(ErrorCode::Closed)),
+            Err(err) => *self = Self::Closed(err.remote_code()),
         }
+        res
     }
 }
 
@@ -928,19 +987,8 @@ impl<T> Debug for NoqSender<T> {
 impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>> {
         Box::pin(async {
-            let mut guard = self.0.lock().await;
-            let sender = guard.take_for_send();
-            match sender {
-                NoqSenderState::Open(mut sender) => {
-                    let res = sender.send(value).await;
-                    *guard = NoqSenderState::after_send(sender, &res);
-                    res
-                }
-                NoqSenderState::Closed(code) => {
-                    *guard = NoqSenderState::Closed(code);
-                    Err(SendError::closed(code))
-                }
-            }
+            let mut state = self.0.lock().await;
+            state.run(async |sender| sender.send(value).await).await
         })
     }
 
@@ -949,19 +997,8 @@ impl<T: RpcMessage> DynSender<T> for NoqSender<T> {
         value: T,
     ) -> Pin<Box<dyn Future<Output = Result<bool, SendError>> + Send + '_>> {
         Box::pin(async {
-            let mut guard = self.0.lock().await;
-            let sender = guard.take_for_send();
-            match sender {
-                NoqSenderState::Open(mut sender) => {
-                    let res = sender.try_send(value).await;
-                    *guard = NoqSenderState::after_send(sender, &res);
-                    res
-                }
-                NoqSenderState::Closed(code) => {
-                    *guard = NoqSenderState::Closed(code);
-                    Err(SendError::closed(code))
-                }
-            }
+            let mut state = self.0.lock().await;
+            state.run(async |sender| sender.try_send(value).await).await
         })
     }
 
