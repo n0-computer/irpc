@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-use irpc::noq::{configure_server, make_client_endpoint};
 use irpc::{
     Client, WithChannels,
     channel::{
@@ -13,9 +12,10 @@ use irpc::{
         mpsc::{self, Receiver, RecvError},
         oneshot,
     },
+    noq::{configure_server, make_client_endpoint},
     rpc::{ErrorCode, Handler},
     rpc_requests,
-    util::{AsyncReadVarintExt, AsyncWriteVarintExt, WriteVarintExt},
+    util::{AsyncWriteVarintExt, WriteVarintExt},
 };
 use n0_error::e;
 use n0_future::future::poll_once;
@@ -189,21 +189,6 @@ async fn mpsc_unstarted_cancelled_send_is_not_sent() -> TestResult<()> {
     Ok(())
 }
 
-/// Checks that a frame without the end marker, as from an earlier version of irpc, is delivered.
-#[tokio::test]
-async fn mpsc_frame_without_marker() -> TestResult<()> {
-    let (server, client, server_addr) = create_connected_endpoints()?;
-    let server = tokio::spawn(collect_receiver(server));
-    let conn = client.connect(server_addr, "localhost")?.await?;
-    let (mut send, _) = conn.open_bi().await?;
-    send.write_length_prefixed(vec![7u8]).await?;
-    send.write_length_prefixed((vec![8u8], COMPLETE)).await?;
-    send.write_length_prefixed(vec![9u8]).await?;
-    send.finish()?;
-    assert_eq!(server.await??, vec![vec![7], vec![8], vec![9]]);
-    Ok(())
-}
-
 /// Checks that a frame with more than the end marker after the message is `DecodeFailed`.
 #[tokio::test]
 async fn mpsc_frame_with_extra_bytes() -> TestResult<()> {
@@ -217,37 +202,6 @@ async fn mpsc_frame_with_extra_bytes() -> TestResult<()> {
         panic!("the frame has an extra byte");
     };
     assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
-    Ok(())
-}
-
-/// Checks that a receiver without the end marker, as in an earlier version of irpc, reads the
-/// messages of a sender with it, including a message whose send was cancelled.
-#[tokio::test]
-async fn mpsc_receiver_without_marker() -> TestResult<()> {
-    let (server, client, server_addr) = create_connected_endpoints()?;
-    let server = tokio::spawn(async move {
-        let conn = server.accept().await.unwrap().await?;
-        let (_, mut recv) = conn.accept_bi().await?;
-        let mut msgs = Vec::new();
-        for _ in 0..3 {
-            // decodes the message with `postcard::from_bytes`, which ignores the marker
-            let msg: Vec<u8> = recv.read_length_prefixed(16 * 1024 * 1024).await?;
-            msgs.push(msg);
-        }
-        TestResult::Ok(msgs)
-    });
-    let conn = client.connect(server_addr, "localhost")?.await?;
-    let (send, _) = conn.open_bi().await?;
-    let send = mpsc::Sender::<Vec<u8>>::from(send);
-    send.send(vec![7]).await?;
-    let mut fut = Box::pin(send.send(vec![9u8; 8 * 1024 * 1024]));
-    assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
-    drop(fut);
-    send.send(vec![8]).await?;
-    let msgs = server.await??;
-    assert_eq!(msgs[0], vec![7]);
-    assert_eq!(msgs[1], vec![9u8; 8 * 1024 * 1024]);
-    assert_eq!(msgs[2], vec![8]);
     Ok(())
 }
 

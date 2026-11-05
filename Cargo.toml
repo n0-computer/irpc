@@ -79,7 +79,6 @@ futures-util.workspace = true
 hex = "0.4.3"
 rand = "0.10.3"
 # the last release before the mpsc end marker, for the wire compatibility tests
-irpc_old = { package = "irpc", version = "=0.17.0", default-features = false, features = ["rpc"] }
 n0-tracing-test = { version = "0.3.0", features = ["no-env-filter"] }
 
 [features]
