@@ -163,3 +163,36 @@ async fn oneshot_serialize_error_recv() -> TestResult<()> {
     assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
     Ok(())
 }
+
+/// Checks that a local sender is not rpc, also after a transform.
+#[tokio::test]
+async fn oneshot_local_is_not_rpc() -> TestResult<()> {
+    let (send, recv) = oneshot::channel::<u64>();
+    assert!(!send.is_rpc());
+    let send = send.with_map(|x: u32| x as u64).with_filter(|x| *x > 0);
+    assert!(!send.is_rpc());
+    send.send(7).await?;
+    assert_eq!(recv.await?, 7);
+    Ok(())
+}
+
+/// Checks that a remote sender is rpc, also after a transform.
+#[tokio::test]
+async fn oneshot_remote_is_rpc() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let res = oneshot::Receiver::<u64>::from(recv).await?;
+        TestResult::Ok(res)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = oneshot::Sender::<u64>::from(send);
+    assert!(send.is_rpc());
+    let send = send.with_map(|x: u32| x as u64);
+    assert!(send.is_rpc());
+    send.send(7).await?;
+    assert_eq!(server.await??, 7);
+    Ok(())
+}
