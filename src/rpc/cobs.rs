@@ -1,70 +1,21 @@
-//! COBS framing for mpsc messages.
+//! Aborting a COBS frame of an mpsc message.
 //!
 //! [COBS] encodes a message without zero bytes, and ends its frame with a zero
 //! byte. The frame is a sequence of blocks. Each block starts with a code byte
-//! `n`, followed by `n - 1` bytes that are not zero. Between two blocks, the
-//! message has a zero, unless the code byte is `0xFF`.
+//! `n`, followed by `n - 1` bytes that are not zero. Postcard encodes and
+//! decodes the frames.
 //!
 //! A frame with a zero inside a block is invalid, which a sender uses to abort
 //! a message that it already started: it ends the frame with a zero in the
-//! middle of a block, or with `[2, 0]` at the start of a block.
+//! middle of a block, or with `[2, 0]` at the start of a block. Postcard
+//! decodes such a frame to [`postcard::Error::DeserializeBadEncoding`].
 //!
 //! [COBS]: https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuffing
 
-use std::{io, mem};
-
-use smallvec::SmallVec;
-
-/// Writes the COBS frame of the bytes written to it into a buffer.
-pub(super) struct CobsEncoder<'a> {
-    out: &'a mut SmallVec<[u8; 128]>,
-    /// Where the code byte of the current block goes.
-    code_pos: usize,
-}
-
-impl<'a> CobsEncoder<'a> {
-    /// Starts a frame in `out`, which it clears.
-    pub(super) fn new(out: &'a mut SmallVec<[u8; 128]>) -> Self {
-        out.clear();
-        out.push(0);
-        Self { out, code_pos: 0 }
-    }
-
-    fn end_block(&mut self) {
-        self.out[self.code_pos] = (self.out.len() - self.code_pos) as u8;
-        self.code_pos = self.out.len();
-        self.out.push(0);
-    }
-
-    /// Ends the frame.
-    pub(super) fn finish(mut self) {
-        self.end_block();
-    }
-}
-
-impl io::Write for CobsEncoder<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        for &byte in buf {
-            if byte == 0 {
-                self.end_block();
-                continue;
-            }
-            self.out.push(byte);
-            if self.out.len() - self.code_pos == 0xFF {
-                self.end_block();
-            }
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Returns the bytes that abort a frame of which the first `written` bytes were sent.
 ///
-/// They put a zero inside a block, which makes the frame invalid.
+/// They put a zero inside a block, which makes the frame invalid. `frame` may
+/// end with the bytes of an earlier abort, of which a part was sent.
 pub(super) fn abort_bytes(frame: &[u8], written: usize) -> &'static [u8] {
     let mut start = 0;
     while start < written {
@@ -73,112 +24,14 @@ pub(super) fn abort_bytes(frame: &[u8], written: usize) -> &'static [u8] {
     if start == written { &[2, 0] } else { &[0] }
 }
 
-/// What [`CobsDecoder::decode`] found.
-#[derive(Debug, PartialEq)]
-pub(super) enum Frame {
-    /// The input ended before the frame.
-    Pending,
-    /// A valid frame, with the message.
-    Complete(Vec<u8>),
-    /// An invalid frame, which the sender aborted.
-    Aborted,
-    /// The message is larger than the maximum size.
-    TooLarge,
-}
-
-/// Decodes COBS frames from a stream, in parts as they arrive.
-#[derive(Debug, Default)]
-pub(super) struct CobsDecoder {
-    /// The message of the frame so far.
-    buf: Vec<u8>,
-    /// Whether the frame has a block.
-    started: bool,
-    /// The bytes left in the current block.
-    left: u8,
-    /// Whether a zero follows the current block, if the frame does not end after it.
-    zero: bool,
-}
-
-impl CobsDecoder {
-    /// Whether a frame was started but did not end.
-    pub(super) fn in_frame(&self) -> bool {
-        self.started
-    }
-
-    /// Decodes `input` until a frame ends, and returns how many bytes it used.
-    pub(super) fn decode(&mut self, input: &[u8], max_size: usize) -> (usize, Frame) {
-        let mut i = 0;
-        while i < input.len() {
-            if self.buf.len() > max_size {
-                *self = Self::default();
-                return (i, Frame::TooLarge);
-            }
-            if self.left > 0 {
-                let end = input.len().min(i + self.left as usize);
-                let run = &input[i..end];
-                if let Some(pos) = run.iter().position(|&b| b == 0) {
-                    *self = Self::default();
-                    return (i + pos + 1, Frame::Aborted);
-                }
-                self.buf.extend_from_slice(run);
-                self.left -= run.len() as u8;
-                i = end;
-                continue;
-            }
-            let code = input[i];
-            i += 1;
-            if code == 0 {
-                let frame = mem::take(self);
-                if !frame.started {
-                    return (i, Frame::Aborted);
-                }
-                return (i, Frame::Complete(frame.buf));
-            }
-            if self.started && self.zero {
-                self.buf.push(0);
-            }
-            self.started = true;
-            self.left = code - 1;
-            self.zero = code != 0xFF;
-        }
-        (i, Frame::Pending)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
     use super::*;
 
-    fn encode(data: &[u8]) -> Vec<u8> {
-        let mut out = SmallVec::new();
-        let mut encoder = CobsEncoder::new(&mut out);
-        encoder.write_all(data).unwrap();
-        encoder.finish();
-        out.to_vec()
-    }
-
-    fn decode_all(mut input: &[u8]) -> Vec<Frame> {
-        let mut decoder = CobsDecoder::default();
-        let mut frames = Vec::new();
-        while !input.is_empty() {
-            let (n, frame) = decoder.decode(input, usize::MAX);
-            input = &input[n..];
-            frames.push(frame);
-        }
-        frames
-    }
-
     fn samples() -> Vec<Vec<u8>> {
-        let mut samples = vec![
-            vec![],
-            vec![0],
-            vec![0, 0],
-            vec![1],
-            vec![1, 0, 2],
-            vec![0, 1, 0],
-        ];
+        let mut samples = vec![vec![], vec![0], vec![0, 0], vec![1, 0, 2]];
         for len in [253, 254, 255, 508, 509, 1000] {
             samples.push((0..len).map(|i| (i % 255 + 1) as u8).collect());
             samples.push((0..len).map(|i| (i % 7) as u8).collect());
@@ -186,29 +39,35 @@ mod tests {
         samples
     }
 
-    /// Checks that a frame has no zero but the last byte, and decodes to its message.
+    /// Checks that a frame aborted after any byte, with an abort cut after any byte as the
+    /// sender replaces it, ends at the end of the abort, and decodes to `DeserializeBadEncoding`.
     #[test]
-    fn roundtrip() {
+    fn abort_anywhere() {
         for data in samples() {
-            let frame = encode(&data);
-            assert_eq!(frame.iter().position(|&b| b == 0), Some(frame.len() - 1));
-            assert_eq!(decode_all(&frame), vec![Frame::Complete(data.clone())]);
-        }
-    }
-
-    /// Checks that the encoding is the one of postcard.
-    #[test]
-    fn matches_postcard() {
-        for data in samples() {
-            let expected = postcard::to_stdvec_cobs(&Raw(&data)).unwrap();
-            assert_eq!(encode(&data), expected, "{data:?}");
+            let frame = postcard::to_stdvec_cobs(&data).unwrap();
+            for written in 1..frame.len() {
+                let mut buf = frame[..written].to_vec();
+                buf.extend_from_slice(abort_bytes(&frame, written));
+                for cut in written..buf.len() {
+                    let mut stream = buf[..cut].to_vec();
+                    stream.extend_from_slice(abort_bytes(&buf, cut));
+                    let end = stream.iter().position(|&b| b == 0);
+                    assert_eq!(end, Some(stream.len() - 1), "{data:?} {written} {cut}");
+                    let res = postcard::from_bytes_cobs::<Vec<u8>>(&mut stream);
+                    assert_eq!(
+                        res,
+                        Err(postcard::Error::DeserializeBadEncoding),
+                        "{data:?} aborted after {written}, abort cut after {cut}"
+                    );
+                }
+            }
         }
     }
 
     /// Serializes its bytes without a length, as a tuple of bytes.
     struct Raw<'a>(&'a [u8]);
 
-    impl serde::Serialize for Raw<'_> {
+    impl Serialize for Raw<'_> {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             use serde::ser::SerializeTuple;
             let mut tuple = serializer.serialize_tuple(self.0.len())?;
@@ -219,68 +78,42 @@ mod tests {
         }
     }
 
-    /// Checks that a frame aborted after any number of bytes is aborted, and the next frame decodes.
+    #[derive(Debug, Deserialize)]
+    enum TwoVariants {
+        _A,
+        _B,
+    }
+
+    /// Decodes the valid COBS frame of `bytes` as `T`, and returns the error.
+    fn decode_error<T: DeserializeOwned + std::fmt::Debug>(bytes: &[u8]) -> postcard::Error {
+        let mut frame = postcard::to_stdvec_cobs(&Raw(bytes)).unwrap();
+        postcard::from_bytes_cobs::<T>(&mut frame).unwrap_err()
+    }
+
+    /// Checks that postcard does not report a message that does not decode, in a valid frame,
+    /// as `DeserializeBadEncoding`, which the receiver takes as an aborted frame.
     #[test]
-    fn abort_anywhere() {
-        for data in samples() {
-            let frame = encode(&data);
-            for written in 1..frame.len() {
-                let mut stream = frame[..written].to_vec();
-                stream.extend_from_slice(abort_bytes(&frame, written));
-                stream.extend_from_slice(&encode(&[7]));
-                assert_eq!(
-                    decode_all(&stream),
-                    vec![Frame::Aborted, Frame::Complete(vec![7])],
-                    "{data:?} aborted after {written}"
-                );
-            }
+    fn decode_errors_are_not_bad_encoding() {
+        let errors = [
+            decode_error::<bool>(&[2]),
+            decode_error::<u32>(&[0xFF; 6]),
+            decode_error::<Vec<u8>>(&[5, 1]),
+            decode_error::<String>(&[1, 0xFF]),
+            decode_error::<Option<u8>>(&[2]),
+            decode_error::<char>(&[1, 0xFF]),
+            decode_error::<TwoVariants>(&[5]),
+            decode_error::<u8>(&[]),
+        ];
+        for err in errors {
+            assert_ne!(err, postcard::Error::DeserializeBadEncoding);
         }
     }
 
-    /// Checks that an abort that is itself cut, and replaced as the sender does, still aborts.
+    /// Checks that a frame of just the end, which a sender never writes, is an empty message, not an abort.
     #[test]
-    fn abort_of_abort() {
-        for data in samples() {
-            let frame = encode(&data);
-            for written in 1..frame.len() {
-                let mut buf = frame[..written].to_vec();
-                buf.extend_from_slice(abort_bytes(&frame, written));
-                for cut in written..buf.len() {
-                    let mut stream = buf[..cut].to_vec();
-                    stream.extend_from_slice(abort_bytes(&buf, cut));
-                    stream.extend_from_slice(&encode(&[7]));
-                    assert_eq!(
-                        decode_all(&stream),
-                        vec![Frame::Aborted, Frame::Complete(vec![7])],
-                        "{data:?} aborted after {written}, abort cut after {cut}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Checks that a frame that arrives a byte at a time decodes.
-    #[test]
-    fn byte_by_byte() {
-        let data: Vec<u8> = (0..600).map(|i| (i % 5) as u8).collect();
-        let frame = encode(&data);
-        let mut decoder = CobsDecoder::default();
-        for (i, byte) in frame.iter().enumerate() {
-            let (n, res) = decoder.decode(std::slice::from_ref(byte), usize::MAX);
-            assert_eq!(n, 1);
-            if i + 1 < frame.len() {
-                assert_eq!(res, Frame::Pending);
-            } else {
-                assert_eq!(res, Frame::Complete(data.clone()));
-            }
-        }
-    }
-
-    /// Checks that a message larger than the maximum size is `TooLarge`.
-    #[test]
-    fn too_large() {
-        let mut decoder = CobsDecoder::default();
-        assert_eq!(decoder.decode(&encode(&[1; 100]), 99).1, Frame::TooLarge);
-        assert_eq!(decoder.decode(&encode(&[0; 100]), 99).1, Frame::TooLarge);
+    fn empty_frame_is_empty_message() {
+        assert_eq!(postcard::from_bytes_cobs::<()>(&mut [0]), Ok(()));
+        let err = postcard::from_bytes_cobs::<u8>(&mut [0]).unwrap_err();
+        assert_ne!(err, postcard::Error::DeserializeBadEncoding);
     }
 }

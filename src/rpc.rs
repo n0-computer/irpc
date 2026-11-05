@@ -97,6 +97,7 @@ use std::{
     future::Future,
     io,
     marker::PhantomData,
+    mem,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, ready},
@@ -532,11 +533,9 @@ fn encoded_size(value: &impl Serialize) -> Result<u64, EncodeError> {
 }
 
 /// Encodes `value` as a COBS frame into `buf`.
-fn encode_cobs(value: &impl Serialize, buf: &mut SmallVec<[u8; 128]>) -> Result<(), EncodeError> {
+fn encode_cobs(value: &impl Serialize, buf: &mut Vec<u8>) -> Result<(), EncodeError> {
     encoded_size(value)?;
-    let encoder =
-        postcard::to_io(value, cobs::CobsEncoder::new(buf)).map_err(EncodeError::Failed)?;
-    encoder.finish();
+    *buf = postcard::to_stdvec_cobs(value).map_err(EncodeError::Failed)?;
     Ok(())
 }
 
@@ -558,7 +557,7 @@ fn encode_message(
 /// gets an error instead of the end of the stream.
 fn encode_frame(
     value: &impl Serialize,
-    buf: &mut SmallVec<[u8; 128]>,
+    buf: &mut Vec<u8>,
     send: &mut noq::SendStream,
 ) -> Result<(), SendError> {
     reset_on_error(encode_cobs(value, buf), send)
@@ -707,7 +706,7 @@ impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
             span: tracing::Span::current(),
             received: 0,
             finished: false,
-            decoder: Default::default(),
+            frame: Vec::new(),
             read_buf: Box::default(),
             read_pos: 0,
             read_len: 0,
@@ -750,7 +749,7 @@ impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
         mpsc::Sender::Boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
             NoqSenderState::Open(NoqSenderInner {
                 send: write,
-                buffer: SmallVec::new(),
+                buffer: Vec::new(),
                 written: 0,
                 span: tracing::Span::current(),
                 sent: 0,
@@ -768,9 +767,9 @@ struct NoqReceiver<T> {
     span: tracing::Span,
     received: u64,
     finished: bool,
-    /// How much of the next message the receiver has decoded, kept across polls.
-    decoder: cobs::CobsDecoder,
-    /// Bytes read from the stream, of which `read_pos..read_len` are not decoded yet.
+    /// The bytes of the next frame so far, kept across polls.
+    frame: Vec<u8>,
+    /// Bytes read from the stream, of which `read_pos..read_len` are not in a frame yet.
     read_buf: Box<[u8]>,
     read_pos: usize,
     read_len: usize,
@@ -779,6 +778,9 @@ struct NoqReceiver<T> {
 
 /// The size of the read buffer of a remote mpsc receiver.
 const READ_BUF_SIZE: usize = 8 * 1024;
+
+/// The size of the COBS frame of a message of [`MAX_MESSAGE_SIZE`] without zeros, the largest frame.
+const MAX_FRAME_SIZE: usize = MAX_MESSAGE_SIZE as usize + MAX_MESSAGE_SIZE as usize / 254 + 2;
 
 impl<T> Debug for NoqReceiver<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -791,30 +793,36 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
         loop {
             if self.read_pos < self.read_len {
                 let input = &self.read_buf[self.read_pos..self.read_len];
-                let (n, frame) = self.decoder.decode(input, MAX_MESSAGE_SIZE as usize);
+                let end = input.iter().position(|&b| b == 0);
+                let n = end.map_or(input.len(), |i| i + 1);
+                self.frame.extend_from_slice(&input[..n]);
                 self.read_pos += n;
-                match frame {
-                    cobs::Frame::Pending => {}
-                    cobs::Frame::Complete(buf) => {
-                        let msg = postcard::from_bytes(&buf).map_err(|err| {
-                            self.recv.stop(ErrorCode::MessageDecodeFailed.into()).ok();
-                            e!(mpsc::RecvError::DecodeFailed, err)
-                        })?;
+                if self.frame.len() > MAX_FRAME_SIZE {
+                    self.recv
+                        .stop(ErrorCode::MessageMaxSizeExceeded.into())
+                        .ok();
+                    return Poll::Ready(Err(e!(mpsc::RecvError::MaxSizeExceeded)));
+                }
+                if end.is_none() {
+                    continue;
+                }
+                let mut frame = mem::take(&mut self.frame);
+                match postcard::from_bytes_cobs(&mut frame) {
+                    Ok(msg) => {
                         self.received += 1;
                         if self.received == 1 {
                             self.span.in_scope(|| debug!("first message received"));
                         }
                         return Poll::Ready(Ok(Some(msg)));
                     }
-                    cobs::Frame::Aborted => {
+                    // Postcard reports an invalid COBS frame with this error, and no other error with it.
+                    Err(postcard::Error::DeserializeBadEncoding) => {
                         self.span
                             .in_scope(|| debug!("dropped a message whose send was cancelled"));
                     }
-                    cobs::Frame::TooLarge => {
-                        self.recv
-                            .stop(ErrorCode::MessageMaxSizeExceeded.into())
-                            .ok();
-                        return Poll::Ready(Err(e!(mpsc::RecvError::MaxSizeExceeded)));
+                    Err(err) => {
+                        self.recv.stop(ErrorCode::MessageDecodeFailed.into()).ok();
+                        return Poll::Ready(Err(e!(mpsc::RecvError::DecodeFailed, err)));
                     }
                 }
                 continue;
@@ -827,7 +835,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
             let n = read.filled().len();
             if n == 0 {
                 // The stream may end between messages, but not inside one.
-                if self.decoder.in_frame() {
+                if !self.frame.is_empty() {
                     let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
                     return Poll::Ready(Err(eof.into()));
                 }
@@ -851,7 +859,7 @@ impl<T> Drop for NoqReceiver<T> {
 struct NoqSenderInner<T> {
     send: noq::SendStream,
     /// The encoded message that is being sent.
-    buffer: SmallVec<[u8; 128]>,
+    buffer: Vec<u8>,
     /// How many bytes of `buffer` the stream has taken.
     ///
     /// A send that is cancelled leaves its message here. If none of it was
