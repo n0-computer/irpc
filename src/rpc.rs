@@ -469,6 +469,8 @@ pub enum RpcSendError {
     /// or was dropped before it was done. The stream can hold part of a
     /// message, so this sender sends no more messages. After an io error,
     /// later sends get the same io error instead.
+    ///
+    /// Writing a request never returns this, since a request is written once.
     #[error("Sender closed after an earlier error")]
     Closed,
     /// An io error, for example because the connection was lost.
@@ -538,7 +540,9 @@ pub enum RpcRecvError {
     /// The `code` says why, see [`ErrorCode`], and the [`rpc`](self) module for
     /// an overview. It is `None` for code 0, where that is not the same as a
     /// local channel whose sender was dropped: a reset with code 0 can drop
-    /// messages that the receiver did not read yet.
+    /// messages that the receiver did not read yet. This is only the case for
+    /// an mpsc receiver; a oneshot receiver gets
+    /// [`SenderClosed`](crate::channel::oneshot::RecvError::SenderClosed) for code 0.
     #[error("Sender reset the stream{}", code.map(|code| format!(": {code}")).unwrap_or_default())]
     Remote { code: Option<ErrorCode> },
     /// The connection was closed on purpose, by the peer or by this side.
