@@ -285,8 +285,8 @@ impl ErrorCode {
 
 /// How a connection was closed on purpose, by the peer or by this side.
 ///
-/// A connection that failed, for example because the peer is gone, is an `Io`
-/// error instead.
+/// A connection that failed, for example because the peer is gone, is a
+/// `ConnectionFailed` error instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ConnectionClose {
@@ -393,9 +393,9 @@ pub enum ReadRequestError {
     /// returns `None`.
     #[error("Connection {close}")]
     ConnectionClosed { close: ConnectionClose },
-    /// The connection failed.
+    /// The connection failed, for example because it timed out.
     #[error("Connection failed")]
-    Connection {
+    ConnectionFailed {
         #[error(std_err)]
         source: ConnectionError,
     },
@@ -409,7 +409,7 @@ impl ReadRequestError {
             Self::Malformed { .. } | Self::DecodeFailed { .. } => {
                 Some(ErrorCode::RequestDecodeFailed)
             }
-            Self::ConnectionClosed { .. } | Self::Connection { .. } => None,
+            Self::ConnectionClosed { .. } | Self::ConnectionFailed { .. } => None,
         }
     }
 }
@@ -417,7 +417,7 @@ impl ReadRequestError {
 impl From<ReadRequestError> for io::Error {
     fn from(err: ReadRequestError) -> Self {
         match err {
-            ReadRequestError::Connection { source, .. } => source.into(),
+            ReadRequestError::ConnectionFailed { source, .. } => source.into(),
             ReadRequestError::ConnectionClosed { .. } => {
                 io::Error::new(io::ErrorKind::ConnectionAborted, err)
             }
@@ -468,17 +468,18 @@ pub enum RpcSendError {
     ///
     /// An earlier send on this sender or a clone of it found its message bad,
     /// or was dropped before it was done. The stream can hold part of a
-    /// message, so this sender sends no more messages. After an io error,
-    /// later sends get the same io error instead.
+    /// message, so this sender sends no more messages. After the connection
+    /// failed, later sends get the same [`ConnectionFailed`](Self::ConnectionFailed) instead.
     ///
     /// Writing a request never returns this, since a request is written once.
     #[error("Sender closed after an earlier error")]
     Closed,
-    /// An io error, for example because the connection was lost.
+    /// The connection or the transport failed, for example because the connection was lost.
     ///
-    /// A custom transport can also report its own failures as this.
-    #[error("Io error")]
-    Io {
+    /// This includes a rejected 0-RTT attempt. A custom transport reports its
+    /// own failures as this.
+    #[error("Connection failed")]
+    ConnectionFailed {
         #[error(std_err)]
         source: io::Error,
     },
@@ -501,7 +502,7 @@ impl RpcSendError {
 impl From<RpcSendError> for io::Error {
     fn from(e: RpcSendError) -> Self {
         match e {
-            RpcSendError::Io { source, .. } => source,
+            RpcSendError::ConnectionFailed { source, .. } => source,
             RpcSendError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
             RpcSendError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
             RpcSendError::Closed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
@@ -549,11 +550,12 @@ pub enum RpcRecvError {
     /// The connection was closed on purpose, by the peer or by this side.
     #[error("Connection {close}")]
     ConnectionClosed { close: ConnectionClose },
-    /// An io error, for example because the connection was lost.
+    /// The connection or the transport failed, for example because the connection was lost.
     ///
-    /// A custom transport can also report its own failures as this.
-    #[error("Io error")]
-    Io {
+    /// This includes a rejected 0-RTT attempt. A custom transport reports its
+    /// own failures as this.
+    #[error("Connection failed")]
+    ConnectionFailed {
         #[error(std_err)]
         source: io::Error,
     },
@@ -576,7 +578,7 @@ impl RpcRecvError {
 /// Converts an io error from reading the stream of a remote channel.
 ///
 /// A reset becomes [`RpcRecvError::Remote`], the close of the connection becomes
-/// [`RpcRecvError::ConnectionClosed`], and any other io error becomes [`RpcRecvError::Io`].
+/// [`RpcRecvError::ConnectionClosed`], and any other io error becomes [`RpcRecvError::ConnectionFailed`].
 impl From<io::Error> for RpcRecvError {
     fn from(err: io::Error) -> Self {
         if let Some(code) = reset_code(&err) {
@@ -585,14 +587,14 @@ impl From<io::Error> for RpcRecvError {
         if let Some(close) = ConnectionClose::from_io(&err) {
             return e!(RpcRecvError::ConnectionClosed { close });
         }
-        e!(RpcRecvError::Io, err)
+        e!(RpcRecvError::ConnectionFailed, err)
     }
 }
 
 impl From<RpcRecvError> for io::Error {
     fn from(e: RpcRecvError) -> Self {
         match e {
-            RpcRecvError::Io { source, .. } => source,
+            RpcRecvError::ConnectionFailed { source, .. } => source,
             RpcRecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
             RpcRecvError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
@@ -1303,7 +1305,7 @@ impl CloseReason {
             Self::ReceiverClosed => e!(SendError::ReceiverClosed),
             Self::Remote(code) => e!(RpcSendError::Remote { code }).into(),
             Self::ConnectionClosed(close) => e!(RpcSendError::ConnectionClosed { close }).into(),
-            Self::Io(err) => e!(RpcSendError::Io, err.into()).into(),
+            Self::Io(err) => e!(RpcSendError::ConnectionFailed, err.into()).into(),
             Self::Other => e!(RpcSendError::Closed).into(),
         }
     }
@@ -1333,7 +1335,7 @@ impl<T: RpcMessage> NoqSenderState<T> {
                     RpcSendError::ConnectionClosed { close, .. } => {
                         CloseReason::ConnectionClosed(close.clone())
                     }
-                    RpcSendError::Io { source, .. } => match write_error(source) {
+                    RpcSendError::ConnectionFailed { source, .. } => match write_error(source) {
                         Some(err) => CloseReason::Io(err.clone()),
                         None => CloseReason::Other,
                     },
@@ -1787,7 +1789,7 @@ async fn read_request_inner<S: Service>(
             Err(ConnectionError::LocallyClosed) => return Ok(None),
             Err(cause) => match ConnectionClose::from_error(&cause) {
                 Some(close) => return Err(e!(ReadRequestError::ConnectionClosed { close })),
-                None => return Err(e!(ReadRequestError::Connection, cause)),
+                None => return Err(e!(ReadRequestError::ConnectionFailed, cause)),
             },
         };
         let err = match read_request_frame::<S>(&mut recv).await {

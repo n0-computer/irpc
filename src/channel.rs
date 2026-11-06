@@ -70,7 +70,7 @@ impl SendError {
 ///
 /// A stop with code 0 becomes [`SendError::ReceiverClosed`], a stop with any
 /// other code [`RpcSendError::Remote`], the close of the connection
-/// [`RpcSendError::ConnectionClosed`], and any other error [`RpcSendError::Io`].
+/// [`RpcSendError::ConnectionClosed`], and any other error [`RpcSendError::ConnectionFailed`].
 #[cfg(feature = "rpc")]
 impl From<noq::WriteError> for SendError {
     fn from(err: noq::WriteError) -> Self {
@@ -83,10 +83,10 @@ impl From<noq::WriteError> for SendError {
             noq::WriteError::ConnectionLost(ref cause) => {
                 match ConnectionClose::from_error(cause) {
                     Some(close) => e!(RpcSendError::ConnectionClosed { close }).into(),
-                    None => e!(RpcSendError::Io, err.into()).into(),
+                    None => e!(RpcSendError::ConnectionFailed, err.into()).into(),
                 }
             }
-            err => e!(RpcSendError::Io, err.into()).into(),
+            err => e!(RpcSendError::ConnectionFailed, err.into()).into(),
         }
     }
 }

@@ -508,11 +508,11 @@ async fn collect<T: RpcMessage>(server: Endpoint) -> Result<Vec<T>, RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let mut recv = Receiver::<T>::from(recv);
     let mut msgs = Vec::new();
     while let Some(msg) = recv.recv().await? {
@@ -527,15 +527,15 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let mut recv = Receiver::<Vec<u8>>::from(recv);
     while recv.recv().await?.is_some() {}
     Err(RecvError::from(e!(
-        RpcRecvError::Io,
+        RpcRecvError::ConnectionFailed,
         io::ErrorKind::UnexpectedEof.into()
     )))
 }
@@ -796,15 +796,15 @@ async fn noser_receiver(server: Endpoint) -> Result<(), mpsc::RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| mpsc::RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| mpsc::RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| mpsc::RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| mpsc::RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let mut recv = mpsc::Receiver::<NoSer>::from(recv);
     while recv.recv().await?.is_some() {}
     Err(mpsc::RecvError::from(e!(
-        RpcRecvError::Io,
+        RpcRecvError::ConnectionFailed,
         io::ErrorKind::UnexpectedEof.into()
     )))
 }
@@ -1084,7 +1084,7 @@ async fn mpsc_send_after_connection_lost() -> TestResult<()> {
             matches!(
                 cause,
                 SendError::Rpc {
-                    source: RpcSendError::Io { .. },
+                    source: RpcSendError::ConnectionFailed { .. },
                     ..
                 }
             ),
