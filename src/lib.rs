@@ -988,10 +988,6 @@ pub enum RequestError {
     #[cfg(feature = "rpc")]
     #[error("Error opening stream")]
     Other { source: AnyError },
-
-    #[cfg(not(feature = "rpc"))]
-    #[error("(Without the rpc feature, requests cannot fail")]
-    Unreachable,
 }
 
 /// Error type that subsumes all possible errors in this crate, for convenience.
@@ -1061,8 +1057,6 @@ impl From<RequestError> for io::Error {
             RequestError::Connection { source, .. } => source.into(),
             #[cfg(feature = "rpc")]
             RequestError::Other { source, .. } => io::Error::other(source),
-            #[cfg(not(feature = "rpc"))]
-            RequestError::Unreachable { .. } => unreachable!(),
         }
     }
 }

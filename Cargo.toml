@@ -203,3 +203,8 @@ allowed_external_types = [
     "tracing_subscriber::layer::Layer",
     "tracing_subscriber::registry::LookupSpan",
 ]
+
+# n0-error #68 (empty enums in stack_error), until it is released.
+[patch.crates-io]
+n0-error = { git = "https://github.com/n0-computer/n0-error", rev = "4af95e8e36e4a69ad152a5ebae3a31ee5b548a43" }
+n0-error-macros = { git = "https://github.com/n0-computer/n0-error", rev = "4af95e8e36e4a69ad152a5ebae3a31ee5b548a43" }

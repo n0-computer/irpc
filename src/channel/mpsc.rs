@@ -36,10 +36,6 @@ pub enum RecvError {
     #[cfg(feature = "rpc")]
     #[error("Remote channel failed")]
     Rpc { source: RpcError },
-
-    #[cfg(not(feature = "rpc"))]
-    #[error("Without the rpc feature, receiving cannot fail")]
-    Unreachable,
 }
 
 /// Converts an io error from reading the stream of a remote channel.
@@ -57,8 +53,6 @@ impl From<RecvError> for io::Error {
         match e {
             #[cfg(feature = "rpc")]
             RecvError::Rpc { source, .. } => source.into(),
-            #[cfg(not(feature = "rpc"))]
-            RecvError::Unreachable { .. } => unreachable!(),
         }
     }
 }
