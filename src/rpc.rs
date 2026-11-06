@@ -705,9 +705,15 @@ struct NoqReceiver<T> {
 /// What the buffered bytes of a length-prefixed stream hold next.
 #[derive(Debug, PartialEq)]
 enum Frame {
-    /// A message is incomplete; `frame_len` is its whole length, once the length prefix is in.
+    /// The buffer ends before the frame does.
+    ///
+    /// `frame_len` is the length of the whole frame, varint prefix included,
+    /// or `None` while the varint prefix itself is still incomplete.
     Partial { frame_len: Option<usize> },
-    /// A whole message: its body is at `body`, and the frame ends at `body.end`.
+    /// The buffer starts with a whole frame.
+    ///
+    /// `body` is the range of the frame's content after the varint prefix;
+    /// it ends where the frame does.
     Whole { body: Range<usize> },
     /// The length prefix exceeds [`MAX_MESSAGE_SIZE`].
     TooLarge,
