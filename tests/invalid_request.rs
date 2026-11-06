@@ -5,8 +5,9 @@ use std::{pin::pin, time::Duration};
 
 use irpc::{
     Client, WithChannels,
+    channel::SendError,
     noq::listen,
-    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, WriteError, read_request},
+    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, ReadRequestError, RpcError, read_request},
 };
 use n0_future::{future::poll_once, task::AbortOnDropHandle};
 use n0_tracing_test::traced_test;
@@ -189,8 +190,11 @@ async fn too_large_rpc_resets_with_reason() -> TestResult<()> {
     assert!(
         matches!(
             err,
-            irpc::Error::Write {
-                source: WriteError::MaxSizeExceeded { .. },
+            irpc::Error::Send {
+                source: SendError::Rpc {
+                    source: RpcError::MaxSizeExceeded { .. },
+                    ..
+                },
                 ..
             }
         ),

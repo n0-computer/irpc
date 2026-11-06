@@ -423,95 +423,6 @@ impl From<ReadRequestError> for io::Error {
     }
 }
 
-/// Error when a client writes a request.
-#[stack_error(derive, add_meta, from_sources)]
-#[non_exhaustive]
-pub enum WriteError {
-    /// The request is larger than [`MAX_MESSAGE_SIZE`], so this client did not send it.
-    #[error("Request too large")]
-    MaxSizeExceeded,
-    /// The request does not encode, so this client did not send it.
-    #[error("Request does not encode")]
-    EncodeFailed {
-        #[error(std_err)]
-        source: postcard::Error,
-    },
-    /// The server stopped the stream with code 0 while this client wrote the request.
-    ///
-    /// For example, the server dropped the stream of the request.
-    #[error("Server closed the request stream")]
-    ReceiverClosed,
-    /// The server stopped the stream with a code while this client wrote the request.
-    ///
-    /// The `code` says why, see [`ErrorCode`], and the [`rpc`](self) module for an overview.
-    #[error("Server rejected the request: {code}")]
-    Remote { code: ErrorCode },
-    /// The connection was closed on purpose while this client wrote the request.
-    #[error("Connection {close}")]
-    ConnectionClosed { close: ConnectionClose },
-    /// An io error, for example because the connection was lost.
-    #[error("Io error")]
-    Io {
-        #[error(std_err)]
-        source: io::Error,
-    },
-}
-
-impl WriteError {
-    /// Returns the code that this client resets its stream with, if it found the error itself.
-    fn reset_code(&self) -> Option<ErrorCode> {
-        match self {
-            Self::MaxSizeExceeded { .. } => Some(ErrorCode::RequestMaxSizeExceeded),
-            Self::EncodeFailed { .. } => Some(ErrorCode::RequestEncodeFailed),
-            _ => None,
-        }
-    }
-}
-
-impl From<noq::WriteError> for WriteError {
-    fn from(err: noq::WriteError) -> Self {
-        match err {
-            noq::WriteError::Stopped(code) => match ErrorCode::from_varint(code) {
-                Some(code) => e!(WriteError::Remote { code }),
-                None => e!(WriteError::ReceiverClosed),
-            },
-            noq::WriteError::ConnectionLost(ref cause) => {
-                match ConnectionClose::from_error(cause) {
-                    Some(close) => e!(WriteError::ConnectionClosed { close }),
-                    None => e!(WriteError::Io, err.into()),
-                }
-            }
-            err => e!(WriteError::Io, err.into()),
-        }
-    }
-}
-
-impl From<WriteError> for io::Error {
-    fn from(e: WriteError) -> Self {
-        match e {
-            WriteError::Io { source, .. } => source,
-            WriteError::ReceiverClosed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
-            WriteError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
-            WriteError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
-            _ => io::Error::new(io::ErrorKind::InvalidData, e),
-        }
-    }
-}
-
-impl WriteError {
-    /// Returns the code that the peer sent, if any.
-    ///
-    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
-    /// the peer closed the connection with.
-    pub fn remote_code(&self) -> Option<ErrorCode> {
-        match self {
-            Self::Remote { code, .. } => Some(*code),
-            Self::ConnectionClosed { close, .. } => close.code(),
-            _ => None,
-        }
-    }
-}
-
 /// Error of a remote channel that a local channel does not have.
 ///
 /// A local channel only ends when the other side is dropped. A remote channel
@@ -728,7 +639,7 @@ const INLINE_FRAME_SIZE: usize = 128;
 fn prepare_write<S: Service>(
     msg: impl Into<S>,
     span: &tracing::Span,
-) -> Result<SmallVec<[u8; INLINE_FRAME_SIZE]>, WriteError> {
+) -> Result<SmallVec<[u8; INLINE_FRAME_SIZE]>, EncodeError> {
     let msg = msg.into();
     let mut buf = SmallVec::new();
     let res = if S::SPAN_PROPAGATION {
@@ -739,10 +650,7 @@ fn prepare_write<S: Service>(
         // Original wire format without span context
         encode(&msg, &mut buf)
     };
-    res.map_err(|err| match err {
-        EncodeError::MaxSizeExceeded => e!(WriteError::MaxSizeExceeded),
-        EncodeError::Failed(source) => e!(WriteError::EncodeFailed, source),
-    })?;
+    res?;
     Ok(buf)
 }
 
@@ -812,7 +720,7 @@ impl<S: Service> RemoteSender<S> {
     pub async fn write(
         self,
         msg: impl Into<S>,
-    ) -> std::result::Result<(noq::SendStream, noq::RecvStream), WriteError> {
+    ) -> std::result::Result<(noq::SendStream, noq::RecvStream), SendError> {
         let (send, recv, _span) = self.write_in_span(msg).await?;
         Ok((send, recv))
     }
@@ -821,7 +729,7 @@ impl<S: Service> RemoteSender<S> {
     pub(crate) async fn write_in_span(
         mut self,
         msg: impl Into<S>,
-    ) -> std::result::Result<(noq::SendStream, noq::RecvStream, tracing::Span), WriteError> {
+    ) -> std::result::Result<(noq::SendStream, noq::RecvStream, tracing::Span), SendError> {
         let (span, buf) = self.prepare(msg)?;
         let (send, recv) = self.write_raw(&buf).instrument(span.clone()).await?;
         Ok((send, recv, span))
@@ -841,13 +749,22 @@ impl<S: Service> RemoteSender<S> {
     pub(crate) fn prepare(
         &mut self,
         msg: impl Into<S>,
-    ) -> std::result::Result<(tracing::Span, SmallVec<[u8; INLINE_FRAME_SIZE]>), WriteError> {
+    ) -> std::result::Result<(tracing::Span, SmallVec<[u8; INLINE_FRAME_SIZE]>), SendError> {
         let msg = msg.into();
         let span = msg.new_request_span(self.req_id());
-        let buf = prepare_write::<S>(msg, &span).inspect_err(|err| {
-            if let Some(code) = err.reset_code() {
-                self.0.reset(code);
-            }
+        let buf = prepare_write::<S>(msg, &span).map_err(|err| {
+            let (code, err) = match err {
+                EncodeError::MaxSizeExceeded => (
+                    ErrorCode::RequestMaxSizeExceeded,
+                    e!(RpcError::MaxSizeExceeded),
+                ),
+                EncodeError::Failed(source) => (
+                    ErrorCode::RequestEncodeFailed,
+                    e!(RpcError::EncodeFailed, source),
+                ),
+            };
+            self.0.reset(code);
+            SendError::from(err)
         })?;
         Ok((span, buf))
     }
@@ -855,7 +772,7 @@ impl<S: Service> RemoteSender<S> {
     pub(crate) async fn write_raw(
         self,
         buf: &[u8],
-    ) -> std::result::Result<(noq::SendStream, noq::RecvStream), WriteError> {
+    ) -> std::result::Result<(noq::SendStream, noq::RecvStream), SendError> {
         let RemoteSender(mut send, recv, _) = self;
         send.get_mut().write_all(buf).await?;
         debug!("request sent");
@@ -1998,20 +1915,12 @@ mod tests {
     }
 
     #[test]
-    fn write_error_maps_stop_codes() {
-        let err = WriteError::from(noq::WriteError::Stopped(
+    fn send_error_maps_stop_codes() {
+        let err = SendError::from(noq::WriteError::Stopped(
             ErrorCode::RequestDecodeFailed.to_varint(),
         ));
         assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
         assert_eq!(io::Error::from(err).kind(), io::ErrorKind::ConnectionReset);
-        let err = WriteError::from(noq::WriteError::Stopped(0u32.into()));
-        assert!(matches!(err, WriteError::ReceiverClosed { .. }), "{err:?}");
-        let err = WriteError::from(noq::WriteError::Stopped(16u32.into()));
-        assert_eq!(err.remote_code(), Some(ErrorCode::Other(16)));
-    }
-
-    #[test]
-    fn send_error_maps_stop_codes() {
         let err = SendError::from(noq::WriteError::Stopped(0u32.into()));
         assert!(matches!(err, SendError::ReceiverClosed { .. }), "{err:?}");
         let err = SendError::from(noq::WriteError::Stopped(401u32.into()));

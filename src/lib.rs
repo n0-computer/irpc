@@ -1002,9 +1002,6 @@ pub enum Error {
     MpscRecv { source: channel::mpsc::RecvError },
     #[error("Oneshot recv error")]
     OneshotRecv { source: channel::oneshot::RecvError },
-    #[cfg(feature = "rpc")]
-    #[error("Write error")]
-    Write { source: rpc::WriteError },
 }
 
 #[cfg(feature = "rpc")]
@@ -1023,7 +1020,6 @@ impl Error {
             Self::Send { source, .. } => source.remote_code(),
             Self::MpscRecv { source, .. } => source.remote_code(),
             Self::OneshotRecv { source, .. } => source.remote_code(),
-            Self::Write { source, .. } => source.remote_code(),
         }
     }
 }
@@ -1038,8 +1034,6 @@ impl From<Error> for io::Error {
             Error::Send { source, .. } => source.into(),
             Error::MpscRecv { source, .. } => source.into(),
             Error::OneshotRecv { source, .. } => source.into(),
-            #[cfg(feature = "rpc")]
-            Error::Write { source, .. } => source.into(),
         }
     }
 }

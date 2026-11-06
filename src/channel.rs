@@ -13,14 +13,14 @@ pub mod mpsc;
 pub mod none;
 pub mod oneshot;
 
-/// Error when sending a oneshot or mpsc message.
+/// Error when sending a request, or a oneshot or mpsc message.
 ///
 /// For a local channel, the only error is [`ReceiverClosed`]. A remote channel
 /// can also fail for reasons that a local channel does not have, see
 /// [`RpcError`](crate::rpc::RpcError).
 ///
 /// For a remote channel, the receiver is on the other side of the connection:
-/// the server for the updates of a request, and the client for a response.
+/// the server for a request and its updates, and the client for a response.
 ///
 /// After an error, the channel is closed. Later sends get the same error if
 /// the peer ended the channel, and [`RpcError::Closed`] otherwise.
