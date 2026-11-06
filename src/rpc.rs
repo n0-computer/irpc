@@ -130,6 +130,11 @@ use crate::{
 };
 
 /// Default max message size (16 MiB).
+///
+/// The limit is on the encoded message after its size prefix. For an mpsc
+/// message, it includes the byte that marks the end of the message, so the
+/// largest mpsc message is one byte smaller than the largest oneshot message
+/// or request.
 pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 
 /// An error code that irpc uses on streams and connections.
@@ -798,17 +803,37 @@ enum MessageEnd {
     Aborted,
 }
 
-/// Decodes an mpsc frame into its message and the marker after it.
+/// Decodes an mpsc frame into its message, or `None` if the send of the message was cancelled.
 ///
 /// A frame from an earlier version of irpc ends after the message, and counts as complete.
-fn decode_frame<T: DeserializeOwned>(buf: &[u8]) -> postcard::Result<(T, MessageEnd)> {
-    let (msg, rest) = postcard::take_from_bytes(buf)?;
+///
+/// The content of a cancelled message does not matter, so it does not have to
+/// decode: this receiver may validate more than the sender did. A frame that
+/// does not decode and ends with the marker for an aborted message is dropped.
+/// A frame from an earlier version that does not decode and happens to end
+/// with the same byte is dropped as well, instead of failing to decode.
+fn decode_frame<T: DeserializeOwned>(buf: &[u8]) -> postcard::Result<Option<T>> {
+    let (msg, rest) = match postcard::take_from_bytes(buf) {
+        Ok(decoded) => decoded,
+        Err(_) if ends_aborted(buf) => return Ok(None),
+        Err(err) => return Err(err),
+    };
     let end = match rest {
         [] => MessageEnd::Complete,
         [_] => postcard::from_bytes(rest)?,
+        _ if ends_aborted(buf) => return Ok(None),
         _ => return Err(postcard::Error::DeserializeBadEncoding),
     };
-    Ok((msg, end))
+    Ok(match end {
+        MessageEnd::Complete => Some(msg),
+        MessageEnd::Aborted => None,
+    })
+}
+
+/// Returns whether `buf` ends with the marker for an aborted message.
+fn ends_aborted(buf: &[u8]) -> bool {
+    let last = buf.last().map(std::slice::from_ref).unwrap_or_default();
+    matches!(postcard::from_bytes(last), Ok(MessageEnd::Aborted))
 }
 
 /// Finds the next length-prefixed message at the start of `buf`, if it is all there.
@@ -855,15 +880,15 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                         self.buf.truncate(INLINE_FRAME_SIZE);
                         self.buf.shrink_to_fit();
                     }
-                    let (msg, end) = msg.map_err(|err| {
+                    let msg = msg.map_err(|err| {
                         self.recv.stop(ErrorCode::MessageDecodeFailed.into()).ok();
                         e!(mpsc::RecvError::DecodeFailed, err)
                     })?;
-                    if let MessageEnd::Aborted = end {
+                    let Some(msg) = msg else {
                         self.span
                             .in_scope(|| debug!("dropped a message whose send was cancelled"));
                         continue;
-                    }
+                    };
                     self.received += 1;
                     if self.received == 1 {
                         self.span.in_scope(|| debug!("first message received"));

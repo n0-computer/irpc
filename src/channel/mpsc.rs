@@ -236,14 +236,16 @@ pub trait DynSender<T>: Debug + Send + Sync + 'static {
     ///
     /// For the remote case, the receiver gets a message either completely or
     /// not at all. If the send is cancelled, the message must not be
-    /// delivered, and the sender must stay usable.
+    /// delivered, and the sender must stay usable. A receiver from irpc 0.17 or
+    /// earlier is the exception, see [`Sender::send`].
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>>;
 
     /// Try to send a message, returning as fast as possible if sending
     /// is not currently possible.
     ///
     /// For the remote case, it must be guaranteed that the message is
-    /// either completely sent or not at all.
+    /// either completely sent or not at all. If the send is cancelled, the
+    /// same rules as for [`Self::send`] apply.
     fn try_send(
         &self,
         value: T,
@@ -299,6 +301,11 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// If the future is dropped before completion, the message is not
     /// delivered, and the sender stays usable.
+    ///
+    /// The exception is a remote receiver from irpc 0.17 or earlier, which does
+    /// not know that a message can be marked as aborted. If the cancelled send
+    /// wrote part of the message, the next send finishes it, and such a receiver
+    /// delivers it. So a retry after a cancelled send can deliver the message twice.
     pub async fn send(&self, value: T) -> Result<(), SendError> {
         match self {
             Sender::Tokio(tx) => tx
@@ -328,6 +335,11 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// If the future is dropped before completion, the message is not
     /// delivered, and the sender stays usable.
+    ///
+    /// The exception is a remote receiver from irpc 0.17 or earlier, which does
+    /// not know that a message can be marked as aborted. If the cancelled send
+    /// wrote part of the message, the next send finishes it, and such a receiver
+    /// delivers it. So a retry after a cancelled send can deliver the message twice.
     pub async fn try_send(&self, value: T) -> Result<bool, SendError> {
         match self {
             Sender::Tokio(tx) => match tx.try_send(value) {

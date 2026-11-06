@@ -6,14 +6,14 @@ use std::{
 };
 
 use irpc::{
-    Client, WithChannels,
+    Client, RpcMessage, WithChannels,
     channel::{
         SendError,
         mpsc::{self, Receiver, RecvError},
         oneshot,
     },
     noq::{configure_server, make_client_endpoint},
-    rpc::{ErrorCode, Handler},
+    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE},
     rpc_requests,
     util::{AsyncWriteVarintExt, WriteVarintExt},
 };
@@ -86,22 +86,27 @@ async fn mpsc_cancelled_sends_keep_clones_usable() -> TestResult<()> {
     let (send, _) = conn.open_bi().await?;
     let send1 = mpsc::Sender::<Vec<u8>>::from(send);
     let send2 = send1.clone();
+    let mut sent = Vec::new();
     let mut cancelled = 0;
-    for _ in 0..20 {
+    for id in 0..20u32 {
+        // Each message starts with its id, so that the receiver can tell them apart.
+        let mut msg = vec![1u8; 1024 * 1024];
+        msg[..4].copy_from_slice(&id.to_le_bytes());
         // A tiny timeout cancels the send before, while, or after it writes.
-        let fut = send1.send(vec![1u8; 1024 * 1024]);
-        if timeout(Duration::from_micros(1), fut).await.is_err() {
-            cancelled += 1;
+        match timeout(Duration::from_micros(1), send1.send(msg.clone())).await {
+            Ok(res) => {
+                res?;
+                sent.push(msg);
+            }
+            Err(_) => cancelled += 1,
         }
     }
     assert!(cancelled > 0, "no send was cancelled");
     send2.send(vec![2]).await?;
+    sent.push(vec![2]);
     drop((send1, send2));
-    let msgs = server.await??;
-    assert_eq!(msgs.last(), Some(&vec![2]));
-    for msg in &msgs[..msgs.len() - 1] {
-        assert!(msg.len() == 1024 * 1024 && msg.iter().all(|b| *b == 1));
-    }
+    // Exactly the sends that completed arrive, in order.
+    assert_eq!(server.await??, sent);
     Ok(())
 }
 
@@ -121,6 +126,91 @@ async fn mpsc_partly_cancelled_send_is_not_delivered() -> TestResult<()> {
     send.send(vec![8]).await?;
     drop(send);
     assert_eq!(server.await??, vec![vec![7], vec![8]]);
+    Ok(())
+}
+
+/// Checks that a `try_send` that is cancelled in the middle of the message is not delivered, and the channel keeps working.
+#[tokio::test]
+async fn mpsc_partly_cancelled_try_send_is_not_delivered() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(collect_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    send.send(vec![7]).await?;
+    // The message is larger than the flow control window, so `try_send` writes
+    // the first part and then waits for the rest.
+    let mut fut = Box::pin(send.try_send(vec![9u8; 8 * 1024 * 1024]));
+    assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
+    drop(fut);
+    send.send(vec![8]).await?;
+    drop(send);
+    assert_eq!(server.await??, vec![vec![7], vec![8]]);
+    Ok(())
+}
+
+/// Checks that sends cancelled while they write the rest of an earlier cancelled message deliver nothing.
+#[tokio::test]
+async fn mpsc_cancelled_while_finishing_an_aborted_message() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(collect_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    send.send(vec![7]).await?;
+    let mut fut = Box::pin(send.send(vec![9u8; 8 * 1024 * 1024]));
+    assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
+    drop(fut);
+    // Each of these sends first writes the rest of the aborted message, and is
+    // cancelled while it does.
+    for id in 0..3u8 {
+        let mut fut = Box::pin(send.send(vec![id; 8 * 1024 * 1024]));
+        assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
+        drop(fut);
+    }
+    send.send(vec![8]).await?;
+    drop(send);
+    assert_eq!(server.await??, vec![vec![7], vec![8]]);
+    Ok(())
+}
+
+/// A message that the sender encodes, but that the receiver rejects if it starts with `0xff`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
+struct Checked(Vec<u8>);
+
+impl TryFrom<Vec<u8>> for Checked {
+    type Error = &'static str;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        match value.first() {
+            Some(0xff) => Err("rejected"),
+            _ => Ok(Self(value)),
+        }
+    }
+}
+
+impl From<Checked> for Vec<u8> {
+    fn from(value: Checked) -> Self {
+        value.0
+    }
+}
+
+/// Checks that a cancelled message is dropped even if the receiver would reject it.
+#[tokio::test]
+async fn mpsc_cancelled_send_that_does_not_decode_is_dropped() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(collect::<Checked>(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Checked>::from(send);
+    send.send(Checked(vec![7])).await?;
+    let mut fut = Box::pin(send.send(Checked(vec![0xff; 8 * 1024 * 1024])));
+    assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
+    drop(fut);
+    send.send(Checked(vec![8])).await?;
+    drop(send);
+    assert_eq!(server.await??, vec![Checked(vec![7]), Checked(vec![8])]);
     Ok(())
 }
 
@@ -385,6 +475,11 @@ async fn mpsc_receiver_dropped_proto() -> TestResult<()> {
 
 /// Receives `Vec<u8>` messages on the first stream of the first connection, until the end.
 async fn collect_receiver(server: Endpoint) -> Result<Vec<Vec<u8>>, RecvError> {
+    collect::<Vec<u8>>(server).await
+}
+
+/// Receives messages on the first stream of the first connection, until the end.
+async fn collect<T: RpcMessage>(server: Endpoint) -> Result<Vec<T>, RecvError> {
     let conn = server
         .accept()
         .await
@@ -395,7 +490,7 @@ async fn collect_receiver(server: Endpoint) -> Result<Vec<Vec<u8>>, RecvError> {
         .accept_bi()
         .await
         .map_err(|err| e!(RecvError::Io, err.into()))?;
-    let mut recv = Receiver::<Vec<u8>>::from(recv);
+    let mut recv = Receiver::<T>::from(recv);
     let mut msgs = Vec::new();
     while let Some(msg) = recv.recv().await? {
         msgs.push(msg);
@@ -462,6 +557,36 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
         panic!("server should have failed due to max message size");
     };
     assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
+    Ok(())
+}
+
+/// Checks that the largest mpsc message is one byte smaller than [`MAX_MESSAGE_SIZE`], for the end marker.
+#[tokio::test]
+async fn mpsc_max_message_size_boundary() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let mut recv = Receiver::<Vec<u8>>::from(recv);
+        let msg = recv.recv().await?;
+        TestResult::Ok(msg.map(|msg| msg.len()))
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    // A vec of this length encodes with a 4 byte length, and the end marker takes 1 byte.
+    let largest = MAX_MESSAGE_SIZE as usize - 5;
+    send.send(vec![0u8; largest]).await?;
+    // Wait for the receiver first: the reset for a message that is too large
+    // can drop the earlier message before the receiver reads it.
+    assert_eq!(server.await??, Some(largest));
+    let Err(cause) = send.send(vec![0u8; largest + 1]).await else {
+        panic!("one byte more is too large");
+    };
+    assert!(
+        matches!(cause, SendError::MaxSizeExceeded { .. }),
+        "{cause:?}"
+    );
     Ok(())
 }
 
