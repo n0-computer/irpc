@@ -541,6 +541,51 @@ async fn mpsc_truncated_size() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that a stream that is reset in the middle of a message is an error, not the end of the stream.
+#[tokio::test]
+async fn mpsc_reset_inside_message_is_an_error() -> TestResult<()> {
+    // The message `[7]`, then part of a body, or part of a size prefix.
+    for partial in [&[2, 1, 7, 100, 1, 2, 3][..], &[2, 1, 7, 0x80]] {
+        let (server, client, server_addr) = create_connected_endpoints()?;
+        let server = tokio::spawn(collect_receiver(server));
+        let conn = client.connect(server_addr, "localhost")?.await?;
+        let (mut send, _) = conn.open_bi().await?;
+        send.write_all(partial).await?;
+        send.reset(ErrorCode::MessageEncodeFailed.into())?;
+        let Err(cause) = server.await? else {
+            panic!("the stream was reset");
+        };
+        assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
+    }
+    Ok(())
+}
+
+/// Checks that a connection that is closed in the middle of a message is an error, not the end of the stream.
+#[tokio::test]
+async fn mpsc_connection_closed_inside_message_is_an_error() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let mut recv = Receiver::<Vec<u8>>::from(recv);
+        first_tx.send(recv.recv().await?).ok();
+        TestResult::Ok(recv.recv().await)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The message `[7]`, then part of a body.
+    send.write_all(&[2, 1, 7, 100, 1, 2, 3]).await?;
+    // Close only after the receiver has the stream.
+    assert_eq!(first_rx.await?, Some(vec![7]));
+    conn.close(ErrorCode::RequestAborted.into(), b"");
+    let Err(cause) = server.await?? else {
+        panic!("the connection was closed");
+    };
+    assert_eq!(cause.remote_code(), Some(ErrorCode::RequestAborted));
+    Ok(())
+}
+
 /// Checks that the max message size is enforced on the sender side and that errors are propagated to the receiver side.
 #[tokio::test]
 async fn mpsc_max_message_size_send() -> TestResult<()> {

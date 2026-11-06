@@ -128,6 +128,50 @@ async fn oneshot_truncated_size() -> TestResult<()> {
     Ok(())
 }
 
+/// Checks that a stream that is reset in the middle of the message is an error, not `SenderClosed`.
+#[tokio::test]
+async fn oneshot_reset_inside_message_is_an_error() -> TestResult<()> {
+    // Part of a body, or part of a size prefix.
+    for partial in [&[100, 1, 2, 3][..], &[0x80]] {
+        let (server, client, server_addr) = create_connected_endpoints()?;
+        let server = tokio::spawn(vec_receiver(server));
+        let conn = client.connect(server_addr, "localhost")?.await?;
+        let (mut send, _) = conn.open_bi().await?;
+        send.write_all(partial).await?;
+        send.reset(ErrorCode::MessageEncodeFailed.into())?;
+        let Err(cause) = server.await? else {
+            panic!("the stream was reset");
+        };
+        assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
+    }
+    Ok(())
+}
+
+/// Checks that a connection that is closed in the middle of the message is an error, not `SenderClosed`.
+#[tokio::test]
+async fn oneshot_connection_closed_inside_message_is_an_error() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        accepted_tx.send(()).ok();
+        TestResult::Ok(oneshot::Receiver::<Vec<u8>>::from(recv).await)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // Part of a body.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    // Close only after the receiver has the stream.
+    accepted_rx.await?;
+    conn.close(ErrorCode::RequestAborted.into(), b"");
+    let Err(cause) = server.await?? else {
+        panic!("the connection was closed");
+    };
+    assert_eq!(cause.remote_code(), Some(ErrorCode::RequestAborted));
+    Ok(())
+}
+
 /// Checks that the max message size is enforced on receiver side.
 #[tokio::test]
 async fn oneshot_max_message_size_recv() -> TestResult<()> {
