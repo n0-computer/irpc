@@ -913,15 +913,19 @@ impl<S: Service> Client<S> {
         msg: impl Into<S>,
     ) -> Result<(::noq::RecvStream, tracing::Span)> {
         let (span, buf) = request.prepare(msg)?;
-        let (_tx, mut rx) = request.write_raw(&buf).instrument(span.clone()).await?;
-        if self.0.zero_rtt_rejected().await {
-            // The server did not accept 0-RTT and lost the data, so write it again.
-            let Request::Remote(request) = self.request().await? else {
-                unreachable!()
-            };
-            span.record("req", request.req_id());
-            (_, rx) = request.write_raw(&buf).instrument(span.clone()).await?;
+        // A large request can still be writing when the rejection arrives, and then
+        // fails with it, so check for the rejection also when the write failed.
+        let res = request.write_raw(&buf).instrument(span.clone()).await;
+        if !self.0.zero_rtt_rejected().await {
+            let (_tx, rx) = res?;
+            return Ok((rx, span));
         }
+        // The server did not accept 0-RTT and lost the data, so write it again.
+        let Request::Remote(request) = self.request().await? else {
+            unreachable!()
+        };
+        span.record("req", request.req_id());
+        let (_tx, rx) = request.write_raw(&buf).instrument(span.clone()).await?;
         Ok((rx, span))
     }
 }
