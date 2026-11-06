@@ -18,7 +18,7 @@ use n0_future::{
 };
 use serde::{Deserialize, Serialize};
 use thousands::Separable;
-use tracing::trace;
+use tracing::{Instrument, trace};
 
 // Define the protocol and message enums using the macro
 #[rpc_requests(message = ComputeMessage)]
@@ -70,11 +70,17 @@ impl ComputeActor {
 
     async fn run(mut self) {
         while let Ok(Some(msg)) = self.recv.recv().await {
-            n0_future::task::spawn(async move {
-                if let Err(cause) = Self::handle(msg).await {
-                    eprintln!("Error: {cause}");
+            // Run the handler in the span of the message, so its logs show up in the
+            // trace of the caller.
+            let span = msg.span().clone();
+            n0_future::task::spawn(
+                async move {
+                    if let Err(cause) = Self::handle(msg).await {
+                        eprintln!("Error: {cause}");
+                    }
                 }
-            });
+                .instrument(span),
+            );
         }
     }
 
@@ -82,17 +88,13 @@ impl ComputeActor {
         match msg {
             ComputeMessage::Sqr(sqr) => {
                 trace!("sqr {:?}", sqr);
-                let WithChannels {
-                    tx, inner, span, ..
-                } = sqr;
-                let _entered = span.enter();
+                let WithChannels { tx, inner, .. } = sqr;
                 let result = (inner.num as u128) * (inner.num as u128);
                 tx.send(result).await?;
             }
             ComputeMessage::Sum(sum) => {
                 trace!("sum {:?}", sum);
-                let WithChannels { rx, tx, span, .. } = sum;
-                let _entered = span.enter();
+                let WithChannels { rx, tx, .. } = sum;
                 let mut receiver = rx;
                 let mut total = 0;
                 while let Some(num) = receiver.recv().await? {
@@ -102,10 +104,7 @@ impl ComputeActor {
             }
             ComputeMessage::Fibonacci(fib) => {
                 trace!("fibonacci {:?}", fib);
-                let WithChannels {
-                    tx, inner, span, ..
-                } = fib;
-                let _entered = span.enter();
+                let WithChannels { tx, inner, .. } = fib;
                 let sender = tx;
                 let mut a = 0u64;
                 let mut b = 1u64;
@@ -118,14 +117,7 @@ impl ComputeActor {
             }
             ComputeMessage::Multiply(mult) => {
                 trace!("multiply {:?}", mult);
-                let WithChannels {
-                    rx,
-                    tx,
-                    inner,
-                    span,
-                    ..
-                } = mult;
-                let _entered = span.enter();
+                let WithChannels { rx, tx, inner, .. } = mult;
                 let mut receiver = rx;
                 let sender = tx;
                 let multiplier = inner.initial;

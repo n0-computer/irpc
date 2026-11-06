@@ -6,14 +6,24 @@ use n0_error::{e, stack_error};
 use n0_future::future::Boxed as BoxFuture;
 
 use super::SendError;
+#[cfg(feature = "rpc")]
+use crate::rpc::{self, ErrorCode};
 use crate::util::FusedOneshotReceiver;
 
-/// Error when receiving a oneshot or mpsc message. For local communication,
-/// the only thing that can go wrong is that the sender has been closed.
+/// Error when receiving a oneshot message.
 ///
-/// For rpc communication, there can be any number of errors, so this is a
-/// generic io error.
-#[stack_error(derive, add_meta, from_sources)]
+/// For a local channel, the only error is [`SenderClosed`]. For a remote
+/// channel, the sender is on the other side of the connection, for example
+/// the server for a response.
+///
+/// If the server rejects the request and also closes the connection, the close
+/// usually arrives first, and the receiver gets [`Io`] instead of [`Remote`].
+/// [`Self::remote_code`] returns the code in both cases.
+///
+/// [`SenderClosed`]: Self::SenderClosed
+/// [`Io`]: Self::Io
+/// [`Remote`]: Self::Remote
+#[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum RecvError {
     /// The sender has been closed.
@@ -23,13 +33,30 @@ pub enum RecvError {
     /// without sending, for example because it was dropped.
     #[error("Sender closed")]
     SenderClosed,
-    /// The message exceeded the maximum allowed message size (see [`MAX_MESSAGE_SIZE`]).
+    /// The sender reset the stream with an irpc error code, and the channel is closed.
+    ///
+    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
+    ///
+    /// [`ErrorCode`]: crate::rpc::ErrorCode
+    /// [`rpc`]: crate::rpc
+    #[cfg(feature = "rpc")]
+    #[error("Sender closed the channel: {code}")]
+    Remote { code: crate::rpc::ErrorCode },
+    /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
     ///
     /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
-    #[error("Maximum message size exceeded")]
-    MaxMessageSizeExceeded,
-    /// An io error occurred. This can occur for remote communication,
-    /// due to a network error or deserialization error.
+    #[error("Message too large")]
+    MaxSizeExceeded,
+    /// The message does not decode, so this receiver closed the channel.
+    #[cfg(feature = "rpc")]
+    #[error("Message does not decode")]
+    DecodeFailed {
+        #[error(std_err)]
+        source: postcard::Error,
+    },
+    /// An io error, for example because the connection was lost.
+    ///
+    /// A stream that ends in the middle of a message also gives an io error.
     #[error("Io error")]
     Io {
         #[error(std_err)]
@@ -37,14 +64,43 @@ pub enum RecvError {
     },
 }
 
+/// Converts an io error from reading the stream of a remote channel.
+///
+/// A reset with an irpc error code becomes [`RecvError::Remote`], and any
+/// other io error becomes [`RecvError::Io`].
+impl From<io::Error> for RecvError {
+    fn from(err: io::Error) -> Self {
+        #[cfg(feature = "rpc")]
+        if let Some(code) = rpc::reset_code(&err) {
+            return e!(RecvError::Remote { code });
+        }
+        e!(RecvError::Io, err)
+    }
+}
+
 impl From<RecvError> for io::Error {
     fn from(e: RecvError) -> Self {
         match e {
             RecvError::Io { source, .. } => source,
             RecvError::SenderClosed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
-            RecvError::MaxMessageSizeExceeded { .. } => {
-                io::Error::new(io::ErrorKind::InvalidData, e)
-            }
+            #[cfg(feature = "rpc")]
+            RecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
+            _ => io::Error::new(io::ErrorKind::InvalidData, e),
+        }
+    }
+}
+
+#[cfg(feature = "rpc")]
+impl RecvError {
+    /// Returns the irpc error code that the peer sent, if any.
+    ///
+    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
+    /// the peer closed the connection with.
+    pub fn remote_code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::Remote { code, .. } => Some(*code),
+            Self::Io { source, .. } => rpc::io_close_code(source),
+            _ => None,
         }
     }
 }
@@ -57,23 +113,24 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     (tx.into(), rx.into())
 }
 
-/// A generic boxed sender.
+/// A sender that can be wrapped in a `Box<dyn DynSender<T>>`.
 ///
 /// Remote senders are always boxed, since for remote communication the boxing
 /// overhead is negligible. However, boxing can also be used for local communication,
 /// e.g. when applying a transform or filter to the message before sending it.
-pub type BoxedSender<T> =
-    Box<dyn FnOnce(T) -> BoxFuture<Result<(), SendError>> + Send + Sync + 'static>;
+pub trait DynSender<T>: Debug + Send + Sync + 'static {
+    /// Send a message, consuming the sender.
+    fn send(self: Box<Self>, value: T) -> BoxFuture<Result<(), SendError>>;
 
-/// A sender that can be wrapped in a `Box<dyn DynSender<T>>`.
-///
-/// In addition to implementing `Future`, this provides a fn to check if the sender is
-/// an rpc sender.
-///
-/// Remote receivers are always boxed, since for remote communication the boxing
-/// overhead is negligible. However, boxing can also be used for local communication,
-/// e.g. when applying a transform or filter to the message before receiving it.
-pub trait DynSender<T>: Future<Output = Result<(), SendError>> + Send + Sync + 'static {
+    /// True if sending can fail in more ways than the receiver being dropped.
+    ///
+    /// Return false if this sender only fails with [`SendError::ReceiverClosed`],
+    /// e.g. a transform around an in-memory channel. Return true if it goes
+    /// through a connection that can break on its own, even a local one such
+    /// as shared memory between processes. Wrappers should forward the value
+    /// of the sender they wrap.
+    ///
+    /// See [`Sender::is_rpc`].
     fn is_rpc(&self) -> bool;
 }
 
@@ -91,17 +148,14 @@ pub type BoxedReceiver<T> = BoxFuture<Result<T, RecvError>>;
 /// behaves like a local oneshot sender and has no overhead in the local case.
 pub enum Sender<T> {
     Tokio(tokio::sync::oneshot::Sender<T>),
-    /// we can't yet distinguish between local and remote boxed oneshot senders.
-    /// If we ever want to have local boxed oneshot senders, we need to add a
-    /// third variant here.
-    Boxed(BoxedSender<T>),
+    Boxed(Box<dyn DynSender<T>>),
 }
 
 impl<T> Debug for Sender<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tokio(_) => f.debug_tuple("Tokio").finish(),
-            Self::Boxed(_) => f.debug_tuple("Boxed").finish(),
+            Self::Boxed(sender) => f.debug_tuple("Boxed").field(sender).finish(),
         }
     }
 }
@@ -128,21 +182,33 @@ impl<T> Sender<T> {
     ///
     /// If this is a boxed sender that represents a remote connection, sending may yield or fail with an io error.
     /// Local senders will never yield, but can fail if the receiver has been closed.
-    pub async fn send(self, value: T) -> Result<(), SendError> {
+    pub async fn send(self, value: T) -> Result<(), SendError>
+    where
+        T: 'static,
+    {
         match self {
             Sender::Tokio(tx) => tx.send(value).map_err(|_| e!(SendError::ReceiverClosed)),
-            Sender::Boxed(f) => f(value).await,
+            Sender::Boxed(sender) => sender.send(value).await,
         }
     }
 
-    /// Check if this is a remote sender
+    /// Returns true if sending can fail in more ways than the receiver being dropped.
+    ///
+    /// This is about which failures can occur, not about where the receiver is.
+    /// A purely in-memory sender is not rpc: it only fails with
+    /// [`SendError::ReceiverClosed`]. A sender that goes through a connection
+    /// that can break on its own is rpc, even if both ends are on the same
+    /// machine, e.g. shared memory between processes.
+    ///
+    /// A sender created with [`Self::with_map`] or [`Self::with_filter_map`]
+    /// is rpc if the sender it wraps is.
     pub fn is_rpc(&self) -> bool
     where
         T: 'static,
     {
         match self {
             Sender::Tokio(_) => false,
-            Sender::Boxed(_) => true,
+            Sender::Boxed(sender) => sender.is_rpc(),
         }
     }
 }
@@ -172,17 +238,44 @@ impl<T: Send + Sync + 'static> Sender<T> {
         F: Fn(U) -> Option<T> + Send + Sync + 'static,
         U: Send + Sync + 'static,
     {
-        let inner: BoxedSender<U> = Box::new(move |value| {
-            let opt = f(value);
-            Box::pin(async move {
-                if let Some(v) = opt {
-                    self.send(v).await
-                } else {
-                    Ok(())
-                }
-            })
-        });
-        Sender::Boxed(inner)
+        Sender::Boxed(Box::new(FilterMapSender { inner: self, f }))
+    }
+}
+
+/// A sender that applies a filter and transform before sending to the inner sender.
+struct FilterMapSender<T, F> {
+    inner: Sender<T>,
+    f: F,
+}
+
+impl<T, F> Debug for FilterMapSender<T, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilterMapSender")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T, U, F> DynSender<U> for FilterMapSender<T, F>
+where
+    T: Send + Sync + 'static,
+    U: Send + Sync + 'static,
+    F: Fn(U) -> Option<T> + Send + Sync + 'static,
+{
+    fn send(self: Box<Self>, value: U) -> BoxFuture<Result<(), SendError>> {
+        let Self { inner, f } = *self;
+        let opt = f(value);
+        Box::pin(async move {
+            if let Some(v) = opt {
+                inner.send(v).await
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn is_rpc(&self) -> bool {
+        self.inner.is_rpc()
     }
 }
 

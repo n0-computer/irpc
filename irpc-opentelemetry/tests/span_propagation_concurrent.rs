@@ -2,11 +2,9 @@
 //! multi-threaded runtime.
 //!
 //! Fires many in-flight requests so that handler futures are very likely to
-//! yield and migrate worker threads between dispatch and span creation. With
-//! the previous `thread_local!` storage this was racy — a yielding task could
-//! lose its slot to another request landing on the same OS thread. The
-//! `task_local!` scope is per-task and survives migration, so every server
-//! "Get" span must share its client's trace id.
+//! yield and migrate worker threads. irpc creates each request span from the
+//! span context of its own request before the handler runs, so every server
+//! "Get" span must be a child of its own client "Get" span.
 //!
 //! Lives in its own integration-test binary because it installs a global
 //! tracing subscriber and tracer provider, which would conflict with the
@@ -21,28 +19,28 @@ use irpc::{
     rpc_requests,
 };
 use n0_error::StdResultExt;
-use opentelemetry::trace::TraceId;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use serde::{Deserialize, Serialize};
 use tracing::{Instrument, info_span};
 use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
 
-fn trace_id_for_req(spans: &[SpanData], name: &str, val: i64) -> Option<TraceId> {
-    spans
-        .iter()
-        .find(|s| {
-            s.name == name
-                && s.attributes
-                    .iter()
-                    .any(|kv| kv.key.as_str() == "req_id" && kv.value == val.into())
-        })
-        .map(|s| s.span_context.trace_id())
+fn req_span(spans: &[SpanData], val: i64) -> Option<&SpanData> {
+    spans.iter().find(|s| {
+        s.name == "req"
+            && s.attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == "req_id" && kv.value == val.into())
+    })
 }
 
-fn server_span_for_trace(spans: &[SpanData], trace_id: TraceId) -> Option<&SpanData> {
+/// Finds the "Get" span whose parent is `parent`.
+///
+/// Both the client and the server create a "Get" request span, and they close
+/// in either order, so they can only be told apart by their parents.
+fn get_child_of<'a>(spans: &'a [SpanData], parent: &SpanData) -> Option<&'a SpanData> {
     spans
         .iter()
-        .find(|s| s.name == "Get" && s.span_context.trace_id() == trace_id)
+        .find(|s| s.name == "Get" && s.parent_span_id == parent.span_context.span_id())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -123,13 +121,14 @@ async fn span_propagation_concurrent() -> n0_error::Result<()> {
     let spans = exporter.get_finished_spans().unwrap();
 
     for req_id in 0..N {
-        let client_trace_id = trace_id_for_req(&spans, "req", req_id)
+        let req = req_span(&spans, req_id)
             .unwrap_or_else(|| panic!("no client span found with req_id={req_id}"));
-        let server_span = server_span_for_trace(&spans, client_trace_id).unwrap_or_else(|| {
-            panic!("no server 'Get' span with trace_id={client_trace_id} for req_id={req_id}")
-        });
+        let client = get_child_of(&spans, req)
+            .unwrap_or_else(|| panic!("no client 'Get' span for req_id={req_id}"));
+        let server = get_child_of(&spans, client)
+            .unwrap_or_else(|| panic!("no server 'Get' span for req_id={req_id}"));
         assert!(
-            server_span.parent_span_is_remote,
+            server.parent_span_is_remote,
             "server span for req_id={req_id} should have a remote parent"
         );
     }

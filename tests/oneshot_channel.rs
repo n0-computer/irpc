@@ -1,15 +1,17 @@
 #![cfg(feature = "noq_endpoint_setup")]
 
-use std::io::{self, ErrorKind};
+use std::io;
 
 use irpc::{
     channel::{
         SendError,
         oneshot::{self, RecvError},
     },
+    rpc::ErrorCode,
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
+use n0_future::future::poll_once;
 use n0_tracing_test::traced_test;
 use noq::Endpoint;
 use testresult::TestResult;
@@ -68,13 +70,31 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     let Err(cause) = send.send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxMessageSizeExceeded { .. }));
+    assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(
-        matches!(cause, RecvError::Io { source, .. } if source.kind() == ErrorKind::ConnectionReset)
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageMaxSizeExceeded));
+    Ok(())
+}
+
+/// Checks that a send that is cancelled in the middle of the message resets the stream.
+#[tokio::test]
+#[traced_test]
+async fn oneshot_cancelled_send_resets_stream() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = oneshot::Sender::<Vec<u8>>::from(send);
+    // The message is larger than the flow control window, so one poll cannot write all of it.
+    let mut fut = Box::pin(send.send(vec![0u8; 8 * 1024 * 1024]));
+    assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
+    drop(fut);
+    let Err(cause) = server.await? else {
+        panic!("the send was cancelled");
+    };
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageAborted));
     Ok(())
 }
 
@@ -93,7 +113,7 @@ async fn oneshot_max_message_size_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(matches!(cause, RecvError::MaxMessageSizeExceeded { .. }));
+    assert!(matches!(cause, RecvError::MaxSizeExceeded { .. }));
     Ok(())
 }
 
@@ -113,7 +133,7 @@ async fn noser_receiver(server: Endpoint) -> Result<(), RecvError> {
     Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
 }
 
-/// Checks that trying to send a message that cannot be serialized results in an error on the sender side and a connection reset on the receiver side.
+/// Checks that a message that does not encode gives `MessageEncodeFailed` on both sides, as an error code for the receiver.
 #[tokio::test]
 #[traced_test]
 async fn oneshot_serialize_error_send() -> TestResult<()> {
@@ -126,16 +146,11 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
     let Err(cause) = send.send(NoSer(1)).await else {
         panic!("client should have failed due to serialization error");
     };
-    assert!(
-        matches!(cause, SendError::Io { source, .. } if source.kind() == ErrorKind::InvalidData)
-    );
+    assert!(matches!(cause, SendError::EncodeFailed { .. }), "{cause:?}");
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    println!("Server error: {cause:?}");
-    assert!(
-        matches!(cause, RecvError::Io { source, .. } if source.kind() == ErrorKind::ConnectionReset)
-    );
+    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
     Ok(())
 }
 
@@ -152,9 +167,41 @@ async fn oneshot_serialize_error_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    println!("Server error: {cause:?}");
-    assert!(
-        matches!(cause, RecvError::Io { source, .. } if source.kind() == ErrorKind::InvalidData)
-    );
+    assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a local sender is not rpc, also after a transform.
+#[tokio::test]
+#[traced_test]
+async fn oneshot_local_is_not_rpc() -> TestResult<()> {
+    let (send, recv) = oneshot::channel::<u64>();
+    assert!(!send.is_rpc());
+    let send = send.with_map(|x: u32| x as u64).with_filter(|x| *x > 0);
+    assert!(!send.is_rpc());
+    send.send(7).await?;
+    assert_eq!(recv.await?, 7);
+    Ok(())
+}
+
+/// Checks that a remote sender is rpc, also after a transform.
+#[tokio::test]
+#[traced_test]
+async fn oneshot_remote_is_rpc() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        let res = oneshot::Receiver::<u64>::from(recv).await?;
+        TestResult::Ok(res)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (send, _) = conn.open_bi().await?;
+    let send = oneshot::Sender::<u64>::from(send);
+    assert!(send.is_rpc());
+    let send = send.with_map(|x: u32| x as u64);
+    assert!(send.is_rpc());
+    send.send(7).await?;
+    assert_eq!(server.await??, 7);
     Ok(())
 }

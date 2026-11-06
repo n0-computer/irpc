@@ -26,7 +26,7 @@ impl From<(String, String)> for Set {
     }
 }
 
-#[rpc_requests(message = StorageMessage, no_rpc, no_spans)]
+#[rpc_requests(message = StorageMessage, no_rpc)]
 #[derive(Serialize, Deserialize, Debug)]
 enum StorageProtocol {
     #[rpc(tx=oneshot::Sender<Option<String>>)]

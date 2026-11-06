@@ -20,16 +20,19 @@
 //! `span_propagation` always sends an `Option<SpanContextCarrier>`, which is
 //! `None` when irpc does not propagate span context.
 //!
-//! The `irpc-opentelemetry` crate has a propagator for OpenTelemetry.
+//! irpc creates the request spans at debug level, see
+//! [`Service::new_request_span`](crate::Service::new_request_span). The server
+//! can only set the parent of a request span that the tracing backend records,
+//! so the filter of the backend on the server must let the request spans
+//! through. If it drops them, the server starts a new trace. The client sends
+//! the context of the span that it is in if the backend drops its request span.
+//!
+//! The `irpc-opentelemetry` crate has a propagator for OpenTelemetry, and
+//! documents how to filter for it.
 
-use std::{collections::HashMap, future::Future};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "tracing-subscriber-03")]
-tokio::task_local! {
-    static SPAN_CONTEXT: SpanContextCarrier;
-}
 
 /// Text headers that carry the context of a span to the remote.
 ///
@@ -57,17 +60,46 @@ impl SpanContextCarrier {
         self.headers.keys().map(String::as_str)
     }
 
-    /// Returns the context of the current span, if the subscriber has a propagator.
-    pub(crate) fn from_current() -> Option<Self> {
+    /// Sets the parent of `span` from this context, if the subscriber of `span` has a propagator.
+    pub(crate) fn set_parent_of(&self, span: &tracing::Span) {
         #[cfg(not(feature = "tracing-subscriber-03"))]
-        return None;
+        let _ = span;
         #[cfg(feature = "tracing-subscriber-03")]
-        tracing::dispatcher::get_default(|dispatch| {
-            let propagator = dispatch.downcast_ref::<PropagatorLayer>()?;
-            let mut carrier = Self::default();
-            propagator.0.inject(&tracing::Span::current(), &mut carrier);
-            Some(carrier)
-        })
+        span.with_subscriber(|(_id, dispatch)| {
+            if let Some(propagator) = dispatch.downcast_ref::<PropagatorLayer>() {
+                propagator.0.set_parent(span, self);
+            }
+        });
+    }
+
+    /// Returns the context of `span`, or of the current span if `span` has none.
+    ///
+    /// Returns `None` if the subscriber has no propagator. A span has no
+    /// context if the tracing backend does not record it, for example because
+    /// a filter of the backend drops it. The client calls this outside the
+    /// request span, so the current span is the parent of the request span,
+    /// and the server still joins the trace of the caller.
+    pub(crate) fn from_span_or_current(span: &tracing::Span) -> Option<Self> {
+        #[cfg(not(feature = "tracing-subscriber-03"))]
+        {
+            let _ = span;
+            None
+        }
+        #[cfg(feature = "tracing-subscriber-03")]
+        {
+            // Inside `get_default`, the dispatcher of a scoped subscriber is busy, and
+            // `Span::current` would return no span.
+            let current = tracing::Span::current();
+            tracing::dispatcher::get_default(|dispatch| {
+                let propagator = dispatch.downcast_ref::<PropagatorLayer>()?;
+                let mut carrier = Self::default();
+                propagator.0.inject(span, &mut carrier);
+                if carrier.headers.is_empty() {
+                    propagator.0.inject(&current, &mut carrier);
+                }
+                Some(carrier)
+            })
+        }
     }
 }
 
@@ -105,41 +137,3 @@ struct PropagatorLayer(Box<dyn Propagator>);
 
 #[cfg(feature = "tracing-subscriber-03")]
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PropagatorLayer {}
-
-/// Runs `fut` with `carrier` in scope for [`set_span_parent_from_remote`].
-///
-/// The server loop calls this for each request. Most users do not call it.
-///
-/// The carrier lives in a task-local of `fut`, so concurrent requests do not see
-/// each other's context, and the context moves with `fut` across threads.
-pub async fn scope_remote<F: Future>(carrier: Option<SpanContextCarrier>, fut: F) -> F::Output {
-    #[cfg(not(feature = "tracing-subscriber-03"))]
-    {
-        let _ = carrier;
-        fut.await
-    }
-    #[cfg(feature = "tracing-subscriber-03")]
-    {
-        match carrier {
-            Some(carrier) => SPAN_CONTEXT.scope(carrier, fut).await,
-            None => fut.await,
-        }
-    }
-}
-
-/// Sets the parent of `span` from the span context of the current request.
-///
-/// The code from `rpc_requests(span_propagation)` calls this. It does nothing
-/// outside of [`scope_remote`], if the subscriber of `span` has no propagator, or
-/// without the `tracing-subscriber-03` feature.
-pub fn set_span_parent_from_remote(span: &tracing::Span) {
-    #[cfg(not(feature = "tracing-subscriber-03"))]
-    let _ = span;
-    #[cfg(feature = "tracing-subscriber-03")]
-    span.with_subscriber(|(_id, dispatch)| {
-        let Some(propagator) = dispatch.downcast_ref::<PropagatorLayer>() else {
-            return;
-        };
-        let _ = SPAN_CONTEXT.try_with(|carrier| propagator.0.set_parent(span, carrier));
-    });
-}

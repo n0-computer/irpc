@@ -63,9 +63,10 @@ impl Propagator for TestPropagator {
 async fn propagator_carries_headers_to_the_server() -> TestResult<()> {
     let propagator = TestPropagator::default();
     let layer = irpc::span_propagation::layer(propagator.clone());
-    // The irpc layer enables no spans, so the filter enables the request spans.
+    // The irpc layer enables no spans, so the filter enables the request spans,
+    // which have debug level. The server reads the headers only into an enabled span.
     // The test runtime has one thread, so the server task sees this subscriber too.
-    let subscriber = Registry::default().with(LevelFilter::INFO).with(layer);
+    let subscriber = Registry::default().with(LevelFilter::DEBUG).with(layer);
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let (server, client, server_addr) = create_connected_endpoints()?;

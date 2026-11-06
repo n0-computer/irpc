@@ -2,8 +2,8 @@
 
 OpenTelemetry span propagation for [irpc](https://github.com/n0-computer/irpc).
 
-The client writes the context of the current span into each request, and the
-server sets the parent of the request span from it, so a trace continues across
+The client writes the context of its request span into each request, and the
+server sets the parent of its request span from it, so a trace continues across
 irpc calls.
 
 ## Version compatibility
@@ -13,7 +13,7 @@ Your application must use semver-compatible versions of `irpc`,
 
 | irpc-opentelemetry | irpc | opentelemetry | tracing-opentelemetry |
 |--------------------|------|---------------|-----------------------|
-| 0.1                | 0.17 | 0.32          | 0.33                  |
+| 0.1                | 0.17 | 0.33          | 0.34                  |
 
 With a second copy of one of them in your dependency tree, everything
 compiles, but no span context reaches the remote:
@@ -55,6 +55,45 @@ tracing::subscriber::set_global_default(subscriber)?;
 Client and server both need the layer. See
 [`examples/span_propagation.rs`](examples/span_propagation.rs) for a full
 example that exports to Jaeger.
+
+## Filtering
+
+irpc creates its request spans at debug level, so that a console filter at
+info level does not prefix every log line with them. The macro-generated spans
+have the target of the module that defines the protocol.
+
+The server sets the parent of its request span from the context that the
+client sent. It can only do that if the `tracing-opentelemetry` layer records
+the request span. If a filter drops the span, nothing fails: the server starts
+a new trace instead of joining the trace of the client. So give the
+`tracing-opentelemetry` layer its own filter that lets the request spans
+through, and keep the console filter at info:
+
+```rust
+use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
+
+let subscriber = Registry::default()
+    .with(
+        tracing_opentelemetry::layer()
+            .with_tracer(tracer)
+            .with_filter(EnvFilter::new("info,my_protocol=debug")),
+    )
+    .with(irpc_opentelemetry::layer())
+    .with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::new("info")));
+```
+
+Replace `my_protocol` with the module path of the protocol. The directive
+also sends the debug events of that module to OpenTelemetry, so a protocol in a
+module of its own keeps the traces small. irpc's own debug events have the
+target `irpc` and stay out.
+
+A single filter for the whole subscriber, such as
+`tracing_subscriber::fmt().with_env_filter("info")`, cannot do both: at info
+level it drops the request spans, and at debug level the console shows them.
+
+The client does not need its request span recorded. If the
+`tracing-opentelemetry` layer drops it, the client sends the context of the
+span that it is in.
 
 ## License
 

@@ -118,11 +118,13 @@ fn init_tracing(
     //     through the `tracing-opentelemetry` layer (which forwards to OTLP
     //     and is filtered to `info` so noisy debug spans don't ship to
     //     Jaeger), in parallel with a plain fmt layer that prints to stderr
-    //     under `RUST_LOG`.
+    //     under `RUST_LOG`. irpc creates the request spans at debug level,
+    //     with the target of this example, which defines the protocol, so the
+    //     filter lets them through.
     let tracer = opentelemetry::global::tracer(service_name);
     let telemetry = tracing_opentelemetry::layer()
         .with_tracer(tracer)
-        .with_filter(EnvFilter::new("info"));
+        .with_filter(EnvFilter::new("info,span_propagation=debug"));
     let fmt_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("span_propagation=info"));
     // The irpc layer writes the span context into each request.
@@ -155,10 +157,10 @@ async fn server(otlp_endpoint: &str) -> Result<()> {
     let protocol = IrohProtocol::<Proto>::new(Handler::sequential(|msg: Message| async move {
         match msg {
             Message::Get(msg) => {
-                // `WithChannels` carries a `span` field that the derive
-                // macro builds as `info_span!("Get")` with its parent set
-                // from the propagated remote context, so the handler's
-                // work shows up under the originating client trace.
+                // irpc runs this handler in the request span `Get`, with its
+                // parent set from the propagated remote context, and
+                // `WithChannels::span` is that span. So the handler's work
+                // shows up under the originating client trace.
                 let WithChannels {
                     inner, tx, span, ..
                 } = msg;

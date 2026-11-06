@@ -53,6 +53,14 @@ mod varint_util {
             // Extract the 7 value bits (bits 0-6, excluding the MSB which is the continuation bit)
             let value = (byte & 0x7F) as u64;
 
+            // The 10th byte holds only the highest bit of a u64
+            if shift == 63 && value > 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Varint is too large for u64",
+                ));
+            }
+
             // Add the bits to our result at the current shift position
             result |= value << shift;
 
@@ -164,7 +172,6 @@ mod varint_util {
     /// helper to write a length-prefixed value.
     pub trait WriteVarintExt: std::io::Write {
         /// Write a varint
-        #[allow(dead_code)]
         fn write_varint_u64(&mut self, value: u64) -> io::Result<usize>;
         /// Write a value with a varint encoded length prefix.
         fn write_length_prefixed<T: Serialize>(&mut self, value: T) -> io::Result<()>;
@@ -283,3 +290,27 @@ mod now_or_never {
 }
 #[cfg(feature = "rpc")]
 pub(crate) use now_or_never::now_or_never;
+
+#[cfg(all(test, any(feature = "rpc", feature = "varint-util")))]
+mod tests {
+    use super::{AsyncReadVarintExt, WriteVarintExt};
+
+    #[tokio::test]
+    async fn varint_rejects_values_larger_than_u64() {
+        let mut buf = Vec::new();
+        buf.write_varint_u64(u64::MAX).unwrap();
+        assert_eq!(buf.len(), 10);
+        assert_eq!(
+            buf.as_slice().read_varint_u64().await.unwrap(),
+            Some(u64::MAX)
+        );
+        // The 10th byte can only hold the highest bit of a u64.
+        let mut too_large = [0x80; 10];
+        too_large[9] = 0x02;
+        let err = too_large.as_slice().read_varint_u64().await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        // An 11th byte is too large in any case.
+        let err = [0xff; 11].as_slice().read_varint_u64().await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+}
