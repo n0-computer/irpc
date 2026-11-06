@@ -83,14 +83,12 @@
 //! so it delivers a cancelled message that it gets. A frame without a marker
 //! counts as a complete message.
 //!
-//! The content of a cancelled message does not have to decode: the receiver
-//! may validate more than the sender did. So the receiver also drops a frame
-//! that does not decode if its last byte is the marker for an aborted message.
-//! A frame from an earlier version that does not decode and happens to end
-//! with the same byte is dropped as well, instead of being an
-//! [`mpsc::RecvError::DecodeFailed`]. Messages from earlier versions that
-//! decode are not affected. Telling the two cases apart would need a change of
-//! the framing.
+//! If an mpsc frame does not decode and ends with the marker for an aborted
+//! message, the receiver treats it as aborted and drops it. This lets
+//! cancellation discard a message even when the receiver rejects its contents.
+//! An invalid frame from an older peer that ends with the same byte is also
+//! dropped, instead of returning [`mpsc::RecvError::DecodeFailed`]. Valid
+//! messages from older peers are unaffected.
 //!
 //! # Error codes
 //!
