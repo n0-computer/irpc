@@ -78,7 +78,8 @@
 //!
 //! # Example
 //!
-//! ```
+#![cfg_attr(all(feature = "derive", feature = "rpc"), doc = "```")]
+#![cfg_attr(not(all(feature = "derive", feature = "rpc")), doc = "```ignore")]
 //! use irpc::{
 //!     Client, WithChannels,
 //!     channel::{mpsc, oneshot},
@@ -168,7 +169,8 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// of a distinct type (unless the `wrap` attribute is used on a variant, see below).
 ///
 /// Basic usage example:
-/// ```
+#[cfg_attr(feature = "rpc", doc = "```")]
+#[cfg_attr(not(feature = "rpc"), doc = "```ignore")]
 /// use irpc::{
 ///     channel::{mpsc, oneshot},
 ///     rpc_requests,
@@ -271,7 +273,8 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// ## Examples
 ///
 /// With `wrap`:
-/// ```
+#[cfg_attr(feature = "rpc", doc = "```")]
+#[cfg_attr(not(feature = "rpc"), doc = "```ignore")]
 /// use irpc::{
 ///     Client,
 ///     channel::{mpsc, oneshot},

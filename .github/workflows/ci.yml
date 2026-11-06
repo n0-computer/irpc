@@ -79,6 +79,14 @@ jobs:
         run: cargo test --locked --workspace --bins --tests --examples
       - name: cargo test (workspace, no default features)
         run: cargo test --locked --workspace --no-default-features --bins --tests --examples
+      - name: cargo test --doc (workspace, all features)
+        run: cargo test --locked --workspace --all-features --doc
+      - name: cargo test --doc (irpc, no default features)
+        run: cargo test --locked -p irpc --no-default-features --doc
+      - name: cargo test --doc (irpc, feature derive)
+        run: cargo test --locked -p irpc --no-default-features --features derive --doc
+      - name: cargo test --doc (irpc, feature rpc)
+        run: cargo test --locked -p irpc --no-default-features --features rpc --doc
       - name: cargo check (irpc, no default features)
         run: cargo check --locked --no-default-features --bins --tests --examples
       - name: cargo check (irpc, feature derive)

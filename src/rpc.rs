@@ -1200,7 +1200,8 @@ impl HandlerError {
     ///
     /// # Examples
     ///
-    /// ```
+    #[cfg_attr(feature = "derive", doc = "```")]
+    #[cfg_attr(not(feature = "derive"), doc = "```ignore")]
     /// use irpc::{
     ///     channel::oneshot,
     ///     rpc::{Handler, HandlerError},
@@ -1257,7 +1258,8 @@ impl HandlerError {
 ///
 /// # Examples
 ///
-/// ```
+#[cfg_attr(feature = "derive", doc = "```")]
+#[cfg_attr(not(feature = "derive"), doc = "```ignore")]
 /// use irpc::{WithChannels, channel::oneshot, rpc::Handler, rpc_requests};
 /// use serde::{Deserialize, Serialize};
 ///
