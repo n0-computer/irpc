@@ -56,8 +56,6 @@ pub enum RecvError {
         source: postcard::Error,
     },
     /// An io error, for example because the connection was lost.
-    ///
-    /// A stream that ends in the middle of a message also gives an io error.
     #[error("Io error")]
     Io {
         #[error(std_err)]
@@ -234,15 +232,18 @@ impl<T> TryFrom<Sender<T>> for tokio::sync::mpsc::Sender<T> {
 pub trait DynSender<T>: Debug + Send + Sync + 'static {
     /// Send a message.
     ///
-    /// For the remote case, if the message can not be completely sent,
-    /// this must return an error and disable the channel.
+    /// For the remote case, the receiver gets a message either completely or
+    /// not at all. If the send is cancelled, the message must not be
+    /// delivered, and the sender must stay usable. A receiver from irpc 0.17 or
+    /// earlier is the exception, see [`Sender::send`].
     fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + '_>>;
 
     /// Try to send a message, returning as fast as possible if sending
     /// is not currently possible.
     ///
     /// For the remote case, it must be guaranteed that the message is
-    /// either completely sent or not at all.
+    /// either completely sent or not at all. If the send is cancelled, the
+    /// same rules as for [`Self::send`] apply.
     fn try_send(
         &self,
         value: T,
@@ -296,10 +297,13 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// ## Cancellation safety
     ///
-    /// If the future is dropped before completion, and if this is a remote sender,
-    /// then the sender will be closed and further sends will return an [`SendError::Io`]
-    /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
-    /// future until completion if you want to reuse the sender or any clone afterwards.
+    /// If the future is dropped before completion, the message is not
+    /// delivered, and the sender stays usable.
+    ///
+    /// The exception is a remote receiver from irpc 0.17 or earlier, which does
+    /// not know that a message can be marked as aborted. If the cancelled send
+    /// wrote part of the message, the next send finishes it, and such a receiver
+    /// delivers it. So a retry after a cancelled send can deliver the message twice.
     pub async fn send(&self, value: T) -> Result<(), SendError> {
         match self {
             Sender::Tokio(tx) => tx
@@ -327,10 +331,13 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// ## Cancellation safety
     ///
-    /// If the future is dropped before completion, and if this is a remote sender,
-    /// then the sender will be closed and further sends will return an [`SendError::Io`]
-    /// with [`std::io::ErrorKind::BrokenPipe`]. Therefore, make sure to always poll the
-    /// future until completion if you want to reuse the sender or any clone afterwards.
+    /// If the future is dropped before completion, the message is not
+    /// delivered, and the sender stays usable.
+    ///
+    /// The exception is a remote receiver from irpc 0.17 or earlier, which does
+    /// not know that a message can be marked as aborted. If the cancelled send
+    /// wrote part of the message, the next send finishes it, and such a receiver
+    /// delivers it. So a retry after a cancelled send can deliver the message twice.
     pub async fn try_send(&self, value: T) -> Result<bool, SendError> {
         match self {
             Sender::Tokio(tx) => match tx.try_send(value) {
