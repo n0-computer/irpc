@@ -7,7 +7,7 @@ use irpc::{
         SendError,
         oneshot::{self, RecvError},
     },
-    rpc::{ConnectionClose, ErrorCode},
+    rpc::{ConnectionClose, ErrorCode, RpcError},
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
@@ -24,14 +24,17 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
     let recv = oneshot::Receiver::<Vec<u8>>::from(recv);
     recv.await?;
-    Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
+    Err(RecvError::from(e!(
+        RpcError::Io,
+        io::ErrorKind::UnexpectedEof.into()
+    )))
 }
 
 /// Checks that a connection that the peer closes with an application code is not an io error.
@@ -51,7 +54,11 @@ async fn oneshot_connection_closed_with_app_code() -> TestResult<()> {
     let err = oneshot::Receiver::<Vec<u8>>::from(recv)
         .await
         .expect_err("the server closed the connection");
-    let RecvError::ConnectionClosed { close, .. } = &err else {
+    let RecvError::Rpc {
+        source: RpcError::ConnectionClosed { close, .. },
+        ..
+    } = &err
+    else {
         panic!("expected ConnectionClosed, got {err:?}");
     };
     assert_eq!(
@@ -114,7 +121,13 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     let Err(cause) = send.send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
+    assert!(matches!(
+        cause,
+        SendError::Rpc {
+            source: RpcError::MaxSizeExceeded { .. },
+            ..
+        }
+    ));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
@@ -238,7 +251,13 @@ async fn oneshot_max_message_size_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(matches!(cause, RecvError::MaxSizeExceeded { .. }));
+    assert!(matches!(
+        cause,
+        RecvError::Rpc {
+            source: RpcError::MaxSizeExceeded { .. },
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -248,14 +267,17 @@ async fn noser_receiver(server: Endpoint) -> Result<(), RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
     let recv = oneshot::Receiver::<NoSer>::from(recv);
     recv.await?;
-    Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
+    Err(RecvError::from(e!(
+        RpcError::Io,
+        io::ErrorKind::UnexpectedEof.into()
+    )))
 }
 
 /// Checks that a message that does not encode gives `MessageEncodeFailed` on both sides, as an error code for the receiver.
@@ -270,7 +292,16 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
     let Err(cause) = send.send(NoSer(1)).await else {
         panic!("client should have failed due to serialization error");
     };
-    assert!(matches!(cause, SendError::EncodeFailed { .. }), "{cause:?}");
+    assert!(
+        matches!(
+            cause,
+            SendError::Rpc {
+                source: RpcError::EncodeFailed { .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
@@ -290,7 +321,16 @@ async fn oneshot_serialize_error_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
-    assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
+    assert!(
+        matches!(
+            cause,
+            RecvError::Rpc {
+                source: RpcError::DecodeFailed { .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     Ok(())
 }
 

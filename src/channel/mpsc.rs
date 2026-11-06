@@ -16,97 +16,49 @@ use n0_error::{e, stack_error};
 
 use super::SendError;
 #[cfg(feature = "rpc")]
-use crate::rpc::{self, ConnectionClose, ErrorCode};
+use crate::rpc::{ErrorCode, RpcError};
 
 /// Error when receiving an mpsc message.
 ///
-/// A local channel has no errors.
+/// A local channel has no errors: when all senders are dropped, the receiver
+/// gets `Ok(None)`. A remote channel can fail for reasons that a local channel
+/// does not have, see [`RpcError`].
 ///
 /// For a remote channel, the sender is on the other side of the connection:
 /// the server for a response stream, and the client for the updates of a request.
-///
-/// If the server rejects the request and also closes the connection, the close
-/// usually arrives first, and the receiver gets [`ConnectionClosed`] instead of [`Remote`].
-/// [`Self::remote_code`] returns the code in both cases.
-///
-/// [`Io`]: Self::Io
-/// [`Remote`]: Self::Remote
-/// [`ConnectionClosed`]: Self::ConnectionClosed
-#[stack_error(derive, add_meta)]
+#[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub enum RecvError {
-    /// The sender reset the stream with a code, and the channel is closed.
+    /// The remote channel failed for a reason that a local channel does not have.
     ///
-    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
-    ///
-    /// [`ErrorCode`]: crate::rpc::ErrorCode
-    /// [`rpc`]: crate::rpc
-    #[cfg(feature = "rpc")]
-    #[error("Sender closed the channel: {code}")]
-    Remote { code: crate::rpc::ErrorCode },
-    /// The sender reset the stream with code 0, and the channel is closed.
-    ///
-    /// Unlike the end of the stream, which is `Ok(None)`, a reset can drop
+    /// Unlike a local channel, this includes a reset with code 0: it can drop
     /// messages that this receiver did not read yet.
     #[cfg(feature = "rpc")]
-    #[error("Sender reset the channel")]
-    SenderClosed,
-    /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
-    ///
-    /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
-    #[error("Message too large")]
-    MaxSizeExceeded,
-    /// The message does not decode, so this receiver closed the channel.
-    #[cfg(feature = "rpc")]
-    #[error("Message does not decode")]
-    DecodeFailed {
-        #[error(std_err)]
-        source: postcard::Error,
-    },
-    /// The connection was closed on purpose, by the peer or by this side.
-    #[cfg(feature = "rpc")]
-    #[error("Connection {close}")]
-    ConnectionClosed { close: crate::rpc::ConnectionClose },
-    /// An io error, for example because the connection was lost.
-    #[error("Io error")]
-    Io {
-        #[error(std_err)]
-        source: io::Error,
-    },
+    #[error("Remote channel failed")]
+    Rpc { source: RpcError },
+
+    #[cfg(not(feature = "rpc"))]
+    #[error("Without the rpc feature, receiving cannot fail")]
+    Unreachable,
 }
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
-/// A reset becomes [`RecvError::Remote`], or [`RecvError::SenderClosed`]
-/// for code 0. The close of the connection becomes
-/// [`RecvError::ConnectionClosed`], and any other io error becomes [`RecvError::Io`].
+/// See [`RpcError`]'s conversion from an io error.
+#[cfg(feature = "rpc")]
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
-        #[cfg(feature = "rpc")]
-        match rpc::reset_code(&err) {
-            Some(Some(code)) => return e!(RecvError::Remote { code }),
-            Some(None) => return e!(RecvError::SenderClosed),
-            None => {}
-        }
-        #[cfg(feature = "rpc")]
-        if let Some(close) = ConnectionClose::from_io(&err) {
-            return e!(RecvError::ConnectionClosed { close });
-        }
-        e!(RecvError::Io, err)
+        RpcError::from(err).into()
     }
 }
 
 impl From<RecvError> for io::Error {
     fn from(e: RecvError) -> Self {
         match e {
-            RecvError::Io { source, .. } => source,
             #[cfg(feature = "rpc")]
-            RecvError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
-            #[cfg(feature = "rpc")]
-            RecvError::Remote { .. } | RecvError::SenderClosed { .. } => {
-                io::Error::new(io::ErrorKind::ConnectionReset, e)
-            }
-            _ => io::Error::new(io::ErrorKind::InvalidData, e),
+            RecvError::Rpc { source, .. } => source.into(),
+            #[cfg(not(feature = "rpc"))]
+            RecvError::Unreachable { .. } => unreachable!(),
         }
     }
 }
@@ -115,13 +67,10 @@ impl From<RecvError> for io::Error {
 impl RecvError {
     /// Returns the code that the peer sent, if any.
     ///
-    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
-    /// the peer closed the connection with.
+    /// See [`RpcError::remote_code`].
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
-            Self::Remote { code, .. } => Some(*code),
-            Self::ConnectionClosed { close, .. } => close.code(),
-            _ => None,
+            Self::Rpc { source, .. } => source.remote_code(),
         }
     }
 }
