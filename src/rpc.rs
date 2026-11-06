@@ -83,6 +83,15 @@
 //! so it delivers a cancelled message that it gets. A frame without a marker
 //! counts as a complete message.
 //!
+//! The content of a cancelled message does not have to decode: the receiver
+//! may validate more than the sender did. So the receiver also drops a frame
+//! that does not decode if its last byte is the marker for an aborted message.
+//! A frame from an earlier version that does not decode and happens to end
+//! with the same byte is dropped as well, instead of being an
+//! [`mpsc::RecvError::DecodeFailed`]. Messages from earlier versions that
+//! decode are not affected. Telling the two cases apart would need a change of
+//! the framing.
+//!
 //! # Error codes
 //!
 //! irpc closes connections, and stops and resets streams, with the codes of
