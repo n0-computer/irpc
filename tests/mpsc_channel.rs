@@ -19,6 +19,7 @@ use irpc::{
 };
 use n0_error::e;
 use n0_future::future::poll_once;
+use n0_tracing_test::traced_test;
 use noq::Endpoint;
 use serde::{Deserialize, Serialize};
 use testresult::TestResult;
@@ -33,8 +34,8 @@ use common::*;
 /// Checks that all clones of a `Sender` will get the closed signal as soon as
 /// a send fails with an io error.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
-    tracing_subscriber::fmt::try_init().ok();
     let (server, client, server_addr) = create_connected_endpoints()?;
     // accept a single bidi stream on a single connection, then immediately stop it
     let server = tokio::spawn(async move {
@@ -79,6 +80,7 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
 
 /// Checks that sends cancelled at any point leave whole messages, and the sender and its clones usable.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_cancelled_sends_keep_clones_usable() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect_receiver(server));
@@ -112,6 +114,7 @@ async fn mpsc_cancelled_sends_keep_clones_usable() -> TestResult<()> {
 
 /// Checks that a send that is cancelled in the middle of the message is not delivered, and the channel keeps working.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_partly_cancelled_send_is_not_delivered() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect_receiver(server));
@@ -131,6 +134,7 @@ async fn mpsc_partly_cancelled_send_is_not_delivered() -> TestResult<()> {
 
 /// Checks that a `try_send` that is cancelled in the middle of the message is not delivered, and the channel keeps working.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_partly_cancelled_try_send_is_not_delivered() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect_receiver(server));
@@ -151,6 +155,7 @@ async fn mpsc_partly_cancelled_try_send_is_not_delivered() -> TestResult<()> {
 
 /// Checks that sends cancelled while they write the rest of an earlier cancelled message deliver nothing.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_cancelled_while_finishing_an_aborted_message() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect_receiver(server));
@@ -198,6 +203,7 @@ impl From<Checked> for Vec<u8> {
 
 /// Checks that a cancelled message is dropped even if the receiver would reject it.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_cancelled_send_that_does_not_decode_is_dropped() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect::<Checked>(server));
@@ -219,6 +225,7 @@ async fn mpsc_cancelled_send_that_does_not_decode_is_dropped() -> TestResult<()>
 /// The stream then ends in the middle of the message, which the receiver gets
 /// as the end of the stream after the last complete message.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_partly_cancelled_send_is_dropped_with_sender() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect_receiver(server));
@@ -236,6 +243,7 @@ async fn mpsc_partly_cancelled_send_is_dropped_with_sender() -> TestResult<()> {
 
 /// Checks that a send that is cancelled before it wrote anything is not sent, as for a local channel.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_unstarted_cancelled_send_is_not_sent() -> TestResult<()> {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
     // A small window, so that the stream is full after a few messages.
@@ -280,6 +288,7 @@ async fn mpsc_unstarted_cancelled_send_is_not_sent() -> TestResult<()> {
 
 /// Checks that a frame with more than the end marker after the message is `DecodeFailed`.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_frame_with_extra_bytes() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -296,6 +305,7 @@ async fn mpsc_frame_with_extra_bytes() -> TestResult<()> {
 
 /// Checks that a frame whose end marker is not known is `DecodeFailed`.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_bad_message_end() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -312,6 +322,7 @@ async fn mpsc_bad_message_end() -> TestResult<()> {
 
 /// Checks that a sender gets `ReceiverClosed` if the remote receiver is dropped, as for a local one.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_receiver_dropped() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -344,6 +355,7 @@ async fn mpsc_receiver_dropped() -> TestResult<()> {
 
 /// Checks that a clone that waits for `closed` does not block sends on other clones.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_closed_does_not_block_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -373,6 +385,7 @@ async fn mpsc_closed_does_not_block_send() -> TestResult<()> {
 /// Checks that after the remote receiver is dropped, every send on every clone
 /// of a `Sender` gets `ReceiverClosed`, also on clones that did not see the stop.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_receiver_dropped_clones() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -420,6 +433,7 @@ async fn mpsc_receiver_dropped_clones() -> TestResult<()> {
 
 /// Check that `ReceiverClosed` works well with the `Handler` as well.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_receiver_dropped_proto() -> TestResult<()> {
     #[rpc_requests(message = ProtoMessage)]
     #[derive(Debug, Serialize, Deserialize)]
@@ -515,6 +529,7 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
 
 /// Checks that a stream that ends in the middle of a message ends after the last complete message.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_truncated_message() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect_receiver(server));
@@ -529,6 +544,7 @@ async fn mpsc_truncated_message() -> TestResult<()> {
 
 /// Checks that a stream that ends in the middle of the size prefix ends after the last complete message.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_truncated_size() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(collect_receiver(server));
@@ -543,6 +559,7 @@ async fn mpsc_truncated_size() -> TestResult<()> {
 
 /// Checks that a stream that is reset in the middle of a message is an error, not the end of the stream.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_reset_inside_message_is_an_error() -> TestResult<()> {
     // The message `[7]`, then part of a body, or part of a size prefix.
     for partial in [&[2, 1, 7, 100, 1, 2, 3][..], &[2, 1, 7, 0x80]] {
@@ -562,6 +579,7 @@ async fn mpsc_reset_inside_message_is_an_error() -> TestResult<()> {
 
 /// Checks that a connection that is closed in the middle of a message is an error, not the end of the stream.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_connection_closed_inside_message_is_an_error() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let (first_tx, first_rx) = tokio::sync::oneshot::channel();
@@ -588,6 +606,7 @@ async fn mpsc_connection_closed_inside_message_is_an_error() -> TestResult<()> {
 
 /// Checks that the max message size is enforced on the sender side and that errors are propagated to the receiver side.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_max_message_size_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -615,6 +634,7 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
 
 /// Checks that `try_send` resets the stream for a message that is too large, as `send` does.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_max_message_size_try_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -634,6 +654,7 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
 
 /// Checks that the largest mpsc message is one byte smaller than [`MAX_MESSAGE_SIZE`], for the end marker.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_max_message_size_boundary() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -664,6 +685,7 @@ async fn mpsc_max_message_size_boundary() -> TestResult<()> {
 
 /// Checks that the max message size is enforced on receiver side.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_max_message_size_recv() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -701,6 +723,7 @@ async fn noser_receiver(server: Endpoint) -> Result<(), mpsc::RecvError> {
 
 /// Checks that a serialization error is caught and propagated to the receiver.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_serialize_error_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(noser_receiver(server));
@@ -722,6 +745,7 @@ async fn mpsc_serialize_error_send() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn mpsc_serialize_error_recv() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(noser_receiver(server));
@@ -754,6 +778,7 @@ async fn noser_receiver_kept(server: Endpoint) -> TestResult<()> {
 
 /// Checks that a sender gets `MessageDecodeFailed` from the remote receiver if it cannot decode a message.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_decode_error_reaches_sender() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(noser_receiver_kept(server));
@@ -785,6 +810,7 @@ async fn mpsc_decode_error_reaches_sender() -> TestResult<()> {
 
 /// Checks that a receiver stops the stream with `MessageDecodeFailed` if a message does not decode.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(noser_receiver_kept(server));
@@ -802,6 +828,7 @@ async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
 /// Checks that a receive cancelled in the middle of a message keeps the part it read, so that the
 /// next receive returns the whole message.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_receive_resumes_a_message_read_in_part() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let message = vec![7u8; 1000];
@@ -833,6 +860,7 @@ async fn mpsc_receive_resumes_a_message_read_in_part() -> TestResult<()> {
 
 /// Checks that a receiver reads as a stream of its messages, ending when the sender drops.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_receiver_is_a_stream() -> TestResult<()> {
     use n0_future::StreamExt;
 
@@ -851,6 +879,7 @@ async fn mpsc_receiver_is_a_stream() -> TestResult<()> {
 /// Checks that a receiver splits messages of mixed sizes, written back to back, into the right
 /// messages, while its buffer grows for the large ones and shrinks back after.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_receive_mixed_sizes() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let messages = mixed_size_messages();
@@ -890,6 +919,7 @@ fn mixed_size_messages() -> Vec<Vec<u8>> {
 /// Checks that a sender sends messages of mixed sizes intact, with both `send` and `try_send`,
 /// while its buffer grows for the large ones and shrinks back after.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_send_mixed_sizes() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let messages = mixed_size_messages();

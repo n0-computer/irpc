@@ -5,9 +5,11 @@ use irpc::{
     channel::{none::NoSender, oneshot},
     rpc_requests,
 };
+use n0_tracing_test::traced_test;
 use serde::{Deserialize, Serialize};
 
 #[test]
+#[traced_test]
 fn derive_simple() {
     #![allow(dead_code)]
 
@@ -81,6 +83,7 @@ fn message_span() {
 ///
 /// to update the snapshots
 #[test]
+#[traced_test]
 #[ignore = "stupid diffs depending on rustc version"]
 fn compile_fail() {
     let t = trybuild::TestCases::new();

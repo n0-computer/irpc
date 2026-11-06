@@ -12,6 +12,7 @@ use irpc::{
 };
 use n0_error::e;
 use n0_future::future::poll_once;
+use n0_tracing_test::traced_test;
 use noq::Endpoint;
 use testresult::TestResult;
 
@@ -36,6 +37,7 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
 
 /// Checks that a receiver gets `SenderClosed` if the remote sender is dropped without sending, as for a local one.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_sender_dropped() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -57,6 +59,7 @@ async fn oneshot_sender_dropped() -> TestResult<()> {
 
 /// Checks that the max message size is enforced on the sender side and that errors are propagated to the receiver side.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_max_message_size_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -77,6 +80,7 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
 
 /// Checks that a send that is cancelled in the middle of the message is `SenderClosed` for the receiver.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_cancelled_send_is_sender_closed() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -96,6 +100,7 @@ async fn oneshot_cancelled_send_is_sender_closed() -> TestResult<()> {
 
 /// Checks that a stream that ends in the middle of a message is `SenderClosed`, not an io error.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_truncated_message() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -113,6 +118,7 @@ async fn oneshot_truncated_message() -> TestResult<()> {
 
 /// Checks that a stream that ends in the middle of the size prefix is `SenderClosed`.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_truncated_size() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -130,6 +136,7 @@ async fn oneshot_truncated_size() -> TestResult<()> {
 
 /// Checks that a stream that is reset in the middle of the message is an error, not `SenderClosed`.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_reset_inside_message_is_an_error() -> TestResult<()> {
     // Part of a body, or part of a size prefix.
     for partial in [&[100, 1, 2, 3][..], &[0x80]] {
@@ -149,6 +156,7 @@ async fn oneshot_reset_inside_message_is_an_error() -> TestResult<()> {
 
 /// Checks that a connection that is closed in the middle of the message is an error, not `SenderClosed`.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_connection_closed_inside_message_is_an_error() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
@@ -174,6 +182,7 @@ async fn oneshot_connection_closed_inside_message_is_an_error() -> TestResult<()
 
 /// Checks that the max message size is enforced on receiver side.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_max_message_size_recv() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -208,6 +217,7 @@ async fn noser_receiver(server: Endpoint) -> Result<(), RecvError> {
 
 /// Checks that a message that does not encode gives `MessageEncodeFailed` on both sides, as an error code for the receiver.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_serialize_error_send() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(noser_receiver(server));
@@ -227,6 +237,7 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn oneshot_serialize_error_recv() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(noser_receiver(server));
@@ -244,6 +255,7 @@ async fn oneshot_serialize_error_recv() -> TestResult<()> {
 
 /// Checks that a local sender is not rpc, also after a transform.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_local_is_not_rpc() -> TestResult<()> {
     let (send, recv) = oneshot::channel::<u64>();
     assert!(!send.is_rpc());
@@ -256,6 +268,7 @@ async fn oneshot_local_is_not_rpc() -> TestResult<()> {
 
 /// Checks that a remote sender is rpc, also after a transform.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_remote_is_rpc() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {

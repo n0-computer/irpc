@@ -4,6 +4,7 @@
 
 use irpc::channel::mpsc;
 use n0_future::future::poll_once;
+use n0_tracing_test::traced_test;
 use testresult::TestResult;
 
 #[allow(dead_code, reason = "this test uses only some of the helpers")]
@@ -126,6 +127,7 @@ mod old {
 ///
 /// The old receiver does not know the end marker, so it delivers the cancelled message whole.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_new_sender_old_receiver() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -153,6 +155,7 @@ async fn mpsc_new_sender_old_receiver() -> TestResult<()> {
 
 /// Checks that a new receiver reads the messages of an old sender.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_old_sender_new_receiver() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
