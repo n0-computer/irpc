@@ -7,14 +7,14 @@ use n0_future::future::Boxed as BoxFuture;
 
 use super::SendError;
 #[cfg(feature = "rpc")]
-use crate::rpc::{self, ErrorCode, RpcError};
+use crate::rpc::{self, ErrorCode, RpcRecvError};
 use crate::util::FusedOneshotReceiver;
 
 /// Error when receiving a oneshot message.
 ///
 /// For a local channel, the only error is [`SenderClosed`]. A remote channel
 /// can also fail for reasons that a local channel does not have, see
-/// [`RpcError`].
+/// [`RpcRecvError`].
 ///
 /// For a remote channel, the sender is on the other side of the connection,
 /// for example the server for a response.
@@ -38,14 +38,14 @@ pub enum RecvError {
     /// The remote channel failed for a reason that a local channel does not have.
     #[cfg(feature = "rpc")]
     #[error("Remote channel failed")]
-    Rpc { source: RpcError },
+    Rpc { source: RpcRecvError },
 }
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
 /// A reset with code 0 or [`ErrorCode::MessageAborted`], and the end of the
 /// stream in the middle of a message, become [`RecvError::SenderClosed`].
-/// Anything else becomes [`RecvError::Rpc`], see [`RpcError`]'s conversion
+/// Anything else becomes [`RecvError::Rpc`], see [`RpcRecvError`]'s conversion
 /// from an io error.
 #[cfg(feature = "rpc")]
 impl From<io::Error> for RecvError {
@@ -56,7 +56,7 @@ impl From<io::Error> for RecvError {
         if rpc::is_truncated(&err) {
             return e!(RecvError::SenderClosed);
         }
-        RpcError::from(err).into()
+        RpcRecvError::from(err).into()
     }
 }
 
@@ -74,7 +74,7 @@ impl From<RecvError> for io::Error {
 impl RecvError {
     /// Returns the code that the peer sent, if any.
     ///
-    /// See [`RpcError::remote_code`].
+    /// See [`RpcRecvError::remote_code`].
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Rpc { source, .. } => source.remote_code(),

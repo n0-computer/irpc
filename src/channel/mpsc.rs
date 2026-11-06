@@ -16,13 +16,13 @@ use n0_error::{e, stack_error};
 
 use super::SendError;
 #[cfg(feature = "rpc")]
-use crate::rpc::{ErrorCode, RpcError};
+use crate::rpc::{ErrorCode, RpcRecvError};
 
 /// Error when receiving an mpsc message.
 ///
 /// A local channel has no errors: when all senders are dropped, the receiver
 /// gets `Ok(None)`. A remote channel can fail for reasons that a local channel
-/// does not have, see [`RpcError`].
+/// does not have, see [`RpcRecvError`].
 ///
 /// For a remote channel, the sender is on the other side of the connection:
 /// the server for a response stream, and the client for the updates of a request.
@@ -35,16 +35,16 @@ pub enum RecvError {
     /// messages that this receiver did not read yet.
     #[cfg(feature = "rpc")]
     #[error("Remote channel failed")]
-    Rpc { source: RpcError },
+    Rpc { source: RpcRecvError },
 }
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
-/// See [`RpcError`]'s conversion from an io error.
+/// See [`RpcRecvError`]'s conversion from an io error.
 #[cfg(feature = "rpc")]
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
-        RpcError::from(err).into()
+        RpcRecvError::from(err).into()
     }
 }
 
@@ -61,7 +61,7 @@ impl From<RecvError> for io::Error {
 impl RecvError {
     /// Returns the code that the peer sent, if any.
     ///
-    /// See [`RpcError::remote_code`].
+    /// See [`RpcRecvError::remote_code`].
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Rpc { source, .. } => source.remote_code(),

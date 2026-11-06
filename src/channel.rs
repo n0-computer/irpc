@@ -7,7 +7,7 @@ use n0_error::e;
 use n0_error::stack_error;
 
 #[cfg(feature = "rpc")]
-use crate::rpc::{ErrorCode, RpcError};
+use crate::rpc::{ConnectionClose, ErrorCode, RpcSendError};
 
 pub mod mpsc;
 pub mod none;
@@ -17,16 +17,16 @@ pub mod oneshot;
 ///
 /// For a local channel, the only error is [`ReceiverClosed`]. A remote channel
 /// can also fail for reasons that a local channel does not have, see
-/// [`RpcError`](crate::rpc::RpcError).
+/// [`RpcSendError`](crate::rpc::RpcSendError).
 ///
 /// For a remote channel, the receiver is on the other side of the connection:
 /// the server for a request and its updates, and the client for a response.
 ///
 /// After an error, the channel is closed. Later sends get the same error if
-/// the peer ended the channel, and [`RpcError::Closed`] otherwise.
+/// the peer ended the channel, and [`RpcSendError::Closed`] otherwise.
 ///
 /// [`ReceiverClosed`]: Self::ReceiverClosed
-/// [`RpcError::Closed`]: crate::rpc::RpcError::Closed
+/// [`RpcSendError::Closed`]: crate::rpc::RpcSendError::Closed
 #[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub enum SendError {
@@ -40,7 +40,7 @@ pub enum SendError {
     /// The remote channel failed for a reason that a local channel does not have.
     #[cfg(feature = "rpc")]
     #[error("Remote channel failed")]
-    Rpc { source: RpcError },
+    Rpc { source: RpcSendError },
 }
 
 impl From<SendError> for io::Error {
@@ -57,7 +57,7 @@ impl From<SendError> for io::Error {
 impl SendError {
     /// Returns the code that the peer sent, if any.
     ///
-    /// See [`RpcError::remote_code`].
+    /// See [`RpcSendError::remote_code`].
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Rpc { source, .. } => source.remote_code(),
@@ -68,17 +68,25 @@ impl SendError {
 
 /// Converts an error from writing the stream of a remote channel.
 ///
-/// A stop with code 0 becomes [`SendError::ReceiverClosed`], and anything else
-/// becomes [`SendError::Rpc`].
+/// A stop with code 0 becomes [`SendError::ReceiverClosed`], a stop with any
+/// other code [`RpcSendError::Remote`], the close of the connection
+/// [`RpcSendError::ConnectionClosed`], and any other error [`RpcSendError::Io`].
 #[cfg(feature = "rpc")]
 impl From<noq::WriteError> for SendError {
     fn from(err: noq::WriteError) -> Self {
         match err {
-            // A receiver that is dropped stops the stream with code 0.
-            noq::WriteError::Stopped(code) if code.into_inner() == 0 => {
-                e!(SendError::ReceiverClosed)
+            noq::WriteError::Stopped(code) => match ErrorCode::from_varint(code) {
+                Some(code) => e!(RpcSendError::Remote { code }).into(),
+                // A receiver that is dropped stops the stream with code 0.
+                None => e!(SendError::ReceiverClosed),
+            },
+            noq::WriteError::ConnectionLost(ref cause) => {
+                match ConnectionClose::from_error(cause) {
+                    Some(close) => e!(RpcSendError::ConnectionClosed { close }).into(),
+                    None => e!(RpcSendError::Io, err.into()).into(),
+                }
             }
-            err => RpcError::from(err).into(),
+            err => e!(RpcSendError::Io, err.into()).into(),
         }
     }
 }

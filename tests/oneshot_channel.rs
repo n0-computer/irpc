@@ -7,7 +7,7 @@ use irpc::{
         SendError,
         oneshot::{self, RecvError},
     },
-    rpc::{ConnectionClose, ErrorCode, RpcError},
+    rpc::{ConnectionClose, ErrorCode, RpcRecvError, RpcSendError},
     util::AsyncWriteVarintExt,
 };
 use n0_error::e;
@@ -25,15 +25,15 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
     let recv = oneshot::Receiver::<Vec<u8>>::from(recv);
     recv.await?;
     Err(RecvError::from(e!(
-        RpcError::Io,
+        RpcRecvError::Io,
         io::ErrorKind::UnexpectedEof.into()
     )))
 }
@@ -56,7 +56,7 @@ async fn oneshot_connection_closed_with_app_code() -> TestResult<()> {
         .await
         .expect_err("the server closed the connection");
     let RecvError::Rpc {
-        source: RpcError::ConnectionClosed { close, .. },
+        source: RpcRecvError::ConnectionClosed { close, .. },
         ..
     } = &err
     else {
@@ -127,7 +127,7 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     assert!(matches!(
         cause,
         SendError::Rpc {
-            source: RpcError::MaxSizeExceeded { .. },
+            source: RpcSendError::MaxSizeExceeded { .. },
             ..
         }
     ));
@@ -263,7 +263,7 @@ async fn oneshot_max_message_size_recv() -> TestResult<()> {
     assert!(matches!(
         cause,
         RecvError::Rpc {
-            source: RpcError::MaxSizeExceeded { .. },
+            source: RpcRecvError::MaxSizeExceeded { .. },
             ..
         }
     ));
@@ -276,15 +276,15 @@ async fn noser_receiver(server: Endpoint) -> Result<(), RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
     let recv = oneshot::Receiver::<NoSer>::from(recv);
     recv.await?;
     Err(RecvError::from(e!(
-        RpcError::Io,
+        RpcRecvError::Io,
         io::ErrorKind::UnexpectedEof.into()
     )))
 }
@@ -306,7 +306,7 @@ async fn oneshot_serialize_error_send() -> TestResult<()> {
         matches!(
             cause,
             SendError::Rpc {
-                source: RpcError::EncodeFailed { .. },
+                source: RpcSendError::EncodeFailed { .. },
                 ..
             }
         ),
@@ -336,7 +336,7 @@ async fn oneshot_serialize_error_recv() -> TestResult<()> {
         matches!(
             cause,
             RecvError::Rpc {
-                source: RpcError::DecodeFailed { .. },
+                source: RpcRecvError::DecodeFailed { .. },
                 ..
             }
         ),
