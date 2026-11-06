@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use irpc::{Service, WithChannels, rpc_requests};
+use n0_tracing_test::traced_test;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +83,7 @@ enum EmptyProtocol {
 }
 
 #[test]
+#[traced_test]
 fn enabled_variants_have_channels_conversions_and_spans() {
     let protocol: Protocol = Ping.into();
     assert!(matches!(protocol, Protocol::Ping(_)));
@@ -115,6 +117,7 @@ fn enabled_variants_have_channels_conversions_and_spans() {
 
 #[cfg(feature = "rpc")]
 #[test]
+#[traced_test]
 fn conditional_protocol_implements_remote_service() {
     fn assert_remote<S: irpc::rpc::RemoteService>() {}
     assert_remote::<Protocol>();

@@ -78,10 +78,10 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     Ok(())
 }
 
-/// Checks that a send that is cancelled in the middle of the message resets the stream.
+/// Checks that a send that is cancelled in the middle of the message is `SenderClosed` for the receiver.
 #[tokio::test]
 #[traced_test]
-async fn oneshot_cancelled_send_resets_stream() -> TestResult<()> {
+async fn oneshot_cancelled_send_is_sender_closed() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
@@ -94,7 +94,89 @@ async fn oneshot_cancelled_send_resets_stream() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("the send was cancelled");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageAborted));
+    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a stream that ends in the middle of a message is `SenderClosed`, not an io error.
+#[tokio::test]
+#[traced_test]
+async fn oneshot_truncated_message() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The size prefix says 100 bytes, but only 3 follow.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of a message");
+    };
+    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a stream that ends in the middle of the size prefix is `SenderClosed`.
+#[tokio::test]
+#[traced_test]
+async fn oneshot_truncated_size() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The high bit says that more bytes of the size prefix follow.
+    send.write_all(&[0x80]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of the size prefix");
+    };
+    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a stream that is reset in the middle of the message is an error, not `SenderClosed`.
+#[tokio::test]
+#[traced_test]
+async fn oneshot_reset_inside_message_is_an_error() -> TestResult<()> {
+    // Part of a body, or part of a size prefix.
+    for partial in [&[100, 1, 2, 3][..], &[0x80]] {
+        let (server, client, server_addr) = create_connected_endpoints()?;
+        let server = tokio::spawn(vec_receiver(server));
+        let conn = client.connect(server_addr, "localhost")?.await?;
+        let (mut send, _) = conn.open_bi().await?;
+        send.write_all(partial).await?;
+        send.reset(ErrorCode::MessageEncodeFailed.into())?;
+        let Err(cause) = server.await? else {
+            panic!("the stream was reset");
+        };
+        assert_eq!(cause.remote_code(), Some(ErrorCode::MessageEncodeFailed));
+    }
+    Ok(())
+}
+
+/// Checks that a connection that is closed in the middle of the message is an error, not `SenderClosed`.
+#[tokio::test]
+#[traced_test]
+async fn oneshot_connection_closed_inside_message_is_an_error() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await?;
+        let (_, recv) = conn.accept_bi().await?;
+        accepted_tx.send(()).ok();
+        TestResult::Ok(oneshot::Receiver::<Vec<u8>>::from(recv).await)
+    });
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // Part of a body.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    // Close only after the receiver has the stream.
+    accepted_rx.await?;
+    conn.close(ErrorCode::RequestAborted.into(), b"");
+    let Err(cause) = server.await?? else {
+        panic!("the connection was closed");
+    };
+    assert_eq!(cause.remote_code(), Some(ErrorCode::RequestAborted));
     Ok(())
 }
 
