@@ -1,10 +1,8 @@
 #![cfg(feature = "noq_endpoint_setup")]
 
-use std::{
-    io::{self, ErrorKind},
-    time::Duration,
-};
+use std::{io, time::Duration};
 
+use irpc::noq::{configure_client, make_server_endpoint};
 use irpc::{
     Client, RpcMessage, WithChannels,
     channel::{
@@ -13,7 +11,7 @@ use irpc::{
         oneshot,
     },
     noq::{configure_server, make_client_endpoint},
-    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE},
+    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, RpcRecvError, RpcSendError},
     rpc_requests,
     util::{AsyncWriteVarintExt, WriteVarintExt},
 };
@@ -31,7 +29,7 @@ mod common;
 use common::*;
 
 /// Checks that all clones of a `Sender` will get the closed signal as soon as
-/// a send fails with an io error.
+/// a send fails because the receiver ended the channel.
 #[tokio::test]
 async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
     tracing_subscriber::fmt::try_init().ok();
@@ -52,21 +50,29 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
         send2.closed().await;
     });
     let third_client = tokio::spawn(async move {
-        // this should fail with an io error, since the stream was stopped
-        loop {
-            match send3.send(vec![1, 2, 3]).await {
-                Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {
-                    break;
-                }
-                _ => {}
-            };
-        }
+        // this fails eventually, since the server stops the stream and closes the connection
+        while !matches!(
+            send3.send(vec![1, 2, 3]).await,
+            Err(SendError::Rpc {
+                source: RpcSendError::Remote { .. } | RpcSendError::ConnectionClosed { .. },
+                ..
+            })
+        ) {}
     });
     // send until we get an error because the remote side stopped the stream
     while send1.send(vec![1, 2, 3]).await.is_ok() {}
+    // the server stops the stream with code 1 and then closes the connection, so a
+    // later send gets one of these, not an io error
     match send1.send(vec![4, 5, 6]).await {
-        Err(SendError::Io { source, .. }) if source.kind() == ErrorKind::BrokenPipe => {}
-        e => panic!("Expected SendError::Io with kind BrokenPipe, got {e:?}"),
+        Err(SendError::Rpc {
+            source: RpcSendError::Remote { code, .. },
+            ..
+        }) => assert_eq!(code, ErrorCode::RequestAborted),
+        Err(SendError::Rpc {
+            source: RpcSendError::ConnectionClosed { close, .. },
+            ..
+        }) => assert_eq!(close.code(), None),
+        e => panic!("Expected Remote or ConnectionClosed, got {e:?}"),
     };
     // check that closed signal was received by the second sender
     second_client.await?;
@@ -290,7 +296,16 @@ async fn mpsc_frame_with_extra_bytes() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("the frame has an extra byte");
     };
-    assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
+    assert!(
+        matches!(
+            cause,
+            RecvError::Rpc {
+                source: RpcRecvError::DecodeFailed { .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     Ok(())
 }
 
@@ -306,7 +321,16 @@ async fn mpsc_bad_message_end() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("the end byte is bad");
     };
-    assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
+    assert!(
+        matches!(
+            cause,
+            RecvError::Rpc {
+                source: RpcRecvError::DecodeFailed { .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     Ok(())
 }
 
@@ -484,11 +508,11 @@ async fn collect<T: RpcMessage>(server: Endpoint) -> Result<Vec<T>, RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let mut recv = Receiver::<T>::from(recv);
     let mut msgs = Vec::new();
     while let Some(msg) = recv.recv().await? {
@@ -503,14 +527,17 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let mut recv = Receiver::<Vec<u8>>::from(recv);
     while recv.recv().await?.is_some() {}
-    Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
+    Err(RecvError::from(e!(
+        RpcRecvError::ConnectionFailed,
+        io::ErrorKind::UnexpectedEof.into()
+    )))
 }
 
 /// Checks that a stream that ends in the middle of a message ends after the last complete message.
@@ -551,7 +578,9 @@ async fn mpsc_reset_inside_message_is_an_error() -> TestResult<()> {
         let conn = client.connect(server_addr, "localhost")?.await?;
         let (mut send, _) = conn.open_bi().await?;
         send.write_all(partial).await?;
-        send.reset(ErrorCode::MessageEncodeFailed.into())?;
+        send.reset(noq::VarInt::from_u64(
+            ErrorCode::MessageEncodeFailed.to_code(),
+        )?)?;
         let Err(cause) = server.await? else {
             panic!("the stream was reset");
         };
@@ -578,11 +607,62 @@ async fn mpsc_connection_closed_inside_message_is_an_error() -> TestResult<()> {
     send.write_all(&[2, 1, 7, 100, 1, 2, 3]).await?;
     // Close only after the receiver has the stream.
     assert_eq!(first_rx.await?, Some(vec![7]));
-    conn.close(ErrorCode::RequestAborted.into(), b"");
+    conn.close(
+        noq::VarInt::from_u64(ErrorCode::RequestAborted.to_code())?,
+        b"",
+    );
     let Err(cause) = server.await?? else {
         panic!("the connection was closed");
     };
     assert_eq!(cause.remote_code(), Some(ErrorCode::RequestAborted));
+    Ok(())
+}
+
+/// Checks that a size prefix that does not fit in a u64 is `MaxSizeExceeded`, not an io error.
+#[tokio::test]
+async fn mpsc_too_long_size_prefix() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    send.write_all(&[0xff; 11]).await?;
+    let Err(cause) = server.await? else {
+        panic!("the size prefix is too long");
+    };
+    assert!(
+        matches!(
+            cause,
+            RecvError::Rpc {
+                source: RpcRecvError::MaxSizeExceeded { .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
+    Ok(())
+}
+
+/// Checks that a reset with code 0 is a closed channel, not an io error.
+#[tokio::test]
+async fn mpsc_reset_with_code_0() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    send.reset(0u32.into())?;
+    let Err(cause) = server.await? else {
+        panic!("the sender reset the stream");
+    };
+    assert!(
+        matches!(
+            cause,
+            RecvError::Rpc {
+                source: RpcRecvError::Remote { code: None, .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     Ok(())
 }
 
@@ -600,11 +680,20 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
     let Err(cause) = send.send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
-    // later sends get a broken pipe, also for a message that is small enough
+    assert!(matches!(
+        cause,
+        SendError::Rpc {
+            source: RpcSendError::MaxSizeExceeded { .. },
+            ..
+        }
+    ));
+    // later sends fail because the sender is closed, also for a message that is small enough
     assert!(matches!(
         send.send(vec![0u8; 1]).await,
-        Err(SendError::Io { source, .. }) if source.kind() == io::ErrorKind::BrokenPipe
+        Err(SendError::Rpc {
+            source: RpcSendError::Closed { .. },
+            ..
+        })
     ));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
@@ -624,7 +713,13 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
     let Err(cause) = send.try_send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
+    assert!(matches!(
+        cause,
+        SendError::Rpc {
+            source: RpcSendError::MaxSizeExceeded { .. },
+            ..
+        }
+    ));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
@@ -656,7 +751,13 @@ async fn mpsc_max_message_size_boundary() -> TestResult<()> {
         panic!("one byte more is too large");
     };
     assert!(
-        matches!(cause, SendError::MaxSizeExceeded { .. }),
+        matches!(
+            cause,
+            SendError::Rpc {
+                source: RpcSendError::MaxSizeExceeded { .. },
+                ..
+            }
+        ),
         "{cause:?}"
     );
     Ok(())
@@ -679,7 +780,13 @@ async fn mpsc_max_message_size_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(matches!(cause, mpsc::RecvError::MaxSizeExceeded { .. }));
+    assert!(matches!(
+        cause,
+        mpsc::RecvError::Rpc {
+            source: RpcRecvError::MaxSizeExceeded { .. },
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -689,14 +796,17 @@ async fn noser_receiver(server: Endpoint) -> Result<(), mpsc::RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| e!(mpsc::RecvError::Io, err.into()))?;
+        .map_err(|err| mpsc::RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| e!(mpsc::RecvError::Io, err.into()))?;
+        .map_err(|err| mpsc::RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let mut recv = mpsc::Receiver::<NoSer>::from(recv);
     while recv.recv().await?.is_some() {}
-    Err(e!(mpsc::RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
+    Err(mpsc::RecvError::from(e!(
+        RpcRecvError::ConnectionFailed,
+        io::ErrorKind::UnexpectedEof.into()
+    )))
 }
 
 /// Checks that a serialization error is caught and propagated to the receiver.
@@ -713,7 +823,16 @@ async fn mpsc_serialize_error_send() -> TestResult<()> {
     let Err(cause) = send.send(NoSer(1)).await else {
         panic!("client should have failed due to serialization error");
     };
-    assert!(matches!(cause, SendError::EncodeFailed { .. }), "{cause:?}");
+    assert!(
+        matches!(
+            cause,
+            SendError::Rpc {
+                source: RpcSendError::EncodeFailed { .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
@@ -735,7 +854,13 @@ async fn mpsc_serialize_error_recv() -> TestResult<()> {
         panic!("server should have failed due to serialization error");
     };
     assert!(
-        matches!(cause, mpsc::RecvError::DecodeFailed { .. }),
+        matches!(
+            cause,
+            mpsc::RecvError::Rpc {
+                source: RpcRecvError::DecodeFailed { .. },
+                ..
+            }
+        ),
         "{cause:?}"
     );
     Ok(())
@@ -793,7 +918,8 @@ async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     // an odd number does not decode as `NoSer`
     send.write_length_prefixed((1u64, COMPLETE)).await?;
     let code = timeout(Duration::from_secs(5), send.stopped()).await??;
-    assert_eq!(code, Some(ErrorCode::MessageDecodeFailed.into()));
+    let code = code.and_then(|code| ErrorCode::from_code(code.into_inner()));
+    assert_eq!(code, Some(ErrorCode::MessageDecodeFailed));
     conn.close(0u32.into(), b"");
     server.await??;
     Ok(())
@@ -913,5 +1039,57 @@ async fn mpsc_send_mixed_sizes() -> TestResult<()> {
     }
     drop(send);
     assert_eq!(server.await??, messages);
+    Ok(())
+}
+
+/// Checks that later sends after the connection was lost get the io error again, not `Closed`.
+#[tokio::test]
+async fn mpsc_send_after_connection_lost() -> TestResult<()> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    // The server runs on its own runtime, so that shutting the runtime down
+    // silences the server without a close, and the client times out.
+    let server_rt = tokio::runtime::Runtime::new()?;
+    let (server, cert) = {
+        let _guard = server_rt.enter();
+        make_server_endpoint(addr)?
+    };
+    let server_addr = server.local_addr()?;
+    let accepted = server_rt.spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let streams = conn.accept_bi().await.unwrap();
+        (server, conn, streams)
+    });
+    let client = noq::Endpoint::client(addr)?;
+    let mut config = configure_client(&[cert.as_slice()])?;
+    let mut transport = noq::TransportConfig::default();
+    transport.max_idle_timeout(Some(Duration::from_millis(200).try_into()?));
+    config.transport_config(std::sync::Arc::new(transport));
+    let conn = client
+        .connect_with(config, server_addr, "localhost")?
+        .await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The server accepts the stream once it sees data.
+    send.write_all(&[2, 1, 7]).await?;
+    let send = mpsc::Sender::<Vec<u8>>::from(send);
+    let accepted = accepted.await?;
+    server_rt.shutdown_background();
+    let lost = conn.closed().await;
+    assert_eq!(lost, noq::ConnectionError::TimedOut);
+    drop(accepted);
+    for _ in 0..2 {
+        let Err(cause) = send.send(vec![8]).await else {
+            panic!("the connection was lost");
+        };
+        assert!(
+            matches!(
+                cause,
+                SendError::Rpc {
+                    source: RpcSendError::ConnectionFailed { .. },
+                    ..
+                }
+            ),
+            "{cause:?}"
+        );
+    }
     Ok(())
 }
