@@ -11,7 +11,7 @@ use irpc::{
         oneshot,
     },
     noq::{configure_server, make_client_endpoint},
-    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE},
+    rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, RpcError},
     rpc_requests,
     util::{AsyncWriteVarintExt, WriteVarintExt},
 };
@@ -54,7 +54,10 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
         // this fails eventually, since the server stops the stream and closes the connection
         while !matches!(
             send3.send(vec![1, 2, 3]).await,
-            Err(SendError::Remote { .. } | SendError::ConnectionClosed { .. })
+            Err(SendError::Rpc {
+                source: RpcError::Remote { .. } | RpcError::ConnectionClosed { .. },
+                ..
+            })
         ) {}
     });
     // send until we get an error because the remote side stopped the stream
@@ -62,8 +65,14 @@ async fn mpsc_sender_clone_closed_error() -> TestResult<()> {
     // the server stops the stream with code 1 and then closes the connection, so a
     // later send gets one of these, not an io error
     match send1.send(vec![4, 5, 6]).await {
-        Err(SendError::Remote { code, .. }) => assert_eq!(code, ErrorCode::RequestAborted),
-        Err(SendError::ConnectionClosed { close, .. }) => assert_eq!(close.code(), None),
+        Err(SendError::Rpc {
+            source: RpcError::Remote { code, .. },
+            ..
+        }) => assert_eq!(code, Some(ErrorCode::RequestAborted)),
+        Err(SendError::Rpc {
+            source: RpcError::ConnectionClosed { close, .. },
+            ..
+        }) => assert_eq!(close.code(), None),
         e => panic!("Expected Remote or ConnectionClosed, got {e:?}"),
     };
     // check that closed signal was received by the second sender
@@ -296,7 +305,16 @@ async fn mpsc_frame_with_extra_bytes() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("the frame has an extra byte");
     };
-    assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
+    assert!(
+        matches!(
+            cause,
+            RecvError::Rpc {
+                source: RpcError::DecodeFailed { .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     Ok(())
 }
 
@@ -313,7 +331,16 @@ async fn mpsc_bad_message_end() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("the end byte is bad");
     };
-    assert!(matches!(cause, RecvError::DecodeFailed { .. }), "{cause:?}");
+    assert!(
+        matches!(
+            cause,
+            RecvError::Rpc {
+                source: RpcError::DecodeFailed { .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     Ok(())
 }
 
@@ -495,11 +522,11 @@ async fn collect<T: RpcMessage>(server: Endpoint) -> Result<Vec<T>, RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
     let mut recv = Receiver::<T>::from(recv);
     let mut msgs = Vec::new();
     while let Some(msg) = recv.recv().await? {
@@ -514,14 +541,17 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| e!(RecvError::Io, err.into()))?;
+        .map_err(|err| RecvError::from(e!(RpcError::Io, err.into())))?;
     let mut recv = Receiver::<Vec<u8>>::from(recv);
     while recv.recv().await?.is_some() {}
-    Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
+    Err(RecvError::from(e!(
+        RpcError::Io,
+        io::ErrorKind::UnexpectedEof.into()
+    )))
 }
 
 /// Checks that a stream that ends in the middle of a message ends after the last complete message.
@@ -618,7 +648,13 @@ async fn mpsc_too_long_size_prefix() -> TestResult<()> {
         panic!("the size prefix is too long");
     };
     assert!(
-        matches!(cause, RecvError::MaxSizeExceeded { .. }),
+        matches!(
+            cause,
+            RecvError::Rpc {
+                source: RpcError::MaxSizeExceeded { .. },
+                ..
+            }
+        ),
         "{cause:?}"
     );
     Ok(())
@@ -635,7 +671,16 @@ async fn mpsc_reset_with_code_0() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("the sender reset the stream");
     };
-    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
+    assert!(
+        matches!(
+            cause,
+            RecvError::Rpc {
+                source: RpcError::Remote { code: None, .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     Ok(())
 }
 
@@ -654,11 +699,20 @@ async fn mpsc_max_message_size_send() -> TestResult<()> {
     let Err(cause) = send.send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
+    assert!(matches!(
+        cause,
+        SendError::Rpc {
+            source: RpcError::MaxSizeExceeded { .. },
+            ..
+        }
+    ));
     // later sends fail because the sender is closed, also for a message that is small enough
     assert!(matches!(
         send.send(vec![0u8; 1]).await,
-        Err(SendError::Closed { .. })
+        Err(SendError::Rpc {
+            source: RpcError::Closed { .. },
+            ..
+        })
     ));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
@@ -679,7 +733,13 @@ async fn mpsc_max_message_size_try_send() -> TestResult<()> {
     let Err(cause) = send.try_send(vec![0u8; 1024 * 1024 * 32]).await else {
         panic!("client should have failed due to max message size");
     };
-    assert!(matches!(cause, SendError::MaxSizeExceeded { .. }));
+    assert!(matches!(
+        cause,
+        SendError::Rpc {
+            source: RpcError::MaxSizeExceeded { .. },
+            ..
+        }
+    ));
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
@@ -712,7 +772,13 @@ async fn mpsc_max_message_size_boundary() -> TestResult<()> {
         panic!("one byte more is too large");
     };
     assert!(
-        matches!(cause, SendError::MaxSizeExceeded { .. }),
+        matches!(
+            cause,
+            SendError::Rpc {
+                source: RpcError::MaxSizeExceeded { .. },
+                ..
+            }
+        ),
         "{cause:?}"
     );
     Ok(())
@@ -736,7 +802,13 @@ async fn mpsc_max_message_size_recv() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("server should have failed due to max message size");
     };
-    assert!(matches!(cause, mpsc::RecvError::MaxSizeExceeded { .. }));
+    assert!(matches!(
+        cause,
+        mpsc::RecvError::Rpc {
+            source: RpcError::MaxSizeExceeded { .. },
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -746,14 +818,17 @@ async fn noser_receiver(server: Endpoint) -> Result<(), mpsc::RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| e!(mpsc::RecvError::Io, err.into()))?;
+        .map_err(|err| mpsc::RecvError::from(e!(RpcError::Io, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| e!(mpsc::RecvError::Io, err.into()))?;
+        .map_err(|err| mpsc::RecvError::from(e!(RpcError::Io, err.into())))?;
     let mut recv = mpsc::Receiver::<NoSer>::from(recv);
     while recv.recv().await?.is_some() {}
-    Err(e!(mpsc::RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
+    Err(mpsc::RecvError::from(e!(
+        RpcError::Io,
+        io::ErrorKind::UnexpectedEof.into()
+    )))
 }
 
 /// Checks that a serialization error is caught and propagated to the receiver.
@@ -771,7 +846,16 @@ async fn mpsc_serialize_error_send() -> TestResult<()> {
     let Err(cause) = send.send(NoSer(1)).await else {
         panic!("client should have failed due to serialization error");
     };
-    assert!(matches!(cause, SendError::EncodeFailed { .. }), "{cause:?}");
+    assert!(
+        matches!(
+            cause,
+            SendError::Rpc {
+                source: RpcError::EncodeFailed { .. },
+                ..
+            }
+        ),
+        "{cause:?}"
+    );
     let Err(cause) = server.await? else {
         panic!("server should have failed due to serialization error");
     };
@@ -794,7 +878,13 @@ async fn mpsc_serialize_error_recv() -> TestResult<()> {
         panic!("server should have failed due to serialization error");
     };
     assert!(
-        matches!(cause, mpsc::RecvError::DecodeFailed { .. }),
+        matches!(
+            cause,
+            mpsc::RecvError::Rpc {
+                source: RpcError::DecodeFailed { .. },
+                ..
+            }
+        ),
         "{cause:?}"
     );
     Ok(())
@@ -1020,7 +1110,16 @@ async fn mpsc_send_after_connection_lost() -> TestResult<()> {
         let Err(cause) = send.send(vec![8]).await else {
             panic!("the connection was lost");
         };
-        assert!(matches!(cause, SendError::Io { .. }), "{cause:?}");
+        assert!(
+            matches!(
+                cause,
+                SendError::Rpc {
+                    source: RpcError::Io { .. },
+                    ..
+                }
+            ),
+            "{cause:?}"
+        );
     }
     Ok(())
 }

@@ -27,14 +27,12 @@
 //! reads the next request, so an old server rejects the new requests and keeps
 //! serving the old ones on the same connection.
 //!
-//! The client gets the code in a `Remote` error from the receiver of the
-//! response, for example [`oneshot::RecvError::Remote`] from [`Client::rpc`],
-//! and from the sender of its updates, [`SendError::Remote`].
-//! When the server also closes the connection, as a [`Handler`] does by
-//! default, the close usually arrives first, and the client gets a
-//! `ConnectionClosed` error with the code instead, for example
-//! [`SendError::ConnectionClosed`]. In both cases, `remote_code` returns the
-//! code, for example [`crate::Error::remote_code`].
+//! The client gets the code in an [`RpcError::Remote`], from the receiver of
+//! the response, for example from [`Client::rpc`], and from the sender of its
+//! updates. When the server also closes the connection, as a [`Handler`] does
+//! by default, the close usually arrives first, and the client gets an
+//! [`RpcError::ConnectionClosed`] with the code instead. In both cases,
+//! `remote_code` returns the code, for example [`crate::Error::remote_code`].
 //!
 //! [`read_request`] returns a bad request as a [`ReadRequestError`]. A server
 //! with its own loop decides what to do: close the connection, or read the
@@ -61,10 +59,9 @@
 //! stops its stream with [`ErrorCode::MessageMaxSizeExceeded`] if a message is
 //! larger than [`MAX_MESSAGE_SIZE`], and with [`ErrorCode::MessageDecodeFailed`]
 //! if a message does not decode. The channel then ends. The side that found the
-//! error gets its own variant, for example [`mpsc::RecvError::DecodeFailed`],
-//! and the other side gets the code in a `Remote` error, for example
-//! [`SendError::Remote`]. A reset can drop messages that the receiver did not
-//! read yet.
+//! error gets its own variant, for example [`RpcError::DecodeFailed`], and the
+//! other side gets the code in an [`RpcError::Remote`]. A reset can drop
+//! messages that the receiver did not read yet.
 //!
 //! A oneshot sender that drops its message before it wrote all of it, for
 //! example because the future of the send was dropped, resets its stream with
@@ -90,7 +87,7 @@
 //! message, the receiver treats it as aborted and drops it. This lets
 //! cancellation discard a message even when the receiver rejects its contents.
 //! An invalid frame from an older peer that ends with the same byte is also
-//! dropped, instead of returning [`mpsc::RecvError::DecodeFailed`]. Valid
+//! dropped, instead of returning [`RpcError::DecodeFailed`]. Valid
 //! messages from older peers are unaffected.
 //!
 //! # Error codes
@@ -515,6 +512,130 @@ impl WriteError {
     }
 }
 
+/// Error of a remote channel that a local channel does not have.
+///
+/// A local channel only ends when the other side is dropped. A remote channel
+/// can also end because of a message that does not encode, decode, or fit,
+/// because the peer ended the stream with a code, or because of the connection.
+/// Each channel error has the variant for the local case, and wraps this for
+/// the rest.
+///
+/// If the server rejects the request and also closes the connection, the close
+/// usually arrives first, and the channel gets [`ConnectionClosed`] instead of
+/// [`Remote`]. [`Self::remote_code`] returns the code in both cases.
+///
+/// [`Remote`]: Self::Remote
+/// [`ConnectionClosed`]: Self::ConnectionClosed
+#[stack_error(derive, add_meta)]
+#[non_exhaustive]
+pub enum RpcError {
+    /// The message is larger than [`MAX_MESSAGE_SIZE`], so this side closed the channel.
+    #[error("Message too large")]
+    MaxSizeExceeded,
+    /// The message does not encode, so this sender closed the channel.
+    #[error("Message does not encode")]
+    EncodeFailed {
+        #[error(std_err)]
+        source: postcard::Error,
+    },
+    /// The message does not decode, so this receiver closed the channel.
+    #[error("Message does not decode")]
+    DecodeFailed {
+        #[error(std_err)]
+        source: postcard::Error,
+    },
+    /// The peer reset or stopped the stream, and the channel is closed.
+    ///
+    /// The `code` says why, see [`ErrorCode`], and the [`rpc`](self) module for
+    /// an overview. It is `None` for code 0, where that is not the same as a
+    /// local channel whose other side was dropped: a reset with code 0 can drop
+    /// messages that the receiver did not read yet.
+    #[error("Peer closed the stream{}", code.map(|code| format!(": {code}")).unwrap_or_default())]
+    Remote { code: Option<ErrorCode> },
+    /// The connection was closed on purpose, by the peer or by this side.
+    #[error("Connection {close}")]
+    ConnectionClosed { close: ConnectionClose },
+    /// This sender closed the channel after an earlier send failed or was cancelled.
+    ///
+    /// An earlier send on this sender or a clone of it found its message bad,
+    /// or was dropped before it was done. The stream can hold part of a
+    /// message, so this sender sends no more messages. After an io error,
+    /// later sends get the same io error instead.
+    #[error("Sender closed after an earlier error")]
+    Closed,
+    /// An io error, for example because the connection was lost.
+    ///
+    /// A custom transport can also report its own failures as this.
+    #[error("Io error")]
+    Io {
+        #[error(std_err)]
+        source: io::Error,
+    },
+}
+
+impl RpcError {
+    /// Returns the code that the peer sent, if any.
+    ///
+    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
+    /// the peer closed the connection with.
+    pub fn remote_code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::Remote { code, .. } => *code,
+            Self::ConnectionClosed { close, .. } => close.code(),
+            _ => None,
+        }
+    }
+}
+
+/// Converts an io error from reading the stream of a remote channel.
+///
+/// A reset becomes [`RpcError::Remote`], the close of the connection becomes
+/// [`RpcError::ConnectionClosed`], and any other io error becomes [`RpcError::Io`].
+impl From<io::Error> for RpcError {
+    fn from(err: io::Error) -> Self {
+        if let Some(code) = reset_code(&err) {
+            return e!(RpcError::Remote { code });
+        }
+        if let Some(close) = ConnectionClose::from_io(&err) {
+            return e!(RpcError::ConnectionClosed { close });
+        }
+        e!(RpcError::Io, err)
+    }
+}
+
+/// Converts an error from writing the stream of a remote channel.
+///
+/// A stop becomes [`RpcError::Remote`], the close of the connection becomes
+/// [`RpcError::ConnectionClosed`], and any other error becomes [`RpcError::Io`].
+impl From<noq::WriteError> for RpcError {
+    fn from(err: noq::WriteError) -> Self {
+        match err {
+            noq::WriteError::Stopped(code) => e!(RpcError::Remote {
+                code: ErrorCode::from_varint(code)
+            }),
+            noq::WriteError::ConnectionLost(ref cause) => {
+                match ConnectionClose::from_error(cause) {
+                    Some(close) => e!(RpcError::ConnectionClosed { close }),
+                    None => e!(RpcError::Io, err.into()),
+                }
+            }
+            err => e!(RpcError::Io, err.into()),
+        }
+    }
+}
+
+impl From<RpcError> for io::Error {
+    fn from(e: RpcError) -> Self {
+        match e {
+            RpcError::Io { source, .. } => source,
+            RpcError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
+            RpcError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
+            RpcError::Closed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
+            _ => io::Error::new(io::ErrorKind::InvalidData, e),
+        }
+    }
+}
+
 /// Trait to abstract over a client connection to a remote service.
 ///
 /// This isn't really that much abstracted, since the result of open_bi must
@@ -662,15 +783,15 @@ fn encode_message(
         let (code, err) = match err {
             EncodeError::MaxSizeExceeded => (
                 ErrorCode::MessageMaxSizeExceeded,
-                e!(SendError::MaxSizeExceeded),
+                e!(RpcError::MaxSizeExceeded),
             ),
             EncodeError::Failed(source) => (
                 ErrorCode::MessageEncodeFailed,
-                e!(SendError::EncodeFailed, source),
+                e!(RpcError::EncodeFailed, source),
             ),
         };
         send.reset(code.to_varint()).ok();
-        err
+        err.into()
     })
 }
 
@@ -754,13 +875,13 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
             if size > MAX_MESSAGE_SIZE {
                 read.stop(ErrorCode::MessageMaxSizeExceeded.to_varint())
                     .ok();
-                return Err(e!(oneshot::RecvError::MaxSizeExceeded));
+                return Err(e!(RpcError::MaxSizeExceeded).into());
             }
             let mut buf = vec![0; size as usize];
             AsyncReadExt::read_exact(&mut read, &mut buf).await?;
             let msg: T = postcard::from_bytes(&buf).map_err(|err| {
                 read.stop(ErrorCode::MessageDecodeFailed.to_varint()).ok();
-                e!(oneshot::RecvError::DecodeFailed, err)
+                oneshot::RecvError::from(e!(RpcError::DecodeFailed, err))
             })?;
             span.in_scope(|| debug!("response received"));
             Ok(msg)
@@ -1046,7 +1167,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                         self.recv
                             .stop(ErrorCode::MessageDecodeFailed.to_varint())
                             .ok();
-                        e!(mpsc::RecvError::DecodeFailed, err)
+                        mpsc::RecvError::from(e!(RpcError::DecodeFailed, err))
                     })?;
                     let Some(msg) = msg else {
                         self.span
@@ -1063,7 +1184,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                     self.recv
                         .stop(ErrorCode::MessageMaxSizeExceeded.to_varint())
                         .ok();
-                    return Poll::Ready(Err(e!(mpsc::RecvError::MaxSizeExceeded)));
+                    return Poll::Ready(Err(e!(RpcError::MaxSizeExceeded).into()));
                 }
                 Frame::Partial { frame_len } => {
                     // The frame starts at 0, so the buffer must hold all of it.
@@ -1197,7 +1318,7 @@ enum CloseReason {
     /// The receiver closed the channel.
     ReceiverClosed,
     /// The receiver stopped the stream with a code.
-    Remote(ErrorCode),
+    Remote(Option<ErrorCode>),
     /// The connection was closed on purpose.
     ConnectionClosed(ConnectionClose),
     /// The stream failed, for example because the connection was lost.
@@ -1210,10 +1331,10 @@ impl CloseReason {
     fn error(self) -> SendError {
         match self {
             Self::ReceiverClosed => e!(SendError::ReceiverClosed),
-            Self::Remote(code) => e!(SendError::Remote { code }),
-            Self::ConnectionClosed(close) => e!(SendError::ConnectionClosed { close }),
-            Self::Io(err) => e!(SendError::Io, err.into()),
-            Self::Other => e!(SendError::Closed),
+            Self::Remote(code) => e!(RpcError::Remote { code }).into(),
+            Self::ConnectionClosed(close) => e!(RpcError::ConnectionClosed { close }).into(),
+            Self::Io(err) => e!(RpcError::Io, err.into()).into(),
+            Self::Other => e!(RpcError::Closed).into(),
         }
     }
 }
@@ -1236,15 +1357,19 @@ impl<T: RpcMessage> NoqSenderState<T> {
             Err(SendError::ReceiverClosed { .. }) => {
                 *self = Self::Closed(CloseReason::ReceiverClosed)
             }
-            Err(SendError::Remote { code, .. }) => *self = Self::Closed(CloseReason::Remote(*code)),
-            Err(SendError::ConnectionClosed { close, .. }) => {
-                *self = Self::Closed(CloseReason::ConnectionClosed(close.clone()))
+            Err(SendError::Rpc { source, .. }) => {
+                *self = Self::Closed(match source {
+                    RpcError::Remote { code, .. } => CloseReason::Remote(*code),
+                    RpcError::ConnectionClosed { close, .. } => {
+                        CloseReason::ConnectionClosed(close.clone())
+                    }
+                    RpcError::Io { source, .. } => match write_error(source) {
+                        Some(err) => CloseReason::Io(err.clone()),
+                        None => CloseReason::Other,
+                    },
+                    _ => CloseReason::Other,
+                })
             }
-            Err(SendError::Io { source, .. }) => match write_error(source) {
-                Some(err) => *self = Self::Closed(CloseReason::Io(err.clone())),
-                None => *self = Self::Closed(CloseReason::Other),
-            },
-            Err(_) => *self = Self::Closed(CloseReason::Other),
         }
         res
     }
