@@ -67,7 +67,8 @@
 //!
 //! A oneshot sender that drops its message before it wrote all of it, for
 //! example because the future of the send was dropped, resets its stream with
-//! [`ErrorCode::MessageAborted`].
+//! [`ErrorCode::MessageAborted`], and the receiver gets
+//! [`oneshot::RecvError::SenderClosed`], as for a sender that was dropped.
 //!
 //! An mpsc frame holds the message and a marker after it, which says whether
 //! the receiver delivers the message. An mpsc send that is cancelled after it
@@ -76,7 +77,8 @@
 //! of the frame with the marker for an aborted message instead, and the
 //! receiver drops that message, so a cancelled send is not delivered, as for a
 //! local channel. If the sender drops instead, the stream ends in the middle of
-//! the message.
+//! the message, and the receiver gets the end of the stream after the last
+//! complete message, as for a sender that was dropped.
 //!
 //! The marker is compatible with earlier versions of irpc, which have no
 //! marker. Such a version decodes the message and ignores the byte after it,
@@ -212,7 +214,8 @@ pub enum ErrorCode {
     /// The oneshot sender dropped its message before it wrote all of it.
     ///
     /// For example, the future of the send was dropped while it wrote a large
-    /// message.
+    /// message. The receiver reports this as
+    /// [`oneshot::RecvError::SenderClosed`].
     #[display("message aborted")]
     MessageAborted = 8,
 }
@@ -675,6 +678,14 @@ fn read_error(err: &io::Error) -> Option<&noq::ReadError> {
     err.get_ref()?.downcast_ref()
 }
 
+/// Returns whether `err` is the end of a stream in the middle of a message.
+///
+/// The reads of a message return an `UnexpectedEof` error that is not from noq
+/// when the stream finishes early.
+pub(crate) fn is_truncated(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::UnexpectedEof && read_error(err).is_none()
+}
+
 /// Returns the irpc error code that the sender reset the stream with, if any, other than 0.
 pub(crate) fn reset_code(err: &io::Error) -> Option<ErrorCode> {
     match read_error(err)? {
@@ -866,6 +877,32 @@ fn parse_frame(buf: &[u8]) -> io::Result<Frame> {
     Ok(Frame::Whole { body: prefix..end })
 }
 
+impl<T> NoqReceiver<T> {
+    /// Handles the end of the stream, and returns `None`.
+    ///
+    /// The stream can end in the middle of a message if the send of that
+    /// message was cancelled. The sender never finished that send, so this is
+    /// the same as a sender that was dropped after its last complete message.
+    fn finish(&mut self) -> Option<T> {
+        if self.end > 0 {
+            self.span.in_scope(|| {
+                debug!("stream ended in the middle of a message, the send was cancelled")
+            });
+        }
+        self.end = 0;
+        if self.buf.spilled() {
+            self.buf.truncate(INLINE_FRAME_SIZE);
+            self.buf.shrink_to_fit();
+        }
+        if !self.finished {
+            self.finished = true;
+            let received = self.received;
+            self.span.in_scope(|| debug!(received, "stream finished"));
+        }
+        None
+    }
+}
+
 impl<T> Debug for NoqReceiver<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NoqReceiver").finish()
@@ -920,17 +957,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                     let n = read.filled().len();
                     self.end += n;
                     if n == 0 {
-                        // The stream may end between messages, but not inside one.
-                        if self.end == 0 {
-                            if !self.finished {
-                                self.finished = true;
-                                let received = self.received;
-                                self.span.in_scope(|| debug!(received, "stream finished"));
-                            }
-                            return Poll::Ready(Ok(None));
-                        }
-                        let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
-                        return Poll::Ready(Err(eof.into()));
+                        return Poll::Ready(Ok(self.finish()));
                     }
                 }
             }

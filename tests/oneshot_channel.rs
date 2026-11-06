@@ -75,9 +75,9 @@ async fn oneshot_max_message_size_send() -> TestResult<()> {
     Ok(())
 }
 
-/// Checks that a send that is cancelled in the middle of the message resets the stream.
+/// Checks that a send that is cancelled in the middle of the message is `SenderClosed` for the receiver.
 #[tokio::test]
-async fn oneshot_cancelled_send_resets_stream() -> TestResult<()> {
+async fn oneshot_cancelled_send_is_sender_closed() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
     let conn = client.connect(server_addr, "localhost")?.await?;
@@ -90,7 +90,41 @@ async fn oneshot_cancelled_send_resets_stream() -> TestResult<()> {
     let Err(cause) = server.await? else {
         panic!("the send was cancelled");
     };
-    assert_eq!(cause.remote_code(), Some(ErrorCode::MessageAborted));
+    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a stream that ends in the middle of a message is `SenderClosed`, not an io error.
+#[tokio::test]
+async fn oneshot_truncated_message() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The size prefix says 100 bytes, but only 3 follow.
+    send.write_all(&[100, 1, 2, 3]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of a message");
+    };
+    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
+    Ok(())
+}
+
+/// Checks that a stream that ends in the middle of the size prefix is `SenderClosed`.
+#[tokio::test]
+async fn oneshot_truncated_size() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(vec_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The high bit says that more bytes of the size prefix follow.
+    send.write_all(&[0x80]).await?;
+    send.finish()?;
+    let Err(cause) = server.await? else {
+        panic!("the stream ended in the middle of the size prefix");
+    };
+    assert!(matches!(cause, RecvError::SenderClosed { .. }), "{cause:?}");
     Ok(())
 }
 

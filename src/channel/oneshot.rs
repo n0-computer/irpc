@@ -30,7 +30,12 @@ pub enum RecvError {
     ///
     /// This is the only error that can occur for local communication. For
     /// remote communication, this means that the sender finished the stream
-    /// without sending, for example because it was dropped.
+    /// without sending, for example because it was dropped, or reset it with
+    /// [`ErrorCode::MessageAborted`]. A sender whose send was cancelled in the
+    /// middle of the message is also closed, like a sender that was dropped
+    /// before it sent.
+    ///
+    /// [`ErrorCode::MessageAborted`]: crate::rpc::ErrorCode::MessageAborted
     #[error("Sender closed")]
     SenderClosed,
     /// The sender reset the stream with an irpc error code, and the channel is closed.
@@ -55,8 +60,6 @@ pub enum RecvError {
         source: postcard::Error,
     },
     /// An io error, for example because the connection was lost.
-    ///
-    /// A stream that ends in the middle of a message also gives an io error.
     #[error("Io error")]
     Io {
         #[error(std_err)]
@@ -66,13 +69,23 @@ pub enum RecvError {
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
-/// A reset with an irpc error code becomes [`RecvError::Remote`], and any
-/// other io error becomes [`RecvError::Io`].
+/// A reset with [`ErrorCode::MessageAborted`], and the end of the stream in the
+/// middle of a message, become [`RecvError::SenderClosed`]. A reset with
+/// another irpc error code becomes [`RecvError::Remote`], and any other io
+/// error becomes [`RecvError::Io`].
+///
+/// [`ErrorCode::MessageAborted`]: crate::rpc::ErrorCode::MessageAborted
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
         #[cfg(feature = "rpc")]
-        if let Some(code) = rpc::reset_code(&err) {
-            return e!(RecvError::Remote { code });
+        match rpc::reset_code(&err) {
+            Some(ErrorCode::MessageAborted) => return e!(RecvError::SenderClosed),
+            Some(code) => return e!(RecvError::Remote { code }),
+            None => {}
+        }
+        #[cfg(feature = "rpc")]
+        if rpc::is_truncated(&err) {
+            return e!(RecvError::SenderClosed);
         }
         e!(RecvError::Io, err)
     }

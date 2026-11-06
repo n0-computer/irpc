@@ -216,7 +216,8 @@ async fn mpsc_cancelled_send_that_does_not_decode_is_dropped() -> TestResult<()>
 
 /// Checks that a partly cancelled send is not delivered if the sender is dropped right after.
 ///
-/// The stream then ends in the middle of the message, which the receiver gets as an io error.
+/// The stream then ends in the middle of the message, which the receiver gets
+/// as the end of the stream after the last complete message.
 #[tokio::test]
 async fn mpsc_partly_cancelled_send_is_dropped_with_sender() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
@@ -224,14 +225,12 @@ async fn mpsc_partly_cancelled_send_is_dropped_with_sender() -> TestResult<()> {
     let conn = client.connect(server_addr, "localhost")?.await?;
     let (send, _) = conn.open_bi().await?;
     let send = mpsc::Sender::<Vec<u8>>::from(send);
+    send.send(vec![7]).await?;
     let mut fut = Box::pin(send.send(vec![9u8; 8 * 1024 * 1024]));
     assert!(poll_once(&mut fut).await.is_none(), "the write is not done");
     drop(fut);
     drop(send);
-    let Err(cause) = server.await? else {
-        panic!("the stream ends in the middle of a message");
-    };
-    assert!(matches!(cause, RecvError::Io { .. }), "{cause:?}");
+    assert_eq!(server.await??, vec![vec![7]]);
     Ok(())
 }
 
@@ -512,6 +511,34 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
     let mut recv = Receiver::<Vec<u8>>::from(recv);
     while recv.recv().await?.is_some() {}
     Err(e!(RecvError::Io, io::ErrorKind::UnexpectedEof.into()))
+}
+
+/// Checks that a stream that ends in the middle of a message ends after the last complete message.
+#[tokio::test]
+async fn mpsc_truncated_message() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(collect_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The message `[7]`, then a size prefix of 100 bytes with only 3 following.
+    send.write_all(&[2, 1, 7, 100, 1, 2, 3]).await?;
+    send.finish()?;
+    assert_eq!(server.await??, vec![vec![7]]);
+    Ok(())
+}
+
+/// Checks that a stream that ends in the middle of the size prefix ends after the last complete message.
+#[tokio::test]
+async fn mpsc_truncated_size() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = tokio::spawn(collect_receiver(server));
+    let conn = client.connect(server_addr, "localhost")?.await?;
+    let (mut send, _) = conn.open_bi().await?;
+    // The message `[7]`, then a size prefix whose high bit says that more bytes follow.
+    send.write_all(&[2, 1, 7, 0x80]).await?;
+    send.finish()?;
+    assert_eq!(server.await??, vec![vec![7]]);
+    Ok(())
 }
 
 /// Checks that the max message size is enforced on the sender side and that errors are propagated to the receiver side.
