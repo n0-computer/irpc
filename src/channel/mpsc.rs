@@ -131,6 +131,14 @@ impl<T> Clone for Sender<T> {
 }
 
 impl<T> Sender<T> {
+    /// Returns true if sending can fail in more ways than the receiver being dropped.
+    ///
+    /// This is about which failures can occur, not about where the receiver is.
+    /// A purely in-memory sender is not rpc, even if it is boxed, e.g. after
+    /// [`Self::with_map`] or [`Self::with_filter_map`]: it only fails with
+    /// [`SendError::ReceiverClosed`]. A sender that goes through a connection
+    /// that can break on its own is rpc, even if both ends are on the same
+    /// machine, e.g. shared memory between processes.
     pub fn is_rpc(&self) -> bool
     where
         T: 'static,
@@ -243,7 +251,15 @@ pub trait DynSender<T>: Debug + Send + Sync + 'static {
     /// Await the sender close
     fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>>;
 
-    /// True if this is a remote sender
+    /// True if sending can fail in more ways than the receiver being dropped.
+    ///
+    /// Return false if this sender only fails with [`SendError::ReceiverClosed`],
+    /// e.g. a transform around an in-memory channel. Return true if it goes
+    /// through a connection that can break on its own, even a local one such
+    /// as shared memory between processes. Wrappers should forward the value
+    /// of the sender they wrap.
+    ///
+    /// See [`Sender::is_rpc`].
     fn is_rpc(&self) -> bool;
 }
 

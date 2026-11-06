@@ -88,7 +88,7 @@ use std::{
     future::Future,
     io,
     marker::PhantomData,
-    mem,
+    ops::Range,
     pin::{Pin, pin},
     sync::Arc,
     task::{Context, Poll, ready},
@@ -98,7 +98,7 @@ use n0_error::{e, stack_error};
 use n0_future::{FuturesUnorderedBounded, StreamExt, future::Boxed as BoxFuture};
 use noq::{ConnectionError, VarInt};
 use serde::{Serialize, de::DeserializeOwned};
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tracing::{Instrument, debug, trace, warn};
 
@@ -469,6 +469,14 @@ impl<S: BorrowMut<noq::SendStream>> Drop for ResetOnDrop<S> {
     }
 }
 
+/// The inline size of the buffers that frames are encoded and received in.
+///
+/// Frames up to this size, length prefix included, need no allocation. A larger
+/// frame moves a buffer to the heap. Buffers that live as long as a stream move
+/// back inline once they are empty again, so that one large message does not
+/// pin its allocation for the stream's life.
+const INLINE_FRAME_SIZE: usize = 128;
+
 /// Serialize a message for sending over the wire.
 ///
 /// When `S::SPAN_PROPAGATION` is true, the message is wrapped in a tuple with
@@ -477,7 +485,7 @@ impl<S: BorrowMut<noq::SendStream>> Drop for ResetOnDrop<S> {
 fn prepare_write<S: Service>(
     msg: impl Into<S>,
     span: &tracing::Span,
-) -> Result<SmallVec<[u8; 128]>, WriteError> {
+) -> Result<SmallVec<[u8; INLINE_FRAME_SIZE]>, WriteError> {
     let msg = msg.into();
     let mut buf = SmallVec::new();
     let res = if S::SPAN_PROPAGATION {
@@ -504,7 +512,10 @@ enum EncodeError {
 }
 
 /// Encodes `value` with its size prefix into `buf`.
-fn encode(value: &impl Serialize, buf: &mut SmallVec<[u8; 128]>) -> Result<(), EncodeError> {
+fn encode(
+    value: &impl Serialize,
+    buf: &mut SmallVec<[u8; INLINE_FRAME_SIZE]>,
+) -> Result<(), EncodeError> {
     let size = postcard::experimental::serialized_size(value).map_err(EncodeError::Failed)? as u64;
     if size > MAX_MESSAGE_SIZE {
         return Err(EncodeError::MaxSizeExceeded);
@@ -522,7 +533,7 @@ fn encode(value: &impl Serialize, buf: &mut SmallVec<[u8; 128]>) -> Result<(), E
 /// gets an error instead of the end of the stream.
 fn encode_message(
     value: &impl Serialize,
-    buf: &mut SmallVec<[u8; 128]>,
+    buf: &mut SmallVec<[u8; INLINE_FRAME_SIZE]>,
     send: &mut noq::SendStream,
 ) -> Result<(), SendError> {
     encode(value, buf).map_err(|err| {
@@ -587,7 +598,7 @@ impl<S: Service> RemoteSender<S> {
     pub(crate) fn prepare(
         &mut self,
         msg: impl Into<S>,
-    ) -> std::result::Result<(tracing::Span, SmallVec<[u8; 128]>), WriteError> {
+    ) -> std::result::Result<(tracing::Span, SmallVec<[u8; INLINE_FRAME_SIZE]>), WriteError> {
         let msg = msg.into();
         let span = msg.new_request_span(self.req_id());
         let buf = prepare_write::<S>(msg, &span).inspect_err(|err| {
@@ -663,7 +674,8 @@ impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
             span: tracing::Span::current(),
             received: 0,
             finished: false,
-            progress: ReadProgress::default(),
+            buf: smallvec![0; INLINE_FRAME_SIZE],
+            end: 0,
             _marker: PhantomData,
         }))
     }
@@ -677,24 +689,41 @@ impl From<noq::SendStream> for NoSender {
 }
 
 impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
-    fn from(mut writer: noq::SendStream) -> Self {
-        // A server creates the sender in the request span, and logs the response in it.
-        let span = tracing::Span::current();
-        oneshot::Sender::Boxed(Box::new(move |value| {
-            Box::pin(async move {
-                // write via a small buffer to avoid allocation for small values
-                let mut buf = SmallVec::new();
-                encode_message(&value, &mut buf, &mut writer)?;
-                // If this send drops in the middle of the message, reset the
-                // stream, so the receiver gets an error instead of a part of it.
-                let mut guard = ResetOnDrop::new(&mut writer, ErrorCode::MessageAborted);
-                let res = guard.get_mut().write_all(&buf).await;
-                guard.into_inner();
-                res?;
-                span.in_scope(|| debug!("response sent"));
-                Ok(())
-            })
+    fn from(writer: noq::SendStream) -> Self {
+        oneshot::Sender::Boxed(Box::new(NoqOneshotSender {
+            writer,
+            // A server creates the sender in the request span, and logs the response in it.
+            span: tracing::Span::current(),
         }))
+    }
+}
+
+#[derive(Debug)]
+struct NoqOneshotSender {
+    writer: noq::SendStream,
+    span: tracing::Span,
+}
+
+impl<T: RpcMessage> oneshot::DynSender<T> for NoqOneshotSender {
+    fn send(self: Box<Self>, value: T) -> BoxFuture<Result<(), SendError>> {
+        let Self { mut writer, span } = *self;
+        Box::pin(async move {
+            // write via a small buffer to avoid allocation for small values
+            let mut buf = SmallVec::new();
+            encode_message(&value, &mut buf, &mut writer)?;
+            // If this send drops in the middle of the message, reset the
+            // stream, so the receiver gets an error instead of a part of it.
+            let mut guard = ResetOnDrop::new(&mut writer, ErrorCode::MessageAborted);
+            let res = guard.get_mut().write_all(&buf).await;
+            guard.into_inner();
+            res?;
+            span.in_scope(|| debug!("response sent"));
+            Ok(())
+        })
+    }
+
+    fn is_rpc(&self) -> bool {
+        true
     }
 }
 
@@ -720,24 +749,51 @@ struct NoqReceiver<T> {
     span: tracing::Span,
     received: u64,
     finished: bool,
-    /// How much of the next message the receiver has read, kept across polls.
-    progress: ReadProgress,
+    /// Zero-initialized space the receiver reads into, so the most it reads ahead.
+    buf: SmallVec<[u8; INLINE_FRAME_SIZE]>,
+    /// `buf[..end]` holds the bytes read but not yet consumed as a message.
+    end: usize,
     _marker: std::marker::PhantomData<T>,
 }
 
-/// How much of a length-prefixed message a remote receiver has read.
-#[derive(Debug)]
-enum ReadProgress {
-    /// The varint length so far: `value` holds the bits below `shift`.
-    Length { value: u64, shift: u32 },
-    /// The body, of which the first `filled` bytes have arrived.
-    Body { buf: Vec<u8>, filled: usize },
+/// What the buffered bytes of a length-prefixed stream hold next.
+#[derive(Debug, PartialEq)]
+enum Frame {
+    /// The buffer ends before the frame does.
+    ///
+    /// `frame_len` is the length of the whole frame, varint prefix included,
+    /// or `None` while the varint prefix itself is still incomplete.
+    Partial { frame_len: Option<usize> },
+    /// The buffer starts with a whole frame.
+    ///
+    /// `body` is the range of the frame's content after the varint prefix;
+    /// it ends where the frame does.
+    Whole { body: Range<usize> },
+    /// The length prefix exceeds [`MAX_MESSAGE_SIZE`].
+    TooLarge,
 }
 
-impl Default for ReadProgress {
-    fn default() -> Self {
-        Self::Length { value: 0, shift: 0 }
+/// Finds the next length-prefixed message at the start of `buf`, if it is all there.
+fn parse_frame(buf: &[u8]) -> io::Result<Frame> {
+    // The length prefix is a postcard varint, so postcard parses it.
+    let (size, rest) = match postcard::take_from_bytes::<u64>(buf) {
+        Ok(parsed) => parsed,
+        Err(postcard::Error::DeserializeUnexpectedEnd) => {
+            return Ok(Frame::Partial { frame_len: None });
+        }
+        Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidData, err)),
+    };
+    let prefix = buf.len() - rest.len();
+    if size > MAX_MESSAGE_SIZE {
+        return Ok(Frame::TooLarge);
     }
+    let end = prefix + size as usize;
+    if buf.len() < end {
+        return Ok(Frame::Partial {
+            frame_len: Some(end),
+        });
+    }
+    Ok(Frame::Whole { body: prefix..end })
 }
 
 impl<T> Debug for NoqReceiver<T> {
@@ -749,64 +805,19 @@ impl<T> Debug for NoqReceiver<T> {
 impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, mpsc::RecvError>> {
         loop {
-            match &mut self.progress {
-                ReadProgress::Length { value, shift } => {
-                    let mut byte = [0u8; 1];
-                    let mut read = ReadBuf::new(&mut byte);
-                    ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
-                    let Some(&byte) = read.filled().first() else {
-                        // The stream may end between messages, but not inside a length.
-                        if *shift == 0 {
-                            if !self.finished {
-                                self.finished = true;
-                                let received = self.received;
-                                self.span.in_scope(|| debug!(received, "stream finished"));
-                            }
-                            return Poll::Ready(Ok(None));
-                        }
-                        return Poll::Ready(Err(
-                            io::Error::from(io::ErrorKind::UnexpectedEof).into()
-                        ));
-                    };
-                    if *shift >= 64 {
-                        let error = io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Varint is too large for u64",
-                        );
-                        return Poll::Ready(Err(error.into()));
+            match parse_frame(&self.buf[..self.end])? {
+                Frame::Whole { body } => {
+                    let msg = postcard::from_bytes(&self.buf[body.clone()]);
+                    self.buf.copy_within(body.end..self.end, 0);
+                    self.end -= body.end;
+                    // For large frames, we resized the buffer to exactly the frame size.
+                    // After consuming the frame, the buffer is empty and we can
+                    // move it back inline, releasing the heap storage.
+                    if self.end == 0 && self.buf.spilled() {
+                        self.buf.truncate(INLINE_FRAME_SIZE);
+                        self.buf.shrink_to_fit();
                     }
-                    *value |= u64::from(byte & 0x7F) << *shift;
-                    if byte & 0x80 != 0 {
-                        *shift += 7;
-                        continue;
-                    }
-                    let size = *value;
-                    if size > MAX_MESSAGE_SIZE {
-                        self.recv
-                            .stop(ErrorCode::MessageMaxSizeExceeded.into())
-                            .ok();
-                        return Poll::Ready(Err(e!(mpsc::RecvError::MaxSizeExceeded)));
-                    }
-                    self.progress = ReadProgress::Body {
-                        buf: vec![0; size as usize],
-                        filled: 0,
-                    };
-                }
-                ReadProgress::Body { buf, filled } => {
-                    while *filled < buf.len() {
-                        let mut read = ReadBuf::new(&mut buf[*filled..]);
-                        ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
-                        let n = read.filled().len();
-                        if n == 0 {
-                            let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
-                            return Poll::Ready(Err(eof.into()));
-                        }
-                        *filled += n;
-                    }
-                    let ReadProgress::Body { buf, .. } = mem::take(&mut self.progress) else {
-                        continue;
-                    };
-                    let msg = postcard::from_bytes(&buf).map_err(|err| {
+                    let msg = msg.map_err(|err| {
                         self.recv.stop(ErrorCode::MessageDecodeFailed.into()).ok();
                         e!(mpsc::RecvError::DecodeFailed, err)
                     })?;
@@ -815,6 +826,37 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                         self.span.in_scope(|| debug!("first message received"));
                     }
                     return Poll::Ready(Ok(Some(msg)));
+                }
+                Frame::TooLarge => {
+                    self.recv
+                        .stop(ErrorCode::MessageMaxSizeExceeded.into())
+                        .ok();
+                    return Poll::Ready(Err(e!(mpsc::RecvError::MaxSizeExceeded)));
+                }
+                Frame::Partial { frame_len } => {
+                    // The frame starts at 0, so the buffer must hold all of it.
+                    if let Some(len) = frame_len
+                        && self.buf.len() < len
+                    {
+                        self.buf.resize(len, 0);
+                    }
+                    let mut read = ReadBuf::new(&mut self.buf[self.end..]);
+                    ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
+                    let n = read.filled().len();
+                    self.end += n;
+                    if n == 0 {
+                        // The stream may end between messages, but not inside one.
+                        if self.end == 0 {
+                            if !self.finished {
+                                self.finished = true;
+                                let received = self.received;
+                                self.span.in_scope(|| debug!(received, "stream finished"));
+                            }
+                            return Poll::Ready(Ok(None));
+                        }
+                        let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
+                        return Poll::Ready(Err(eof.into()));
+                    }
                 }
             }
         }
@@ -825,9 +867,17 @@ impl<T> Drop for NoqReceiver<T> {
     fn drop(&mut self) {}
 }
 
+/// Empties a frame buffer that lives as long as a stream, moving it back inline.
+fn clear_frame(buf: &mut SmallVec<[u8; INLINE_FRAME_SIZE]>) {
+    buf.clear();
+    if buf.spilled() {
+        buf.shrink_to_fit();
+    }
+}
+
 struct NoqSenderInner<T> {
     send: noq::SendStream,
-    buffer: SmallVec<[u8; 128]>,
+    buffer: SmallVec<[u8; INLINE_FRAME_SIZE]>,
     /// The span in which the sender was created, for the logs of the first message and the end.
     span: tracing::Span,
     sent: u64,
@@ -853,7 +903,7 @@ impl<T: RpcMessage> NoqSenderInner<T> {
             // send drops in the middle of the message: a reset can drop earlier
             // messages that the receiver did not read yet.
             self.send.write_all(&self.buffer).await?;
-            self.buffer.clear();
+            clear_frame(&mut self.buffer);
             self.record_sent();
             Ok(())
         })
@@ -871,7 +921,7 @@ impl<T: RpcMessage> NoqSenderInner<T> {
             };
             let n = n?;
             self.send.write_all(&self.buffer[n..]).await?;
-            self.buffer.clear();
+            clear_frame(&mut self.buffer);
             self.record_sent();
             Ok(true)
         })
@@ -1574,6 +1624,73 @@ mod tests {
             assert_eq!(ErrorCode::from_code(code.to_code()), Some(code));
         }
         assert_eq!(ErrorCode::from_code(16), None);
+    }
+
+    /// Parses the next frame from `buf`, and on a whole one removes it and returns its body.
+    fn take(buf: &mut Vec<u8>) -> io::Result<Result<Vec<u8>, Frame>> {
+        Ok(match parse_frame(buf)? {
+            Frame::Whole { body } => {
+                let bytes = buf[body.clone()].to_vec();
+                buf.drain(..body.end);
+                Ok(bytes)
+            }
+            other => Err(other),
+        })
+    }
+
+    fn frame(body: &[u8]) -> Vec<u8> {
+        use crate::util::WriteVarintExt;
+        let mut frame = Vec::new();
+        frame.write_varint_u64(body.len() as u64).unwrap();
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    #[test]
+    fn parse_frame_waits_for_every_split() {
+        let body = vec![7u8; 300];
+        let frame = frame(&body);
+        let prefix = frame.len() - body.len();
+        for split in 0..frame.len() {
+            let mut buf = frame[..split].to_vec();
+            let frame_len = (split >= prefix).then_some(frame.len());
+            assert_eq!(parse_frame(&buf).unwrap(), Frame::Partial { frame_len });
+            buf.extend_from_slice(&frame[split..]);
+            assert_eq!(take(&mut buf).unwrap(), Ok(body.clone()));
+            assert!(buf.is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_frame_leaves_the_next_frame() {
+        let mut buf = [frame(b"one"), frame(b""), frame(b"three")].concat();
+        assert_eq!(take(&mut buf).unwrap(), Ok(b"one".to_vec()));
+        assert_eq!(take(&mut buf).unwrap(), Ok(b"".to_vec()));
+        assert_eq!(take(&mut buf).unwrap(), Ok(b"three".to_vec()));
+        assert_eq!(
+            take(&mut buf).unwrap(),
+            Err(Frame::Partial { frame_len: None })
+        );
+    }
+
+    #[test]
+    fn parse_frame_rejects_oversized_and_overlong_lengths() {
+        use crate::util::WriteVarintExt;
+        let mut buf = Vec::new();
+        buf.write_varint_u64(MAX_MESSAGE_SIZE + 1).unwrap();
+        assert_eq!(parse_frame(&buf).unwrap(), Frame::TooLarge);
+
+        // u64::MAX is a valid varint, just too large a message.
+        let max = [[0xFFu8; 9].as_slice(), &[0x01]].concat();
+        assert_eq!(parse_frame(&max).unwrap(), Frame::TooLarge);
+
+        // A 10th byte with bits beyond u64, or an 11th byte, is not a u64 varint.
+        let overflow = [[0xFFu8; 9].as_slice(), &[0x02]].concat();
+        let overlong = [0x80u8; 10];
+        for buf in [&overflow[..], &overlong[..]] {
+            let err = parse_frame(buf).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
     }
 
     #[test]
