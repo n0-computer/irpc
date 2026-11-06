@@ -979,8 +979,8 @@ pub enum RequestError {
     ConnectionClosed { close: rpc::ConnectionClose },
     /// The connection failed, when opening a stream pair.
     #[cfg(feature = "rpc")]
-    #[error("Error opening stream")]
-    Connection {
+    #[error("Connection failed")]
+    ConnectionFailed {
         #[error(std_err)]
         source: ::noq::ConnectionError,
     },
@@ -1048,7 +1048,7 @@ impl From<RequestError> for io::Error {
                 io::Error::new(io::ErrorKind::ConnectionAborted, e)
             }
             #[cfg(feature = "rpc")]
-            RequestError::Connection { source, .. } => source.into(),
+            RequestError::ConnectionFailed { source, .. } => source.into(),
             #[cfg(feature = "rpc")]
             RequestError::Other { source, .. } => io::Error::other(source),
         }
@@ -1068,7 +1068,7 @@ impl From<::noq::ConnectionError> for RequestError {
     fn from(source: ::noq::ConnectionError) -> Self {
         match rpc::ConnectionClose::from_error(&source) {
             Some(close) => n0_error::e!(RequestError::ConnectionClosed { close }),
-            None => n0_error::e!(RequestError::Connection, source),
+            None => n0_error::e!(RequestError::ConnectionFailed, source),
         }
     }
 }

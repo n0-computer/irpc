@@ -25,15 +25,15 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let recv = oneshot::Receiver::<Vec<u8>>::from(recv);
     recv.await?;
     Err(RecvError::from(e!(
-        RpcRecvError::Io,
+        RpcRecvError::ConnectionFailed,
         io::ErrorKind::UnexpectedEof.into()
     )))
 }
@@ -276,15 +276,15 @@ async fn noser_receiver(server: Endpoint) -> Result<(), RecvError> {
         .await
         .unwrap()
         .await
-        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let (_, recv) = conn
         .accept_bi()
         .await
-        .map_err(|err| RecvError::from(e!(RpcRecvError::Io, err.into())))?;
+        .map_err(|err| RecvError::from(e!(RpcRecvError::ConnectionFailed, err.into())))?;
     let recv = oneshot::Receiver::<NoSer>::from(recv);
     recv.await?;
     Err(RecvError::from(e!(
-        RpcRecvError::Io,
+        RpcRecvError::ConnectionFailed,
         io::ErrorKind::UnexpectedEof.into()
     )))
 }
