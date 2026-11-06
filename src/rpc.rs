@@ -338,15 +338,16 @@ impl ConnectionClose {
 impl std::fmt::Display for ConnectionClose {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Remote { code: None, .. } => write!(f, "closed by the peer"),
-            Self::Remote {
-                code: Some(code),
-                reason,
-            } => write!(
-                f,
-                "closed by the peer with {code}: {}",
-                String::from_utf8_lossy(reason)
-            ),
+            Self::Remote { code, reason } => {
+                write!(f, "closed by the peer")?;
+                if let Some(code) = code {
+                    write!(f, " with {code}")?;
+                }
+                if !reason.is_empty() {
+                    write!(f, ": {}", String::from_utf8_lossy(reason))?;
+                }
+                Ok(())
+            }
             Self::Local => write!(f, "closed by this side"),
         }
     }
@@ -1964,6 +1965,25 @@ mod tests {
         for buf in [&overflow[..], &overlong[..]] {
             assert_eq!(parse_frame(buf).unwrap(), Frame::TooLarge);
         }
+    }
+
+    #[test]
+    fn connection_close_shows_code_and_reason() {
+        let close = |code, reason: &[u8]| {
+            ConnectionClose::Remote {
+                code,
+                reason: reason.to_vec(),
+            }
+            .to_string()
+        };
+        let code = Some(ErrorCode::Other(42));
+        assert_eq!(close(None, b""), "closed by the peer");
+        assert_eq!(close(None, b"bye"), "closed by the peer: bye");
+        assert_eq!(close(code, b""), "closed by the peer with code 42");
+        assert_eq!(
+            close(code, b"maintenance"),
+            "closed by the peer with code 42: maintenance"
+        );
     }
 
     #[test]
