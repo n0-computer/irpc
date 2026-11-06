@@ -750,6 +750,9 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                     let msg = postcard::from_bytes(&self.buf[body.clone()]);
                     self.buf.copy_within(body.end..self.end, 0);
                     self.end -= body.end;
+                    // For large frames, we resized the buffer to exactly the frame size.
+                    // After consuming the frame, the buffer is empty and we can
+                    // move it back inline, releasing the heap storage.
                     if self.end == 0 && self.buf.spilled() {
                         self.buf.truncate(INLINE_FRAME_SIZE);
                         self.buf.shrink_to_fit();
