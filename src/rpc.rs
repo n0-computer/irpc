@@ -464,12 +464,14 @@ pub enum RpcSendError {
     /// The connection was closed on purpose, by the peer or by this side.
     #[error("Connection {close}")]
     ConnectionClosed { close: ConnectionClose },
-    /// This sender closed the channel after an earlier send failed or was cancelled.
+    /// This sender closed the channel after an earlier send failed.
     ///
-    /// An earlier send on this sender or a clone of it found its message bad,
-    /// or was dropped before it was done. The stream can hold part of a
-    /// message, so this sender sends no more messages. After the connection
-    /// failed, later sends get the same [`ConnectionFailed`](Self::ConnectionFailed) instead.
+    /// An earlier send on this sender or a clone of it found its message too
+    /// large or unable to encode, so this sender reset the stream and sends no
+    /// more messages. After an error from the peer or the connection, later
+    /// sends get that error again instead, except for a failure that a custom
+    /// transport reported, which irpc cannot copy. A cancelled send does not
+    /// close the sender.
     ///
     /// Writing a request never returns this, since a request is written once.
     #[error("Sender closed after an earlier error")]

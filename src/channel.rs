@@ -23,7 +23,8 @@ pub mod oneshot;
 /// the server for a request and its updates, and the client for a response.
 ///
 /// After an error, the channel is closed. Later sends get the same error if
-/// the peer ended the channel, and [`RpcSendError::Closed`] otherwise.
+/// it came from the peer or the connection, and [`RpcSendError::Closed`] after
+/// a message that was too large or did not encode.
 ///
 /// [`ReceiverClosed`]: Self::ReceiverClosed
 /// [`RpcSendError::Closed`]: crate::rpc::RpcSendError::Closed
