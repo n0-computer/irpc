@@ -56,8 +56,6 @@ pub enum RecvError {
         source: postcard::Error,
     },
     /// An io error, for example because the connection was lost.
-    ///
-    /// A stream that ends in the middle of a message also gives an io error.
     #[error("Io error")]
     Io {
         #[error(std_err)]
