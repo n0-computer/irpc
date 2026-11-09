@@ -322,6 +322,14 @@ impl ConnectionClose {
         }
     }
 
+    /// Returns the kind of io error for this close, as noq uses for a [`ConnectionError`].
+    pub(crate) fn io_kind(&self) -> io::ErrorKind {
+        match self {
+            Self::Remote { .. } => io::ErrorKind::ConnectionAborted,
+            Self::Local => io::ErrorKind::NotConnected,
+        }
+    }
+
     /// Returns how the connection was closed, if `err` is from a stream of a closed connection.
     pub(crate) fn from_io(err: &io::Error) -> Option<Self> {
         let err = err.get_ref()?;
@@ -418,8 +426,9 @@ impl From<ReadRequestError> for io::Error {
     fn from(err: ReadRequestError) -> Self {
         match err {
             ReadRequestError::ConnectionFailed { source, .. } => source.into(),
-            ReadRequestError::ConnectionClosed { .. } => {
-                io::Error::new(io::ErrorKind::ConnectionAborted, err)
+            ReadRequestError::ConnectionClosed { ref close, .. } => {
+                let kind = close.io_kind();
+                io::Error::new(kind, err)
             }
             err => io::Error::new(io::ErrorKind::InvalidData, err),
         }
@@ -505,7 +514,10 @@ impl From<RpcSendError> for io::Error {
         match e {
             RpcSendError::ConnectionFailed { source, .. } => source,
             RpcSendError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
-            RpcSendError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
+            RpcSendError::ConnectionClosed { ref close, .. } => {
+                let kind = close.io_kind();
+                io::Error::new(kind, e)
+            }
             RpcSendError::Closed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
         }
@@ -596,7 +608,10 @@ impl From<RpcRecvError> for io::Error {
         match e {
             RpcRecvError::ConnectionFailed { source, .. } => source,
             RpcRecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
-            RpcRecvError::ConnectionClosed { .. } => io::Error::new(io::ErrorKind::NotConnected, e),
+            RpcRecvError::ConnectionClosed { ref close, .. } => {
+                let kind = close.io_kind();
+                io::Error::new(kind, e)
+            }
             _ => io::Error::new(io::ErrorKind::InvalidData, e),
         }
     }
@@ -1990,6 +2005,37 @@ mod tests {
             close(Some(ErrorCode::RequestDecodeFailed), b""),
             "closed by the peer (request does not decode)"
         );
+    }
+
+    /// Checks that every error with a close maps it to the same io error kind, as noq does.
+    #[test]
+    fn connection_close_maps_to_one_io_kind() {
+        let remote = ConnectionClose::Remote {
+            code: None,
+            reason: Vec::new(),
+        };
+        for (close, kind) in [
+            (remote, io::ErrorKind::ConnectionAborted),
+            (ConnectionClose::Local, io::ErrorKind::NotConnected),
+        ] {
+            let errors = [
+                io::Error::from(e!(RpcSendError::ConnectionClosed {
+                    close: close.clone()
+                })),
+                io::Error::from(e!(RpcRecvError::ConnectionClosed {
+                    close: close.clone()
+                })),
+                io::Error::from(e!(ReadRequestError::ConnectionClosed {
+                    close: close.clone()
+                })),
+                io::Error::from(e!(crate::RequestError::ConnectionClosed {
+                    close: close.clone()
+                })),
+            ];
+            for err in errors {
+                assert_eq!(err.kind(), kind, "{err}");
+            }
+        }
     }
 
     #[test]

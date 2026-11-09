@@ -1044,8 +1044,9 @@ impl From<RequestError> for io::Error {
             #[cfg(feature = "rpc")]
             RequestError::Connect { source, .. } => io::Error::other(source),
             #[cfg(feature = "rpc")]
-            RequestError::ConnectionClosed { .. } => {
-                io::Error::new(io::ErrorKind::ConnectionAborted, e)
+            RequestError::ConnectionClosed { ref close, .. } => {
+                let kind = close.io_kind();
+                io::Error::new(kind, e)
             }
             #[cfg(feature = "rpc")]
             RequestError::ConnectionFailed { source, .. } => source.into(),
