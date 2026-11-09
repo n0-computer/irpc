@@ -81,7 +81,10 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{Layer, registry::LookupSpan};
 
 /// A [`Propagator`] that uses the global text map propagator of `opentelemetry`.
-#[derive(Debug, Default, Clone, Copy)]
+///
+/// Create one with [`Default::default`].
+#[derive(Debug, Default, Clone)]
+#[non_exhaustive]
 pub struct OtelPropagator;
 
 impl Propagator for OtelPropagator {
