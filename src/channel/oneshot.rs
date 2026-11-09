@@ -164,7 +164,7 @@ impl<T> Sender<T> {
 
     /// Send a message
     ///
-    /// If this is a boxed sender that represents a remote connection, sending may yield or fail with an io error.
+    /// Sending over a remote connection may yield or fail with a [`SendError`].
     /// Local senders will never yield, but can fail if the receiver has been closed.
     pub async fn send(self, value: T) -> Result<(), SendError>
     where

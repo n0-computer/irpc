@@ -336,12 +336,13 @@ impl<T> Receiver<T> {
 }
 
 impl<T: Send + Sync + 'static> Receiver<T> {
-    /// Receive a message
+    /// Receives a message.
     ///
-    /// Returns Ok(None) if the sender has been dropped or the remote end has
-    /// cleanly closed the connection.
+    /// Returns `Ok(None)` after the last complete message, when all local
+    /// senders are dropped or the remote sender finishes its stream.
     ///
-    /// Returns an an io error if there was an error receiving the message.
+    /// Returns [`RecvError`] when receiving fails. Receiving on a local
+    /// channel never fails.
     ///
     /// ## Cancellation safety
     ///
@@ -353,8 +354,10 @@ impl<T: Send + Sync + 'static> Receiver<T> {
 
     /// Polls for the next message, keeping a message read in part for the next poll.
     ///
-    /// Returns `Ok(None)` if the sender has been dropped or the remote end has
-    /// cleanly closed the connection.
+    /// Returns `Ok(None)` after the last complete message when all local
+    /// senders are dropped or the remote sender finishes its stream.
+    ///
+    /// See [`Self::recv`] for errors.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, RecvError>> {
         match &mut self.0 {
             ReceiverInner::Tokio(rx) => rx.poll_recv(cx).map(Ok),

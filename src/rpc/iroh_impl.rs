@@ -8,7 +8,7 @@ use iroh::{
     },
     protocol::{AcceptError, ProtocolHandler},
 };
-use n0_error::{Result, e};
+use n0_error::Result;
 use n0_future::{TryFutureExt, future::Boxed as BoxFuture};
 // portable-atomic provides AtomicU64 on 32-bit targets (e.g. Xtensa ESP32) that
 // lack native 64-bit atomics, same as iroh itself.
@@ -128,10 +128,7 @@ async fn connect_and_open_bi(
     alpn: &[u8],
     mut guard: tokio::sync::MutexGuard<'_, Option<Connection>>,
 ) -> Result<(SendStream, RecvStream), RequestError> {
-    let conn = endpoint
-        .connect(addr.clone(), alpn)
-        .await
-        .map_err(|err| e!(RequestError::Other, err.into()))?;
+    let conn = endpoint.connect(addr.clone(), alpn).await?;
     let (send, recv) = conn.open_bi().await?;
     *guard = Some(conn);
     Ok((send, recv))
