@@ -441,12 +441,12 @@ pub trait RemoteConnection: Send + Sync + Debug + 'static {
     /// For connections that were fully authenticated before allowing to send any data, this should return `false`.
     fn zero_rtt_rejected(&self) -> BoxFuture<bool>;
 
-    /// Returns the established connection, if this is a noq or iroh connection.
+    /// Returns the established noq or iroh connection.
     ///
-    /// Returns `None` while the connection is not established, and for a
-    /// transport that is neither noq nor iroh. A connection that connects on the
-    /// first request returns the connection it currently uses. That connection
-    /// may have closed since: the next request replaces it.
+    /// Returns `None` while the connection is not established. A connection
+    /// that connects on the first request returns the connection it currently
+    /// uses. That connection may have closed since: the next request replaces
+    /// it. The default returns `None`.
     fn connection(&self) -> Option<ConnectionHandle> {
         None
     }
