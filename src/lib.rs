@@ -749,8 +749,9 @@ impl<S: Service> Client<S> {
                 Request::Remote(_request) => unreachable!(),
                 #[cfg(feature = "rpc")]
                 Request::Remote(remote) => {
-                    let (s, _) = remote.write(msg).await?;
-                    Ok(s.into())
+                    let (send, _, span) = remote.write_in_span(msg).await?;
+                    // The channel logs in the span in which it is created.
+                    Ok(span.in_scope(|| send.into()))
                 }
             }
         }

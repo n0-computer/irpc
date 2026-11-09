@@ -32,6 +32,10 @@ enum EchoProtocol {
     #[rpc(rx = mpsc::Receiver<u64>, tx = oneshot::Sender<u64>)]
     #[wrap(Sum)]
     Sum,
+    /// Streams updates without a response.
+    #[rpc(rx = mpsc::Receiver<u64>)]
+    #[wrap(Upload)]
+    Upload,
 }
 
 /// Handles each request, and logs `handled` in the handler.
@@ -55,6 +59,9 @@ fn handler() -> Handler<EchoProtocol> {
                     sum += i;
                 }
                 tx.send(sum).await.ok();
+            }
+            EchoMessage::Upload(WithChannels { mut rx, .. }) => {
+                while let Ok(Some(_)) = rx.recv().await {}
             }
         }
         Ok(())
@@ -115,6 +122,39 @@ async fn logs_have_connection_and_request() -> TestResult<()> {
         "server:rpc{conn=0}:Sum{req=2}: irpc::rpc: stream finished received=3",
         "server:rpc{conn=0}:Sum{req=2}: irpc::rpc: response sent",
         "client:Sum{req=2}: irpc::rpc: response received",
+    );
+    Ok(())
+}
+
+/// Keeps notification updates in their request span on both sides.
+#[tokio::test]
+#[traced_test]
+async fn notify_streaming_logs_have_request_span() -> TestResult<()> {
+    let (server, client, server_addr) = create_connected_endpoints()?;
+    let server = listen(server, handler()).instrument(info_span!("server"));
+    let _server = AbortOnDropHandle::new(tokio::spawn(server));
+    let client = Client::<EchoProtocol>::noq(client, server_addr);
+    async {
+        let tx = client.notify_streaming(Upload, 8).await?;
+        for i in 0..3 {
+            tx.send(i).await?;
+        }
+        drop(tx);
+        // The sequential handler answers only after it drains the updates.
+        client.rpc(Echo).await?;
+        TestResult::Ok(())
+    }
+    .instrument(info_span!("client"))
+    .await?;
+
+    assert_logs!(
+        "client:Upload{req=0}: irpc::rpc: request sent",
+        "client:Upload{req=0}: irpc::rpc: first message sent",
+        "client:Upload{req=0}: irpc::rpc: stream finished sent=3",
+        "server:rpc{conn=0}:Upload{req=0}: irpc::rpc: request received",
+        "server:rpc{conn=0}:Upload{req=0}: irpc::rpc: first message received",
+        "server:rpc{conn=0}:Upload{req=0}: irpc::rpc: stream finished received=3",
+        "client:Echo{req=1}: irpc::rpc: response received",
     );
     Ok(())
 }
