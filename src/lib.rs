@@ -321,8 +321,6 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// [`Channels<S>`]: Channels
 #[cfg(feature = "derive")]
 pub use irpc_derive::rpc_requests;
-#[cfg(feature = "rpc")]
-use n0_error::AnyError;
 use n0_error::stack_error;
 use serde::{Serialize, de::DeserializeOwned};
 #[cfg(feature = "rpc")]
@@ -972,7 +970,7 @@ impl<M> ClientInner<M> {
 
 /// Error when opening a request. When cross-process rpc is disabled, this is
 /// an empty enum since local requests can not fail.
-#[stack_error(derive, add_meta, from_sources)]
+#[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum RequestError {
     /// Error in noq during connect
@@ -982,21 +980,23 @@ pub enum RequestError {
         #[error(std_err)]
         source: ::noq::ConnectError,
     },
-    /// Error in noq when the connection already exists, when opening a stream pair
+    /// Error in iroh during connect, including the handshake
+    #[cfg(feature = "iroh")]
+    #[error("Error establishing connection")]
+    IrohConnect {
+        source: ::iroh::endpoint::ConnectError,
+    },
+    /// The connection was closed on purpose, by the peer or by this side.
     #[cfg(feature = "rpc")]
-    #[error("Error opening stream")]
-    Connection {
+    #[error("Connection {close}")]
+    ConnectionClosed { close: rpc::ConnectionClose },
+    /// The connection failed during the handshake or while opening a stream pair.
+    #[cfg(feature = "rpc")]
+    #[error("Connection failed")]
+    ConnectionFailed {
         #[error(std_err)]
         source: ::noq::ConnectionError,
     },
-    /// Generic error for non-noq transports
-    #[cfg(feature = "rpc")]
-    #[error("Error opening stream")]
-    Other { source: AnyError },
-
-    #[cfg(not(feature = "rpc"))]
-    #[error("(Without the rpc feature, requests cannot fail")]
-    Unreachable,
 }
 
 /// Error type that subsumes all possible errors in this crate, for convenience.
@@ -1011,28 +1011,20 @@ pub enum Error {
     MpscRecv { source: channel::mpsc::RecvError },
     #[error("Oneshot recv error")]
     OneshotRecv { source: channel::oneshot::RecvError },
-    #[cfg(feature = "rpc")]
-    #[error("Write error")]
-    Write { source: rpc::WriteError },
 }
 
 #[cfg(feature = "rpc")]
 impl Error {
-    /// Returns the irpc error code that the peer sent, if any.
+    /// Returns the code that the peer sent, if any.
     ///
     /// This is the code that the peer reset or stopped a stream with, or closed
     /// the connection with, see [`rpc::ErrorCode`].
     pub fn remote_code(&self) -> Option<rpc::ErrorCode> {
         match self {
-            Self::Request {
-                source: RequestError::Connection { source, .. },
-                ..
-            } => rpc::close_code(source),
-            Self::Request { .. } => None,
+            Self::Request { source, .. } => source.remote_code(),
             Self::Send { source, .. } => source.remote_code(),
             Self::MpscRecv { source, .. } => source.remote_code(),
             Self::OneshotRecv { source, .. } => source.remote_code(),
-            Self::Write { source, .. } => source.remote_code(),
         }
     }
 }
@@ -1047,8 +1039,17 @@ impl From<Error> for io::Error {
             Error::Send { source, .. } => source.into(),
             Error::MpscRecv { source, .. } => source.into(),
             Error::OneshotRecv { source, .. } => source.into(),
-            #[cfg(feature = "rpc")]
-            Error::Write { source, .. } => source.into(),
+        }
+    }
+}
+
+#[cfg(feature = "rpc")]
+impl RequestError {
+    /// Returns the code that the peer closed the connection with, if any.
+    pub fn remote_code(&self) -> Option<rpc::ErrorCode> {
+        match self {
+            Self::ConnectionClosed { close, .. } => close.code(),
+            _ => None,
         }
     }
 }
@@ -1059,11 +1060,39 @@ impl From<RequestError> for io::Error {
             #[cfg(feature = "rpc")]
             RequestError::Connect { source, .. } => io::Error::other(source),
             #[cfg(feature = "rpc")]
-            RequestError::Connection { source, .. } => source.into(),
+            RequestError::ConnectionClosed { ref close, .. } => {
+                let kind = close.io_kind();
+                io::Error::new(kind, e)
+            }
             #[cfg(feature = "rpc")]
-            RequestError::Other { source, .. } => io::Error::other(source),
-            #[cfg(not(feature = "rpc"))]
-            RequestError::Unreachable { .. } => unreachable!(),
+            RequestError::ConnectionFailed { source, .. } => source.into(),
+            #[cfg(feature = "iroh")]
+            RequestError::IrohConnect { source, .. } => io::Error::other(source),
+        }
+    }
+}
+
+#[cfg(feature = "rpc")]
+impl From<::noq::ConnectError> for RequestError {
+    fn from(source: ::noq::ConnectError) -> Self {
+        n0_error::e!(RequestError::Connect, source)
+    }
+}
+
+#[cfg(feature = "iroh")]
+impl From<::iroh::endpoint::ConnectError> for RequestError {
+    fn from(source: ::iroh::endpoint::ConnectError) -> Self {
+        n0_error::e!(RequestError::IrohConnect, source)
+    }
+}
+
+/// A connection closed on purpose becomes [`RequestError::ConnectionClosed`].
+#[cfg(feature = "rpc")]
+impl From<::noq::ConnectionError> for RequestError {
+    fn from(source: ::noq::ConnectionError) -> Self {
+        match rpc::ConnectionClose::from_error(&source) {
+            Some(close) => n0_error::e!(RequestError::ConnectionClosed { close }),
+            None => n0_error::e!(RequestError::ConnectionFailed, source),
         }
     }
 }

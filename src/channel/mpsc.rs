@@ -16,89 +16,56 @@ use n0_error::{e, stack_error};
 
 use super::SendError;
 #[cfg(feature = "rpc")]
-use crate::rpc::{self, ErrorCode};
+use crate::rpc::{ErrorCode, RpcRecvError};
 
 /// Error when receiving an mpsc message.
 ///
-/// A local channel has no errors.
+/// A local channel has no errors: when all senders are dropped, the receiver
+/// gets `Ok(None)`. A remote channel can fail for reasons that a local channel
+/// does not have, see [`RpcRecvError`].
 ///
 /// For a remote channel, the sender is on the other side of the connection:
 /// the server for a response stream, and the client for the updates of a request.
-///
-/// If the server rejects the request and also closes the connection, the close
-/// usually arrives first, and the receiver gets [`Io`] instead of [`Remote`].
-/// [`Self::remote_code`] returns the code in both cases.
-///
-/// [`Io`]: Self::Io
-/// [`Remote`]: Self::Remote
-#[stack_error(derive, add_meta)]
+#[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub enum RecvError {
-    /// The sender reset the stream with an irpc error code, and the channel is closed.
+    /// The remote channel failed for a reason that a local channel does not have.
     ///
-    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
-    ///
-    /// [`ErrorCode`]: crate::rpc::ErrorCode
-    /// [`rpc`]: crate::rpc
+    /// If the sender resets the stream, even with code 0, the receiver gets
+    /// this error instead of `Ok(None)`. A reset can discard messages that
+    /// were sent but not read yet, so the channel did not end cleanly.
     #[cfg(feature = "rpc")]
-    #[error("Sender closed the channel: {code}")]
-    Remote { code: crate::rpc::ErrorCode },
-    /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
-    ///
-    /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
-    #[error("Message too large")]
-    MaxSizeExceeded,
-    /// The message does not decode, so this receiver closed the channel.
-    #[cfg(feature = "rpc")]
-    #[error("Message does not decode")]
-    DecodeFailed {
-        #[error(std_err)]
-        source: postcard::Error,
-    },
-    /// An io error, for example because the connection was lost.
-    #[error("Io error")]
-    Io {
-        #[error(std_err)]
-        source: io::Error,
-    },
+    #[error("Remote channel failed")]
+    Rpc { source: RpcRecvError },
 }
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
-/// A reset with an irpc error code becomes [`RecvError::Remote`], and any
-/// other io error becomes [`RecvError::Io`].
+/// See [`RpcRecvError`]'s conversion from an io error.
+#[cfg(feature = "rpc")]
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
-        #[cfg(feature = "rpc")]
-        if let Some(code) = rpc::reset_code(&err) {
-            return e!(RecvError::Remote { code });
-        }
-        e!(RecvError::Io, err)
+        RpcRecvError::from(err).into()
     }
 }
 
 impl From<RecvError> for io::Error {
     fn from(e: RecvError) -> Self {
         match e {
-            RecvError::Io { source, .. } => source,
             #[cfg(feature = "rpc")]
-            RecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
-            _ => io::Error::new(io::ErrorKind::InvalidData, e),
+            RecvError::Rpc { source, .. } => source.into(),
         }
     }
 }
 
 #[cfg(feature = "rpc")]
 impl RecvError {
-    /// Returns the irpc error code that the peer sent, if any.
+    /// Returns the code that the peer sent, if any.
     ///
-    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
-    /// the peer closed the connection with.
+    /// See [`RpcRecvError::remote_code`].
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
-            Self::Remote { code, .. } => Some(*code),
-            Self::Io { source, .. } => rpc::io_close_code(source),
-            _ => None,
+            Self::Rpc { source, .. } => source.remote_code(),
         }
     }
 }
@@ -369,12 +336,13 @@ impl<T> Receiver<T> {
 }
 
 impl<T: Send + Sync + 'static> Receiver<T> {
-    /// Receive a message
+    /// Receives a message.
     ///
-    /// Returns Ok(None) if the sender has been dropped or the remote end has
-    /// cleanly closed the connection.
+    /// Returns `Ok(None)` after the last complete message, when all local
+    /// senders are dropped or the remote sender finishes its stream.
     ///
-    /// Returns an an io error if there was an error receiving the message.
+    /// Returns [`RecvError`] when receiving fails. Receiving on a local
+    /// channel never fails.
     ///
     /// ## Cancellation safety
     ///
@@ -386,8 +354,10 @@ impl<T: Send + Sync + 'static> Receiver<T> {
 
     /// Polls for the next message, keeping a message read in part for the next poll.
     ///
-    /// Returns `Ok(None)` if the sender has been dropped or the remote end has
-    /// cleanly closed the connection.
+    /// Returns `Ok(None)` after the last complete message when all local
+    /// senders are dropped or the remote sender finishes its stream.
+    ///
+    /// See [`Self::recv`] for errors.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, RecvError>> {
         match &mut self.0 {
             ReceiverInner::Tokio(rx) => rx.poll_recv(cx).map(Ok),

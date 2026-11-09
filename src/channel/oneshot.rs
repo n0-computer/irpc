@@ -7,23 +7,20 @@ use n0_future::future::Boxed as BoxFuture;
 
 use super::SendError;
 #[cfg(feature = "rpc")]
-use crate::rpc::{self, ErrorCode};
+use crate::rpc::{self, ErrorCode, RpcRecvError};
 use crate::util::FusedOneshotReceiver;
 
 /// Error when receiving a oneshot message.
 ///
-/// For a local channel, the only error is [`SenderClosed`]. For a remote
-/// channel, the sender is on the other side of the connection, for example
-/// the server for a response.
+/// For a local channel, the only error is [`SenderClosed`]. A remote channel
+/// can also fail for reasons that a local channel does not have, see
+/// [`RpcRecvError`].
 ///
-/// If the server rejects the request and also closes the connection, the close
-/// usually arrives first, and the receiver gets [`Io`] instead of [`Remote`].
-/// [`Self::remote_code`] returns the code in both cases.
+/// For a remote channel, the sender is on the other side of the connection,
+/// for example the server for a response.
 ///
 /// [`SenderClosed`]: Self::SenderClosed
-/// [`Io`]: Self::Io
-/// [`Remote`]: Self::Remote
-#[stack_error(derive, add_meta)]
+#[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub enum RecvError {
     /// The sender has been closed.
@@ -31,88 +28,56 @@ pub enum RecvError {
     /// This is the only error that can occur for local communication. For
     /// remote communication, this means that the sender finished the stream
     /// without sending, for example because it was dropped, or reset it with
-    /// [`ErrorCode::MessageAborted`]. A sender whose send was cancelled in the
-    /// middle of the message is also closed, like a sender that was dropped
-    /// before it sent.
+    /// code 0 or [`ErrorCode::MessageAborted`]. A sender whose send was
+    /// cancelled in the middle of the message is also closed, like a sender
+    /// that was dropped before it sent.
     ///
     /// [`ErrorCode::MessageAborted`]: crate::rpc::ErrorCode::MessageAborted
     #[error("Sender closed")]
     SenderClosed,
-    /// The sender reset the stream with an irpc error code, and the channel is closed.
-    ///
-    /// The `code` says why, see [`ErrorCode`], and the [`rpc`] module for an overview.
-    ///
-    /// [`ErrorCode`]: crate::rpc::ErrorCode
-    /// [`rpc`]: crate::rpc
+    /// The remote channel failed for a reason that a local channel does not have.
     #[cfg(feature = "rpc")]
-    #[error("Sender closed the channel: {code}")]
-    Remote { code: crate::rpc::ErrorCode },
-    /// The message is larger than [`MAX_MESSAGE_SIZE`], so this receiver closed the channel.
-    ///
-    /// [`MAX_MESSAGE_SIZE`]: crate::rpc::MAX_MESSAGE_SIZE
-    #[error("Message too large")]
-    MaxSizeExceeded,
-    /// The message does not decode, so this receiver closed the channel.
-    #[cfg(feature = "rpc")]
-    #[error("Message does not decode")]
-    DecodeFailed {
-        #[error(std_err)]
-        source: postcard::Error,
-    },
-    /// An io error, for example because the connection was lost.
-    #[error("Io error")]
-    Io {
-        #[error(std_err)]
-        source: io::Error,
-    },
+    #[error("Remote channel failed")]
+    Rpc { source: RpcRecvError },
 }
 
 /// Converts an io error from reading the stream of a remote channel.
 ///
-/// A reset with [`ErrorCode::MessageAborted`], and the end of the stream in the
-/// middle of a message, become [`RecvError::SenderClosed`]. A reset with
-/// another irpc error code becomes [`RecvError::Remote`], and any other io
-/// error becomes [`RecvError::Io`].
-///
-/// [`ErrorCode::MessageAborted`]: crate::rpc::ErrorCode::MessageAborted
+/// A reset with code 0 or [`ErrorCode::MessageAborted`], and the end of the
+/// stream in the middle of a message, become [`RecvError::SenderClosed`].
+/// Anything else becomes [`RecvError::Rpc`], see [`RpcRecvError`]'s conversion
+/// from an io error.
+#[cfg(feature = "rpc")]
 impl From<io::Error> for RecvError {
     fn from(err: io::Error) -> Self {
-        #[cfg(feature = "rpc")]
-        match rpc::reset_code(&err) {
-            Some(ErrorCode::MessageAborted) => return e!(RecvError::SenderClosed),
-            Some(code) => return e!(RecvError::Remote { code }),
-            None => {}
+        if let Some(None | Some(ErrorCode::MessageAborted)) = rpc::reset_code(&err) {
+            return e!(RecvError::SenderClosed);
         }
-        #[cfg(feature = "rpc")]
         if rpc::is_truncated(&err) {
             return e!(RecvError::SenderClosed);
         }
-        e!(RecvError::Io, err)
+        RpcRecvError::from(err).into()
     }
 }
 
 impl From<RecvError> for io::Error {
     fn from(e: RecvError) -> Self {
         match e {
-            RecvError::Io { source, .. } => source,
             RecvError::SenderClosed { .. } => io::Error::new(io::ErrorKind::BrokenPipe, e),
             #[cfg(feature = "rpc")]
-            RecvError::Remote { .. } => io::Error::new(io::ErrorKind::ConnectionReset, e),
-            _ => io::Error::new(io::ErrorKind::InvalidData, e),
+            RecvError::Rpc { source, .. } => source.into(),
         }
     }
 }
 
 #[cfg(feature = "rpc")]
 impl RecvError {
-    /// Returns the irpc error code that the peer sent, if any.
+    /// Returns the code that the peer sent, if any.
     ///
-    /// This is the code of a [`Remote`](Self::Remote) error, or the code that
-    /// the peer closed the connection with.
+    /// See [`RpcRecvError::remote_code`].
     pub fn remote_code(&self) -> Option<ErrorCode> {
         match self {
-            Self::Remote { code, .. } => Some(*code),
-            Self::Io { source, .. } => rpc::io_close_code(source),
+            Self::Rpc { source, .. } => source.remote_code(),
             _ => None,
         }
     }
@@ -199,7 +164,7 @@ impl<T> Sender<T> {
 
     /// Send a message
     ///
-    /// If this is a boxed sender that represents a remote connection, sending may yield or fail with an io error.
+    /// Sending over a remote connection may yield or fail with a [`SendError`].
     /// Local senders will never yield, but can fail if the receiver has been closed.
     pub async fn send(self, value: T) -> Result<(), SendError>
     where
