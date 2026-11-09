@@ -1139,7 +1139,10 @@ impl<T> Debug for NoqReceiver<T> {
 }
 
 impl<T: RpcMessage> NoqReceiver<T> {
-    fn poll_recv_inner(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, mpsc::RecvError>> {
+    fn poll_recv_inner(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<T>, mpsc::RecvError>> {
         loop {
             match parse_frame(&self.buf[..self.end])? {
                 Frame::Whole { body } => {
@@ -1935,8 +1938,7 @@ mod tests {
         use std::future::poll_fn;
 
         let (server, cert) = crate::noq::make_server_endpoint("127.0.0.1:0".parse()?)?;
-        let client =
-            crate::noq::make_client_endpoint("127.0.0.1:0".parse()?, &[cert.as_slice()])?;
+        let client = crate::noq::make_client_endpoint("127.0.0.1:0".parse()?, &[cert.as_slice()])?;
         let connecting = client.connect(server.local_addr()?, "localhost")?;
         let accepting = async { server.accept().await.unwrap().await };
         let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
