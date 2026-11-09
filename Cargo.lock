@@ -591,7 +591,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -767,7 +767,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1823,8 +1823,9 @@ dependencies = [
 
 [[package]]
 name = "n0-error"
-version = "1.0.1"
-source = "git+https://github.com/n0-computer/n0-error?rev=4af95e8e36e4a69ad152a5ebae3a31ee5b548a43#4af95e8e36e4a69ad152a5ebae3a31ee5b548a43"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3039042840b0f37fcc56e965e84f49479c7e0c6eeca0a8ed105a459fb5bb0909"
 dependencies = [
  "n0-error-macros",
  "spez",
@@ -1832,8 +1833,9 @@ dependencies = [
 
 [[package]]
 name = "n0-error-macros"
-version = "1.0.1"
-source = "git+https://github.com/n0-computer/n0-error?rev=4af95e8e36e4a69ad152a5ebae3a31ee5b548a43#4af95e8e36e4a69ad152a5ebae3a31ee5b548a43"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e03695957bd59b6dccaf68d3c4934ef189a1b93ff7440413e14149b152fd20d6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2923,7 +2925,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3992,7 +3994,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
