@@ -341,7 +341,7 @@ impl std::fmt::Display for ConnectionClose {
             Self::Remote { code, reason } => {
                 write!(f, "closed by the peer")?;
                 if let Some(code) = code {
-                    write!(f, " with {code}")?;
+                    write!(f, " ({code})")?;
                 }
                 if !reason.is_empty() {
                     write!(f, ": {}", String::from_utf8_lossy(reason))?;
@@ -1981,10 +1981,14 @@ mod tests {
         let code = Some(ErrorCode::Other(42));
         assert_eq!(close(None, b""), "closed by the peer");
         assert_eq!(close(None, b"bye"), "closed by the peer: bye");
-        assert_eq!(close(code, b""), "closed by the peer with code 42");
+        assert_eq!(close(code, b""), "closed by the peer (code 42)");
         assert_eq!(
             close(code, b"maintenance"),
-            "closed by the peer with code 42: maintenance"
+            "closed by the peer (code 42): maintenance"
+        );
+        assert_eq!(
+            close(Some(ErrorCode::RequestDecodeFailed), b""),
+            "closed by the peer (request does not decode)"
         );
     }
 
