@@ -971,6 +971,7 @@ pub enum RequestError {
         #[error(std_err)]
         source: ::noq::ConnectError,
     },
+    /// Error in iroh during connect, including the handshake
     #[cfg(feature = "iroh")]
     #[error("Error establishing connection")]
     IrohConnect {
