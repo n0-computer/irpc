@@ -1823,9 +1823,9 @@ dependencies = [
 
 [[package]]
 name = "n0-error"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3039042840b0f37fcc56e965e84f49479c7e0c6eeca0a8ed105a459fb5bb0909"
+checksum = "96c2215d16de3a55894583a539e6b151fb45236c3a6da45a18a40af73dc00636"
 dependencies = [
  "n0-error-macros",
  "spez",
@@ -1833,9 +1833,9 @@ dependencies = [
 
 [[package]]
 name = "n0-error-macros"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e03695957bd59b6dccaf68d3c4934ef189a1b93ff7440413e14149b152fd20d6"
+checksum = "6217fd5f567ce1e53f324744c14fab04899861e397539c5f3cc08bd7c1dcd2de"
 dependencies = [
  "proc-macro2",
  "quote",
