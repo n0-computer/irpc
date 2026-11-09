@@ -99,7 +99,7 @@ async fn bad_request_closes_connection() -> TestResult<()> {
         panic!("server closes the connection");
     };
     assert_eq!(
-        ErrorCode::from_code(close.error_code.into_inner()),
+        ErrorCode::from_code(close.error_code),
         Some(ErrorCode::RequestDecodeFailed)
     );
     Ok(())
@@ -120,7 +120,7 @@ async fn too_large_request_closes_connection() -> TestResult<()> {
         panic!("server closes the connection");
     };
     assert_eq!(
-        ErrorCode::from_code(close.error_code.into_inner()),
+        ErrorCode::from_code(close.error_code),
         Some(ErrorCode::RequestMaxSizeExceeded)
     );
     Ok(())
@@ -203,9 +203,9 @@ async fn too_large_rpc_resets_with_reason() -> TestResult<()> {
     let (_send, mut recv) = server_conn.accept_bi().await?;
     assert_eq!(
         recv.read(&mut [0]).await,
-        Err(noq::ReadError::Reset(noq::VarInt::from_u64(
+        Err(noq::ReadError::Reset(
             ErrorCode::RequestMaxSizeExceeded.to_code()
-        )?))
+        ))
     );
     Ok(())
 }
@@ -242,7 +242,7 @@ async fn truncated_request_closes_connection() -> TestResult<()> {
         panic!("server closes the connection");
     };
     assert_eq!(
-        ErrorCode::from_code(close.error_code.into_inner()),
+        ErrorCode::from_code(close.error_code),
         Some(ErrorCode::RequestDecodeFailed)
     );
     Ok(())
@@ -414,7 +414,7 @@ async fn close_with_code_returns_connection_closed() -> TestResult<()> {
     let ReadRequestError::ConnectionClosed { close, .. } = err else {
         panic!("expected ConnectionClosed, got {err:?}");
     };
-    assert_eq!(close.code(), Some(ErrorCode::Other(401)));
+    assert_eq!(close.code(), Some(ErrorCode::Other(401u32.into())));
 
     // A client that opens a request on the closed connection gets the same close.
     let client = Client::<client::EchoProtocol>::boxed(server_conn);
@@ -422,6 +422,6 @@ async fn close_with_code_returns_connection_closed() -> TestResult<()> {
         .rpc(client::Echo("a".into()))
         .await
         .expect_err("the connection is closed");
-    assert_eq!(err.remote_code(), Some(ErrorCode::Other(401)));
+    assert_eq!(err.remote_code(), Some(ErrorCode::Other(401u32.into())));
     Ok(())
 }

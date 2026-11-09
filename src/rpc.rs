@@ -117,7 +117,9 @@ use std::{
 
 use n0_error::{e, stack_error};
 use n0_future::future::Boxed as BoxFuture;
-use noq::{ConnectionError, VarInt};
+use noq::ConnectionError;
+/// The number type of the codes on streams and connections, see [`ErrorCode`].
+pub use noq::VarInt;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use smallvec::{SmallVec, smallvec};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
@@ -162,15 +164,16 @@ pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 /// # Examples
 ///
 /// ```
-/// use irpc::rpc::ErrorCode;
+/// use irpc::rpc::{ErrorCode, VarInt};
 ///
 /// assert_eq!(
-///     ErrorCode::from_code(4),
+///     ErrorCode::from_code(VarInt::from_u32(4)),
 ///     Some(ErrorCode::RequestDecodeFailed)
 /// );
-/// assert_eq!(ErrorCode::RequestDecodeFailed.to_code(), 4);
-/// assert_eq!(ErrorCode::from_code(401), Some(ErrorCode::Other(401)));
-/// assert_eq!(ErrorCode::from_code(0), None);
+/// assert_eq!(ErrorCode::RequestDecodeFailed.to_code(), VarInt::from_u32(4));
+/// let code = VarInt::from_u32(401);
+/// assert_eq!(ErrorCode::from_code(code), Some(ErrorCode::Other(code)));
+/// assert_eq!(ErrorCode::from_code(VarInt::from_u32(0)), None);
 /// ```
 ///
 /// [Requests and channel messages]: self#requests-and-channel-messages
@@ -231,7 +234,7 @@ pub enum ErrorCode {
     ///
     /// [Error codes]: self#error-codes
     #[display("code {_0}")]
-    Other(u64),
+    Other(VarInt),
 }
 
 impl ErrorCode {
@@ -247,39 +250,28 @@ impl ErrorCode {
         Self::MessageAborted,
     ];
 
-    /// Returns the number of this error code.
-    pub const fn to_code(self) -> u64 {
+    /// Returns the code that streams and connections carry for this error code.
+    pub const fn to_code(self) -> VarInt {
         match self {
-            Self::RequestAborted => 1,
-            Self::RequestMaxSizeExceeded => 2,
-            Self::RequestEncodeFailed => 3,
-            Self::RequestDecodeFailed => 4,
-            Self::MessageMaxSizeExceeded => 5,
-            Self::MessageEncodeFailed => 6,
-            Self::MessageDecodeFailed => 7,
-            Self::MessageAborted => 8,
+            Self::RequestAborted => VarInt::from_u32(1),
+            Self::RequestMaxSizeExceeded => VarInt::from_u32(2),
+            Self::RequestEncodeFailed => VarInt::from_u32(3),
+            Self::RequestDecodeFailed => VarInt::from_u32(4),
+            Self::MessageMaxSizeExceeded => VarInt::from_u32(5),
+            Self::MessageEncodeFailed => VarInt::from_u32(6),
+            Self::MessageDecodeFailed => VarInt::from_u32(7),
+            Self::MessageAborted => VarInt::from_u32(8),
             Self::Other(code) => code,
         }
     }
 
     /// Returns the error code for `code`, or `None` for code 0, which means no error.
-    pub fn from_code(code: u64) -> Option<Self> {
-        if code == 0 {
+    pub fn from_code(code: VarInt) -> Option<Self> {
+        if code.into_inner() == 0 {
             return None;
         }
         let known = Self::KNOWN.into_iter().find(|c| c.to_code() == code);
         Some(known.unwrap_or(Self::Other(code)))
-    }
-
-    pub(crate) fn from_varint(code: VarInt) -> Option<Self> {
-        Self::from_code(code.into_inner())
-    }
-
-    /// Returns the code for a stream or connection.
-    ///
-    /// irpc only sends the codes that it knows, which all fit.
-    fn to_varint(self) -> VarInt {
-        VarInt::from_u64(self.to_code()).expect("irpc sends only codes below 2^62")
     }
 }
 
@@ -314,7 +306,7 @@ impl ConnectionClose {
     pub(crate) fn from_error(err: &ConnectionError) -> Option<Self> {
         match err {
             ConnectionError::ApplicationClosed(close) => Some(Self::Remote {
-                code: ErrorCode::from_varint(close.error_code),
+                code: ErrorCode::from_code(close.error_code),
                 reason: close.reason.to_vec(),
             }),
             ConnectionError::LocallyClosed => Some(Self::Local),
@@ -680,7 +672,7 @@ impl<S: BorrowMut<noq::SendStream>> ResetOnDrop<S> {
     /// Resets the stream with `code`, instead of the code of this guard on drop.
     fn reset(&mut self, code: ErrorCode) {
         if let Some(mut send) = self.send.take() {
-            send.borrow_mut().reset(code.to_varint()).ok();
+            send.borrow_mut().reset(code.to_code()).ok();
         }
     }
 }
@@ -688,7 +680,7 @@ impl<S: BorrowMut<noq::SendStream>> ResetOnDrop<S> {
 impl<S: BorrowMut<noq::SendStream>> Drop for ResetOnDrop<S> {
     fn drop(&mut self) {
         if let Some(send) = &mut self.send {
-            send.borrow_mut().reset(self.code.to_varint()).ok();
+            send.borrow_mut().reset(self.code.to_code()).ok();
         }
     }
 }
@@ -768,7 +760,7 @@ fn encode_message(
                 e!(RpcSendError::EncodeFailed, source),
             ),
         };
-        send.reset(code.to_varint()).ok();
+        send.reset(code.to_code()).ok();
         err.into()
     })
 }
@@ -860,14 +852,13 @@ impl<T: DeserializeOwned> From<noq::RecvStream> for oneshot::Receiver<T> {
                 return Err(e!(oneshot::RecvError::SenderClosed));
             };
             if size > MAX_MESSAGE_SIZE {
-                read.stop(ErrorCode::MessageMaxSizeExceeded.to_varint())
-                    .ok();
+                read.stop(ErrorCode::MessageMaxSizeExceeded.to_code()).ok();
                 return Err(e!(RpcRecvError::MaxSizeExceeded).into());
             }
             let mut buf = vec![0; size as usize];
             AsyncReadExt::read_exact(&mut read, &mut buf).await?;
             let msg: T = postcard::from_bytes(&buf).map_err(|err| {
-                read.stop(ErrorCode::MessageDecodeFailed.to_varint()).ok();
+                read.stop(ErrorCode::MessageDecodeFailed.to_code()).ok();
                 oneshot::RecvError::from(e!(RpcRecvError::DecodeFailed, err))
             })?;
             span.in_scope(|| debug!("response received"));
@@ -914,7 +905,7 @@ pub(crate) fn is_truncated(err: &io::Error) -> bool {
 /// The inner `None` is code 0.
 pub(crate) fn reset_code(err: &io::Error) -> Option<Option<ErrorCode>> {
     match read_error(err)? {
-        noq::ReadError::Reset(code) => Some(ErrorCode::from_varint(*code)),
+        noq::ReadError::Reset(code) => Some(ErrorCode::from_code(*code)),
         _ => None,
     }
 }
@@ -1152,7 +1143,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                     }
                     let msg = msg.map_err(|err| {
                         self.recv
-                            .stop(ErrorCode::MessageDecodeFailed.to_varint())
+                            .stop(ErrorCode::MessageDecodeFailed.to_code())
                             .ok();
                         mpsc::RecvError::from(e!(RpcRecvError::DecodeFailed, err))
                     })?;
@@ -1169,7 +1160,7 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                 }
                 Frame::TooLarge => {
                     self.recv
-                        .stop(ErrorCode::MessageMaxSizeExceeded.to_varint())
+                        .stop(ErrorCode::MessageMaxSizeExceeded.to_code())
                         .ok();
                     return Poll::Ready(Err(e!(RpcRecvError::MaxSizeExceeded).into()));
                 }
@@ -1471,7 +1462,7 @@ impl HandlerError {
     /// ```
     /// use irpc::{
     ///     channel::oneshot,
-    ///     rpc::{Handler, HandlerError},
+    ///     rpc::{Handler, HandlerError, VarInt},
     ///     rpc_requests,
     /// };
     /// use serde::{Deserialize, Serialize};
@@ -1487,7 +1478,7 @@ impl HandlerError {
     /// let handler = Handler::<AuthProtocol>::sequential(|msg| async move {
     ///     let AuthMessage::Auth(msg) = msg;
     ///     if msg.inner.0 != "secret" {
-    ///         Err(HandlerError::close_connection(401, "permission denied"))
+    ///         Err(HandlerError::close_connection(VarInt::from_u32(401), "permission denied"))
     ///     } else {
     ///         msg.tx.send(()).await.ok();
     ///         Ok(())
@@ -1496,10 +1487,10 @@ impl HandlerError {
     /// ```
     ///
     /// [Error codes]: self#error-codes
-    pub fn close_connection(code: u32, reason: impl AsRef<[u8]>) -> Self {
+    pub fn close_connection(code: VarInt, reason: impl AsRef<[u8]>) -> Self {
         Self {
             inner: HandlerErrorInner::CloseConnection {
-                code: VarInt::from_u32(code),
+                code,
                 reason: reason.as_ref().to_vec(),
             },
         }
@@ -1648,7 +1639,7 @@ impl<S: Service> Handler<S> {
                     None => return Err(err.into()), // A connection error.
                     Some(_) if self.skip_bad_requests => debug!("skipped bad request: {err:#}"),
                     Some(code) => {
-                        connection.close(code.to_varint(), err.to_string().as_bytes());
+                        connection.close(code.to_code(), err.to_string().as_bytes());
                         return Err(err.into());
                     }
                 },
@@ -1669,7 +1660,7 @@ impl<S: RemoteService> Handler<S> {
                 local_sender.send_raw(msg).await.map_err(|err| {
                     // The receiver is gone. Close as a dropped connection does.
                     warn!("handler stopped: {err:#}");
-                    HandlerError::close_connection(0, b"")
+                    HandlerError::close_connection(VarInt::from_u32(0), b"")
                 })
             }
         })
@@ -1816,15 +1807,15 @@ async fn read_request_inner<S: Service>(
                 debug!(?reason, "skipped request: the client reset its stream");
                 // A dropped stream finishes, which a client with an mpsc
                 // response would take for the end of the response.
-                send.reset(ErrorCode::RequestAborted.to_varint()).ok();
+                send.reset(ErrorCode::RequestAborted.to_code()).ok();
                 continue;
             }
             // The next `accept_bi` returns why.
             ReadFrame::ConnectionLost => continue,
         };
         if let Some(code) = err.error_code() {
-            recv.stop(code.to_varint()).ok();
-            send.reset(code.to_varint()).ok();
+            recv.stop(code.to_code()).ok();
+            send.reset(code.to_code()).ok();
         }
         return Err(err);
     }
@@ -1853,7 +1844,7 @@ impl<S> ReadFrame<S> {
             // Any reset, not only `ErrorCode::RequestAborted`: the update sender of a
             // request resets the stream if an update does not encode. noq drops
             // unread data on a reset, so this reset can arrive before the request.
-            noq::ReadError::Reset(code) => Self::Reset(ErrorCode::from_varint(*code)),
+            noq::ReadError::Reset(code) => Self::Reset(ErrorCode::from_code(*code)),
             noq::ReadError::ConnectionLost(_) => Self::ConnectionLost,
             // A server cannot get these: irpc stops a request stream only after
             // its read failed, and only a client gets `ZeroRttRejected`.
@@ -1911,10 +1902,11 @@ mod tests {
         for code in ErrorCode::KNOWN {
             assert_eq!(ErrorCode::from_code(code.to_code()), Some(code));
         }
-        for code in [16, 401, u64::from(u32::MAX) + 1] {
+        for code in [16, 401, u64::from(u32::MAX) + 1, VarInt::MAX.into_inner()] {
+            let code = VarInt::from_u64(code).unwrap();
             assert_eq!(ErrorCode::from_code(code), Some(ErrorCode::Other(code)));
         }
-        assert_eq!(ErrorCode::from_code(0), None);
+        assert_eq!(ErrorCode::from_code(VarInt::from_u32(0)), None);
     }
 
     /// Parses the next frame from `buf`, and on a whole one removes it and returns its body.
@@ -1993,7 +1985,7 @@ mod tests {
             }
             .to_string()
         };
-        let code = Some(ErrorCode::Other(42));
+        let code = Some(ErrorCode::Other(VarInt::from_u32(42)));
         assert_eq!(close(None, b""), "closed by the peer");
         assert_eq!(close(None, b"bye"), "closed by the peer: bye");
         assert_eq!(close(code, b""), "closed by the peer (code 42)");
@@ -2041,13 +2033,13 @@ mod tests {
     #[test]
     fn send_error_maps_stop_codes() {
         let err = SendError::from(noq::WriteError::Stopped(
-            ErrorCode::RequestDecodeFailed.to_varint(),
+            ErrorCode::RequestDecodeFailed.to_code(),
         ));
         assert_eq!(err.remote_code(), Some(ErrorCode::RequestDecodeFailed));
         assert_eq!(io::Error::from(err).kind(), io::ErrorKind::ConnectionReset);
         let err = SendError::from(noq::WriteError::Stopped(0u32.into()));
         assert!(matches!(err, SendError::ReceiverClosed { .. }), "{err:?}");
         let err = SendError::from(noq::WriteError::Stopped(401u32.into()));
-        assert_eq!(err.remote_code(), Some(ErrorCode::Other(401)));
+        assert_eq!(err.remote_code(), Some(ErrorCode::Other(401u32.into())));
     }
 }

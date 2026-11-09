@@ -595,9 +595,7 @@ async fn mpsc_reset_inside_message_is_an_error() -> TestResult<()> {
         let conn = client.connect(server_addr, "localhost")?.await?;
         let (mut send, _) = conn.open_bi().await?;
         send.write_all(partial).await?;
-        send.reset(noq::VarInt::from_u64(
-            ErrorCode::MessageEncodeFailed.to_code(),
-        )?)?;
+        send.reset(ErrorCode::MessageEncodeFailed.to_code())?;
         let Err(cause) = server.await? else {
             panic!("the stream was reset");
         };
@@ -625,10 +623,7 @@ async fn mpsc_connection_closed_inside_message_is_an_error() -> TestResult<()> {
     send.write_all(&[2, 1, 7, 100, 1, 2, 3]).await?;
     // Close only after the receiver has the stream.
     assert_eq!(first_rx.await?, Some(vec![7]));
-    conn.close(
-        noq::VarInt::from_u64(ErrorCode::RequestAborted.to_code())?,
-        b"",
-    );
+    conn.close(ErrorCode::RequestAborted.to_code(), b"");
     let Err(cause) = server.await?? else {
         panic!("the connection was closed");
     };
@@ -946,7 +941,7 @@ async fn mpsc_decode_error_stops_stream() -> TestResult<()> {
     // an odd number does not decode as `NoSer`
     send.write_length_prefixed((1u64, COMPLETE)).await?;
     let code = timeout(Duration::from_secs(5), send.stopped()).await??;
-    let code = code.and_then(|code| ErrorCode::from_code(code.into_inner()));
+    let code = code.and_then(ErrorCode::from_code);
     assert_eq!(code, Some(ErrorCode::MessageDecodeFailed));
     conn.close(0u32.into(), b"");
     server.await??;

@@ -76,7 +76,7 @@ impl SendError {
 impl From<noq::WriteError> for SendError {
     fn from(err: noq::WriteError) -> Self {
         match err {
-            noq::WriteError::Stopped(code) => match ErrorCode::from_varint(code) {
+            noq::WriteError::Stopped(code) => match ErrorCode::from_code(code) {
                 Some(code) => e!(RpcSendError::Remote { code }).into(),
                 // A receiver that is dropped stops the stream with code 0.
                 None => e!(SendError::ReceiverClosed),
