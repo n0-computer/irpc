@@ -400,6 +400,7 @@ async fn read_request_returns_bad_request() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn close_with_code_returns_connection_closed() -> TestResult<()> {
     let (server, client_endpoint, server_addr) = create_connected_endpoints()?;
     let connecting = client_endpoint.connect(server_addr, "localhost")?;

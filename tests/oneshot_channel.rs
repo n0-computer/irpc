@@ -40,6 +40,7 @@ async fn vec_receiver(server: Endpoint) -> Result<(), RecvError> {
 
 /// Checks that a connection that the peer closes with an application code is not an io error.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_connection_closed_with_app_code() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(async move {
@@ -76,6 +77,7 @@ async fn oneshot_connection_closed_with_app_code() -> TestResult<()> {
 
 /// Checks that a reset with code 0 is a closed channel, not an io error.
 #[tokio::test]
+#[traced_test]
 async fn oneshot_reset_with_code_0() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));

@@ -638,6 +638,7 @@ async fn mpsc_connection_closed_inside_message_is_an_error() -> TestResult<()> {
 
 /// Checks that a size prefix that does not fit in a u64 is `MaxSizeExceeded`, not an io error.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_too_long_size_prefix() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -662,6 +663,7 @@ async fn mpsc_too_long_size_prefix() -> TestResult<()> {
 
 /// Checks that a reset with code 0 is a closed channel, not an io error.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_reset_with_code_0() -> TestResult<()> {
     let (server, client, server_addr) = create_connected_endpoints()?;
     let server = tokio::spawn(vec_receiver(server));
@@ -1074,6 +1076,7 @@ async fn mpsc_send_mixed_sizes() -> TestResult<()> {
 
 /// Checks that later sends after the connection was lost get the io error again, not `Closed`.
 #[tokio::test]
+#[traced_test]
 async fn mpsc_send_after_connection_lost() -> TestResult<()> {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
     // The server runs on its own runtime, so that shutting the runtime down
