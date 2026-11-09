@@ -876,6 +876,19 @@ fn write_error(err: &io::Error) -> Option<&noq::WriteError> {
     err.get_ref()?.downcast_ref()
 }
 
+impl SendError {
+    /// Returns whether the server rejected 0-RTT while this client wrote the request.
+    pub(crate) fn is_zero_rtt_rejected(&self) -> bool {
+        match self {
+            Self::Rpc {
+                source: RpcSendError::ConnectionFailed { source, .. },
+                ..
+            } => matches!(write_error(source), Some(noq::WriteError::ZeroRttRejected)),
+            _ => false,
+        }
+    }
+}
+
 /// Reads the size prefix of a message, or returns `None` at the end of the stream.
 ///
 /// A size prefix that does not fit in a `u64` is larger than
@@ -2042,5 +2055,12 @@ mod tests {
         assert!(matches!(err, SendError::ReceiverClosed { .. }), "{err:?}");
         let err = SendError::from(noq::WriteError::Stopped(401u32.into()));
         assert_eq!(err.remote_code(), Some(ErrorCode::Other(401u32.into())));
+    }
+
+    #[test]
+    fn send_error_detects_zero_rtt_rejection() {
+        assert!(SendError::from(noq::WriteError::ZeroRttRejected).is_zero_rtt_rejected());
+        assert!(!SendError::from(noq::WriteError::ClosedStream).is_zero_rtt_rejected());
+        assert!(!SendError::from(noq::WriteError::Stopped(16u32.into())).is_zero_rtt_rejected());
     }
 }
