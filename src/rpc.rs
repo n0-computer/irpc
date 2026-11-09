@@ -232,8 +232,8 @@ pub enum ErrorCode {
     /// A code that this version of irpc does not know.
     ///
     /// This is a code of the application, see [Error codes], or a code that a
-    /// newer version of irpc added. It is never 0, and never the code of one of
-    /// the variants above.
+    /// newer version of irpc added. [`Self::from_code`] returns this only for a
+    /// code that is not 0 and not the code of one of the variants above.
     ///
     /// [Error codes]: self#error-codes
     #[display("code {_0}")]
@@ -405,6 +405,14 @@ pub enum ReadRequestError {
 }
 
 impl ReadRequestError {
+    /// Returns the code that the peer closed the connection with, if any.
+    pub fn remote_code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::ConnectionClosed { close, .. } => close.code(),
+            _ => None,
+        }
+    }
+
     /// Returns the irpc error code for a bad request, or `None` for a connection error.
     fn error_code(&self) -> Option<ErrorCode> {
         match self {

@@ -411,6 +411,7 @@ async fn close_with_code_returns_connection_closed() -> TestResult<()> {
     let err = read_request::<server::EchoProtocol>(&server_conn)
         .await
         .expect_err("the client closed the connection with a code");
+    assert_eq!(err.remote_code(), Some(ErrorCode::Other(401u32.into())));
     let ReadRequestError::ConnectionClosed { close, .. } = err else {
         panic!("expected ConnectionClosed, got {err:?}");
     };

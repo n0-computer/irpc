@@ -1012,11 +1012,7 @@ impl Error {
     /// the connection with, see [`rpc::ErrorCode`].
     pub fn remote_code(&self) -> Option<rpc::ErrorCode> {
         match self {
-            Self::Request {
-                source: RequestError::ConnectionClosed { close, .. },
-                ..
-            } => close.code(),
-            Self::Request { .. } => None,
+            Self::Request { source, .. } => source.remote_code(),
             Self::Send { source, .. } => source.remote_code(),
             Self::MpscRecv { source, .. } => source.remote_code(),
             Self::OneshotRecv { source, .. } => source.remote_code(),
@@ -1034,6 +1030,17 @@ impl From<Error> for io::Error {
             Error::Send { source, .. } => source.into(),
             Error::MpscRecv { source, .. } => source.into(),
             Error::OneshotRecv { source, .. } => source.into(),
+        }
+    }
+}
+
+#[cfg(feature = "rpc")]
+impl RequestError {
+    /// Returns the code that the peer closed the connection with, if any.
+    pub fn remote_code(&self) -> Option<rpc::ErrorCode> {
+        match self {
+            Self::ConnectionClosed { close, .. } => close.code(),
+            _ => None,
         }
     }
 }
