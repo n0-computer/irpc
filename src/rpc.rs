@@ -478,8 +478,7 @@ pub enum RpcSendError {
     Closed,
     /// The connection or the transport failed, for example because the connection was lost.
     ///
-    /// This includes a rejected 0-RTT attempt. A custom transport reports its
-    /// own failures as this.
+    /// A custom transport reports its own failures as this.
     #[error("Connection failed")]
     ConnectionFailed {
         #[error(std_err)]
@@ -554,8 +553,7 @@ pub enum RpcRecvError {
     ConnectionClosed { close: ConnectionClose },
     /// The connection or the transport failed, for example because the connection was lost.
     ///
-    /// This includes a rejected 0-RTT attempt. A custom transport reports its
-    /// own failures as this.
+    /// A custom transport reports its own failures as this.
     #[error("Connection failed")]
     ConnectionFailed {
         #[error(std_err)]
