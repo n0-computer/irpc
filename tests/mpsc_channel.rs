@@ -2,7 +2,6 @@
 
 use std::{io, time::Duration};
 
-use irpc::noq::{configure_client, make_server_endpoint};
 use irpc::{
     Client, RpcMessage, WithChannels,
     channel::{
@@ -10,7 +9,7 @@ use irpc::{
         mpsc::{self, Receiver, RecvError},
         oneshot,
     },
-    noq::{configure_server, make_client_endpoint},
+    noq::{configure_client, configure_server, make_client_endpoint, make_server_endpoint},
     rpc::{ErrorCode, Handler, MAX_MESSAGE_SIZE, RpcRecvError, RpcSendError},
     rpc_requests,
     util::{AsyncWriteVarintExt, WriteVarintExt},

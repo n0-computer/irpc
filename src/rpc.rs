@@ -170,7 +170,10 @@ pub const MAX_MESSAGE_SIZE: u64 = 1024 * 1024 * 16;
 ///     ErrorCode::from_code(VarInt::from_u32(4)),
 ///     Some(ErrorCode::RequestDecodeFailed)
 /// );
-/// assert_eq!(ErrorCode::RequestDecodeFailed.to_code(), VarInt::from_u32(4));
+/// assert_eq!(
+///     ErrorCode::RequestDecodeFailed.to_code(),
+///     VarInt::from_u32(4)
+/// );
 /// let code = VarInt::from_u32(401);
 /// assert_eq!(ErrorCode::from_code(code), Some(ErrorCode::Other(code)));
 /// assert_eq!(ErrorCode::from_code(VarInt::from_u32(0)), None);
@@ -1478,7 +1481,10 @@ impl HandlerError {
     /// let handler = Handler::<AuthProtocol>::sequential(|msg| async move {
     ///     let AuthMessage::Auth(msg) = msg;
     ///     if msg.inner.0 != "secret" {
-    ///         Err(HandlerError::close_connection(VarInt::from_u32(401), "permission denied"))
+    ///         Err(HandlerError::close_connection(
+    ///             VarInt::from_u32(401),
+    ///             "permission denied",
+    ///         ))
     ///     } else {
     ///         msg.tx.send(()).await.ok();
     ///         Ok(())

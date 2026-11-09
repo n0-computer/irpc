@@ -17,7 +17,7 @@ pub mod oneshot;
 ///
 /// For a local channel, the only error is [`ReceiverClosed`]. A remote channel
 /// can also fail for reasons that a local channel does not have, see
-/// [`RpcSendError`](crate::rpc::RpcSendError).
+/// [`RpcSendError`].
 ///
 /// For a remote channel, the receiver is on the other side of the connection:
 /// the server for a request and its updates, and the client for a response.
