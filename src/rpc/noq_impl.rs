@@ -1,5 +1,5 @@
 //! RPC over [`noq`] connections, with dial by socket address.
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
 use noq::{ConnectionError, PathId, RecvStream, SendStream, VarInt};
@@ -7,7 +7,7 @@ use tracing::{Instrument, debug, debug_span, warn};
 
 use crate::{
     RequestError, Service,
-    rpc::{Handler, IncomingRemoteConnection, RemoteConnection},
+    rpc::{ConnectionHandle, Handler, IncomingRemoteConnection, RemoteConnection},
 };
 
 /// A connection to a remote service.
@@ -22,6 +22,17 @@ struct NoqLazyRemoteConnectionInner {
     pub endpoint: noq::Endpoint,
     pub addr: std::net::SocketAddr,
     pub connection: tokio::sync::Mutex<Option<noq::Connection>>,
+    /// A copy of the connection, for [`RemoteConnection::connection`].
+    ///
+    /// `open_bi` holds the lock of `connection` while it opens a stream, so a
+    /// copy is needed to read the connection without waiting for that.
+    pub current: Mutex<Option<noq::Connection>>,
+}
+
+impl NoqLazyRemoteConnectionInner {
+    fn set_current(&self, conn: Option<noq::Connection>) {
+        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = conn;
+    }
 }
 
 impl RemoteConnection for noq::Connection {
@@ -42,6 +53,10 @@ impl RemoteConnection for noq::Connection {
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
         Box::pin(async { false })
     }
+
+    fn connection(&self) -> Option<ConnectionHandle> {
+        Some(ConnectionHandle::Noq(self.clone()))
+    }
 }
 
 impl NoqLazyRemoteConnection {
@@ -50,6 +65,7 @@ impl NoqLazyRemoteConnection {
             endpoint,
             addr,
             connection: Default::default(),
+            current: Default::default(),
         }))
     }
 }
@@ -73,11 +89,12 @@ impl RemoteConnection for NoqLazyRemoteConnection {
                         Err(_) => {
                             // try with a new connection, just once
                             *guard = None;
-                            connect_and_open_bi(&this.endpoint, &this.addr, guard).await?
+                            this.set_current(None);
+                            connect_and_open_bi(&this, guard).await?
                         }
                     }
                 }
-                None => connect_and_open_bi(&this.endpoint, &this.addr, guard).await?,
+                None => connect_and_open_bi(&this, guard).await?,
             };
             Ok(pair)
         })
@@ -86,15 +103,24 @@ impl RemoteConnection for NoqLazyRemoteConnection {
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
         Box::pin(async { false })
     }
+
+    fn connection(&self) -> Option<ConnectionHandle> {
+        let current = self
+            .0
+            .current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        current.clone().map(ConnectionHandle::Noq)
+    }
 }
 
 async fn connect_and_open_bi(
-    endpoint: &noq::Endpoint,
-    addr: &std::net::SocketAddr,
+    this: &NoqLazyRemoteConnectionInner,
     mut guard: tokio::sync::MutexGuard<'_, Option<noq::Connection>>,
 ) -> Result<(noq::SendStream, noq::RecvStream), RequestError> {
-    let conn = endpoint.connect(*addr, "localhost")?.await?;
+    let conn = this.endpoint.connect(this.addr, "localhost")?.await?;
     let (send, recv) = conn.open_bi().await?;
+    this.set_current(Some(conn.clone()));
     *guard = Some(conn);
     Ok((send, recv))
 }

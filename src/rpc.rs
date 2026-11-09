@@ -440,6 +440,31 @@ pub trait RemoteConnection: Send + Sync + Debug + 'static {
     ///
     /// For connections that were fully authenticated before allowing to send any data, this should return `false`.
     fn zero_rtt_rejected(&self) -> BoxFuture<bool>;
+
+    /// Returns the established noq or iroh connection.
+    ///
+    /// Returns `None` while the connection is not established. A connection
+    /// that connects on the first request returns the connection it currently
+    /// uses. That connection may have closed since: the next request replaces
+    /// it. The default returns `None`.
+    fn connection(&self) -> Option<ConnectionHandle> {
+        None
+    }
+}
+
+/// The established connection under a [`RemoteConnection`].
+///
+/// Use it to read details of the connection, for example its round trip time
+/// or its paths. See [`RemoteConnection::connection`] and
+/// [`Client::connection`](crate::Client::connection).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ConnectionHandle {
+    /// A noq connection.
+    Noq(noq::Connection),
+    /// An iroh connection.
+    #[cfg(feature = "iroh")]
+    Iroh(iroh::endpoint::Connection),
 }
 
 /// A connection to a remote service that can be used to send the initial message.

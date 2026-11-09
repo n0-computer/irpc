@@ -1,5 +1,8 @@
 //! RPC over [`iroh`] connections, with dial by endpoint id.
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use iroh::{
     endpoint::{
@@ -17,7 +20,10 @@ use tracing::{Instrument, debug, debug_span, warn};
 
 use crate::{
     RequestError, Service,
-    rpc::{Handler, IncomingRemoteConnection, ReadRequestError, RemoteConnection},
+    rpc::{
+        ConnectionHandle, Handler, IncomingRemoteConnection, ReadRequestError, RemoteConnection,
+    },
+    util::now_or_never,
 };
 
 impl RemoteConnection for Connection {
@@ -35,6 +41,10 @@ impl RemoteConnection for Connection {
 
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
         Box::pin(async { false })
+    }
+
+    fn connection(&self) -> Option<ConnectionHandle> {
+        Some(ConnectionHandle::Iroh(self.clone()))
     }
 }
 
@@ -61,6 +71,16 @@ impl RemoteConnection for OutgoingZeroRttConnection {
             }
         })
     }
+
+    /// Returns the connection once the handshake has completed.
+    fn connection(&self) -> Option<ConnectionHandle> {
+        match now_or_never(self.handshake_completed())? {
+            Ok(ZeroRttStatus::Accepted(conn) | ZeroRttStatus::Rejected(conn)) => {
+                Some(ConnectionHandle::Iroh(conn))
+            }
+            Err(_) => None,
+        }
+    }
 }
 
 /// A connection to a remote service.
@@ -75,7 +95,18 @@ struct IrohRemoteConnectionInner {
     endpoint: iroh::Endpoint,
     addr: iroh::EndpointAddr,
     connection: tokio::sync::Mutex<Option<Connection>>,
+    /// A copy of the connection, for [`RemoteConnection::connection`].
+    ///
+    /// `open_bi` holds the lock of `connection` while it opens a stream, so a
+    /// copy is needed to read the connection without waiting for that.
+    current: Mutex<Option<Connection>>,
     alpn: Vec<u8>,
+}
+
+impl IrohRemoteConnectionInner {
+    fn set_current(&self, conn: Option<Connection>) {
+        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = conn;
+    }
 }
 
 impl IrohLazyRemoteConnection {
@@ -84,6 +115,7 @@ impl IrohLazyRemoteConnection {
             endpoint,
             addr,
             connection: Default::default(),
+            current: Default::default(),
             alpn,
         }))
     }
@@ -106,12 +138,12 @@ impl RemoteConnection for IrohLazyRemoteConnection {
                         Err(_) => {
                             // try with a new connection, just once
                             *guard = None;
-                            connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
-                                .await?
+                            this.set_current(None);
+                            connect_and_open_bi(&this, guard).await?
                         }
                     }
                 }
-                None => connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard).await?,
+                None => connect_and_open_bi(&this, guard).await?,
             };
             Ok(pair)
         })
@@ -120,19 +152,28 @@ impl RemoteConnection for IrohLazyRemoteConnection {
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
         Box::pin(async { false })
     }
+
+    fn connection(&self) -> Option<ConnectionHandle> {
+        let current = self
+            .0
+            .current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        current.clone().map(ConnectionHandle::Iroh)
+    }
 }
 
 async fn connect_and_open_bi(
-    endpoint: &iroh::Endpoint,
-    addr: &iroh::EndpointAddr,
-    alpn: &[u8],
+    this: &IrohRemoteConnectionInner,
     mut guard: tokio::sync::MutexGuard<'_, Option<Connection>>,
 ) -> Result<(SendStream, RecvStream), RequestError> {
-    let conn = endpoint
-        .connect(addr.clone(), alpn)
+    let conn = this
+        .endpoint
+        .connect(this.addr.clone(), &this.alpn)
         .await
         .map_err(|err| e!(RequestError::Other, err.into()))?;
     let (send, recv) = conn.open_bi().await?;
+    this.set_current(Some(conn.clone()));
     *guard = Some(conn);
     Ok((send, recv))
 }
