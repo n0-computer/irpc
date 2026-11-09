@@ -321,8 +321,6 @@ use std::{fmt::Debug, future::Future, io, marker::PhantomData, ops::Deref};
 /// [`Channels<S>`]: Channels
 #[cfg(feature = "derive")]
 pub use irpc_derive::rpc_requests;
-#[cfg(feature = "rpc")]
-use n0_error::AnyError;
 use n0_error::stack_error;
 use serde::{Serialize, de::DeserializeOwned};
 #[cfg(feature = "rpc")]
@@ -973,21 +971,22 @@ pub enum RequestError {
         #[error(std_err)]
         source: ::noq::ConnectError,
     },
+    #[cfg(feature = "iroh")]
+    #[error("Error establishing connection")]
+    IrohConnect {
+        source: ::iroh::endpoint::ConnectError,
+    },
     /// The connection was closed on purpose, by the peer or by this side.
     #[cfg(feature = "rpc")]
     #[error("Connection {close}")]
     ConnectionClosed { close: rpc::ConnectionClose },
-    /// The connection failed, when opening a stream pair.
+    /// The connection failed during the handshake or while opening a stream pair.
     #[cfg(feature = "rpc")]
     #[error("Connection failed")]
     ConnectionFailed {
         #[error(std_err)]
         source: ::noq::ConnectionError,
     },
-    /// Generic error for non-noq transports
-    #[cfg(feature = "rpc")]
-    #[error("Error opening stream")]
-    Other { source: AnyError },
 }
 
 /// Error type that subsumes all possible errors in this crate, for convenience.
@@ -1057,8 +1056,8 @@ impl From<RequestError> for io::Error {
             }
             #[cfg(feature = "rpc")]
             RequestError::ConnectionFailed { source, .. } => source.into(),
-            #[cfg(feature = "rpc")]
-            RequestError::Other { source, .. } => io::Error::other(source),
+            #[cfg(feature = "iroh")]
+            RequestError::IrohConnect { source, .. } => io::Error::other(source),
         }
     }
 }
@@ -1067,6 +1066,13 @@ impl From<RequestError> for io::Error {
 impl From<::noq::ConnectError> for RequestError {
     fn from(source: ::noq::ConnectError) -> Self {
         n0_error::e!(RequestError::Connect, source)
+    }
+}
+
+#[cfg(feature = "iroh")]
+impl From<::iroh::endpoint::ConnectError> for RequestError {
+    fn from(source: ::iroh::endpoint::ConnectError) -> Self {
+        n0_error::e!(RequestError::IrohConnect, source)
     }
 }
 
