@@ -73,7 +73,7 @@ mod storage {
     use anyhow::{Context, Result};
     use iroh::{Endpoint, protocol::ProtocolHandler};
     // Import the macro
-    use irpc::iroh::IrohProtocol;
+    use irpc::iroh::{IrohLazyRemoteConnection, IrohProtocol};
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
@@ -170,8 +170,9 @@ mod storage {
             endpoint: Endpoint,
             addr: impl Into<iroh::EndpointAddr>,
         ) -> Result<StorageApi> {
+            let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), Self::ALPN.to_vec());
             Ok(StorageApi {
-                client: Client::iroh(endpoint, addr, Self::ALPN),
+                client: Client::boxed(conn),
                 _actor_task: None,
             })
         }

@@ -218,14 +218,11 @@ impl Connection {
     }
 
     fn close(&self) {
+        let (code, reason) = (0u32.into(), b"initialization did not finish");
         match self {
-            Self::Noq(connection) => {
-                connection.close(0u32.into(), b"initialization did not finish")
-            }
+            Self::Noq(connection) => connection.close(code, reason),
             #[cfg(feature = "iroh")]
-            Self::Iroh(connection) => {
-                connection.close(0u32.into(), b"initialization did not finish")
-            }
+            Self::Iroh(connection) => connection.close(code, reason),
         }
     }
 

@@ -58,13 +58,13 @@ mod storage {
         endpoint::Connection,
         protocol::{AcceptError, ProtocolHandler},
     };
-    // Import the macro
-    use irpc::rpc::read_request;
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
         rpc_requests,
     };
+    // Import the macro
+    use irpc::{iroh::IrohLazyRemoteConnection, rpc::read_request};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
@@ -177,8 +177,9 @@ mod storage {
         ///
         /// This will create a client that automatically reconnects if the connection closes.
         pub fn connect(endpoint: Endpoint, addr: impl Into<iroh::EndpointAddr>) -> StorageClient {
+            let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), ALPN.to_vec());
             StorageClient {
-                inner: Client::iroh(endpoint, addr, ALPN),
+                inner: Client::boxed(conn),
             }
         }
 

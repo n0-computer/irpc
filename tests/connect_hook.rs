@@ -173,12 +173,10 @@ impl Server {
     }
 }
 
-async fn authenticate(client: Client<AuthProtocol>, token: String) -> io::Result<()> {
-    if client.rpc(Auth(token)).await.map_err(io::Error::from)? {
-        Ok(())
-    } else {
-        Err(io::Error::other("invalid token"))
-    }
+/// Returns `anyhow::Error`, to check that the hook accepts it.
+async fn authenticate(client: Client<AuthProtocol>, token: String) -> anyhow::Result<()> {
+    anyhow::ensure!(client.rpc(Auth(token)).await?, "invalid token");
+    Ok(())
 }
 
 async fn bounded<T>(fut: impl Future<Output = TestResult<T>>) -> TestResult<T> {
@@ -273,16 +271,14 @@ async fn failed_initializer_closes_candidate_and_allows_another_attempt() -> Tes
             .build();
 
         let err = client.rpc(Ping).await.expect_err("auth is rejected");
-        assert!(
-            matches!(
-                err,
-                irpc::Error::Request {
-                    source: RequestError::Initialization { .. },
-                    ..
-                }
-            ),
-            "{err:?}"
-        );
+        let irpc::Error::Request {
+            source: RequestError::Initialization { source, .. },
+            ..
+        } = &err
+        else {
+            panic!("unexpected error: {err:?}");
+        };
+        assert!(source.to_string().contains("invalid token"), "{err:?}");
         let connection = server.connections.recv().await.unwrap();
         connection.closed().await;
         assert_eq!(server.events.recv().await, Some(Event::Auth));
@@ -292,31 +288,6 @@ async fn failed_initializer_closes_candidate_and_allows_another_attempt() -> Tes
         assert_eq!(client.rpc(Ping).await?, 1);
         assert_eq!(server.events.recv().await, Some(Event::Auth));
         assert_eq!(server.events.recv().await, Some(Event::Ping));
-        Ok(())
-    })
-    .await
-}
-
-/// Checks that an initializer can return `anyhow::Error`, and that its message is kept.
-#[tokio::test]
-#[traced_test]
-async fn initializer_can_return_anyhow_errors() -> TestResult<()> {
-    bounded(async {
-        let mut server = Server::noq()?;
-        let client = server
-            .builder()
-            .on_connect(|client| async move {
-                let accepted = client.rpc(Auth("wrong".into())).await?;
-                anyhow::ensure!(accepted, "token was rejected");
-                Ok(())
-            })
-            .build();
-
-        let err = client.connect().await.expect_err("auth is rejected");
-        let RequestError::Initialization { source, .. } = &err else {
-            panic!("unexpected error: {err:?}");
-        };
-        assert!(source.to_string().contains("token was rejected"), "{err:?}");
         Ok(())
     })
     .await

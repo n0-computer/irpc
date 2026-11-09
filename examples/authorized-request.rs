@@ -126,6 +126,7 @@ mod kv {
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
+        iroh::IrohLazyRemoteConnection,
         rpc::read_request,
         rpc_requests,
     };
@@ -468,7 +469,9 @@ mod kv {
             addr: impl Into<EndpointAddr>,
             delegation: Delegation,
         ) -> Result<Self, Error> {
-            let inner = Client::iroh(endpoint, addr, KvServer::ALPN);
+            let conn =
+                IrohLazyRemoteConnection::new(endpoint, addr.into(), KvServer::ALPN.to_vec());
+            let inner = Client::boxed(conn);
             let cap = inner.rpc(Authenticate(delegation)).await??;
             Ok(Self { inner, cap })
         }

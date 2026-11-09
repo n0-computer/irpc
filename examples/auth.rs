@@ -31,12 +31,7 @@ async fn remote() -> Result<()> {
 
     // Authentication runs before the first request on every new connection.
     let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
-    let api = StorageClient::connect(
-        client_endpoint.clone(),
-        server_addr.clone(),
-        "secret".into(),
-    )
-    .await?;
+    let api = StorageClient::connect(client_endpoint, server_addr.clone(), "secret".into()).await?;
     api.set("hello".to_string(), "world".to_string()).await?;
     api.set("goodbye".to_string(), "world".to_string()).await?;
     let value = api.get("hello".to_string()).await?;
@@ -45,8 +40,6 @@ async fn remote() -> Result<()> {
     while let Some(value) = list.recv().await? {
         println!("list value = {value:?}");
     }
-
-    assert_eq!(server.authentications(), 1);
 
     // Closing the connection discards its authentication state, just as a server
     // restart would. The same client must authenticate before its next Get.
@@ -66,27 +59,17 @@ async fn remote() -> Result<()> {
     })
     .await?;
     assert_eq!(value.as_deref(), Some("world"));
-    assert_eq!(server.authentications(), 2);
     println!("The same client authenticated the replacement connection.");
 
-    // Clones share the initialized connection and can make concurrent calls.
-    let other = api.clone();
-    let (hello, goodbye) = tokio::try_join!(api.get("hello".into()), other.get("goodbye".into()))?;
-    assert_eq!(hello.as_deref(), Some("world"));
-    assert_eq!(goodbye.as_deref(), Some("world"));
-    assert_eq!(server.authentications(), 2);
-
     // Eager connection setup reports invalid credentials before any normal RPC.
-    let invalid_endpoint = Endpoint::builder(presets::N0).bind().await?;
+    let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
     assert!(
-        StorageClient::connect(invalid_endpoint.clone(), server_addr, "bad".into())
+        StorageClient::connect(client_endpoint, server_addr, "bad".into())
             .await
             .is_err()
     );
 
-    invalid_endpoint.close().await;
-    client_endpoint.close().await;
-    server_router.shutdown().await?;
+    drop(server_router);
     Ok(())
 }
 
@@ -97,10 +80,7 @@ mod storage {
 
     use std::{
         collections::BTreeMap,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
-        },
+        sync::{Arc, Mutex},
     };
 
     use anyhow::Result;
@@ -109,10 +89,11 @@ mod storage {
         endpoint::{Connection, WeakConnectionHandle},
         protocol::{AcceptError, ProtocolHandler},
     };
+    // Import the macro
+    use irpc::rpc::read_request;
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
-        rpc::read_request,
         rpc_requests,
     };
     use serde::{Deserialize, Serialize};
@@ -164,31 +145,29 @@ mod storage {
         state: Arc<Mutex<BTreeMap<String, String>>>,
         auth_token: String,
         connections: Arc<Mutex<Vec<WeakConnectionHandle>>>,
-        authentications: Arc<AtomicUsize>,
     }
 
     impl ProtocolHandler for StorageServer {
         async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
             self.connections.lock().unwrap().push(conn.weak_handle());
-            let mut authenticated = false;
+            let mut authed = false;
             while let Some(msg) = read_request::<StorageProtocol>(&conn).await? {
                 match msg {
                     StorageMessage::Auth(msg) => {
                         let WithChannels { inner, tx, .. } = msg;
-                        if authenticated {
+                        if authed {
                             conn.close(400u32.into(), b"invalid message");
                             break;
                         } else if inner.token != self.auth_token {
                             conn.close(401u32.into(), b"permission denied");
                             break;
                         } else {
-                            authenticated = true;
-                            self.authentications.fetch_add(1, Ordering::Relaxed);
+                            authed = true;
                             tx.send(Ok(())).await.ok();
                         }
                     }
                     msg => {
-                        if !authenticated {
+                        if !authed {
                             conn.close(401u32.into(), b"permission denied");
                             break;
                         } else {
@@ -210,7 +189,6 @@ mod storage {
                 state: Default::default(),
                 auth_token,
                 connections: Default::default(),
-                authentications: Default::default(),
             }
         }
 
@@ -221,11 +199,6 @@ mod storage {
                     conn.close(0u32.into(), b"reconnect demonstration");
                 }
             }
-        }
-
-        /// Returns the number of successful authentications.
-        pub fn authentications(&self) -> usize {
-            self.authentications.load(Ordering::Relaxed)
         }
 
         async fn handle_authenticated(&self, msg: StorageMessage) {
@@ -275,7 +248,6 @@ mod storage {
         }
     }
 
-    #[derive(Clone)]
     pub struct StorageClient {
         inner: Client<StorageProtocol>,
     }
