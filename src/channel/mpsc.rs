@@ -31,8 +31,8 @@ use crate::rpc::{ErrorCode, RpcRecvError};
 pub enum RecvError {
     /// The remote channel failed for a reason that a local channel does not have.
     ///
-    /// Unlike a local channel, this includes a reset with code 0: it can drop
-    /// messages that this receiver did not read yet.
+    /// A reset with code 0 is also this error, not `Ok(None)` as for a dropped
+    /// sender: the reset can drop messages that this receiver did not read yet.
     #[cfg(feature = "rpc")]
     #[error("Remote channel failed")]
     Rpc { source: RpcRecvError },
