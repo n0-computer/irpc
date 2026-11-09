@@ -2,6 +2,65 @@
 
 All notable changes to irpc will be documented in this file.
 
+## [1.0.0](https://github.com/n0-computer/irpc/compare/v0.17.0..1.0.0) - 2026-11-09
+
+### ⛰️  Features
+
+- [**breaking**] Use portable atomic so we can run on esp32 ([#107](https://github.com/n0-computer/irpc/issues/107)) - ([86e58a6](https://github.com/n0-computer/irpc/commit/86e58a69db1d3f783566e4cecb181e4715c1b957))
+- [**breaking**] `Handler` becomes a struct ([#123](https://github.com/n0-computer/irpc/issues/123)) - ([ee744b7](https://github.com/n0-computer/irpc/commit/ee744b77e08bb78277d61615d8794fa9772a071d))
+- [**breaking**] Improve error handling ([#130](https://github.com/n0-computer/irpc/issues/130)) - ([3c360f2](https://github.com/n0-computer/irpc/commit/3c360f2f849596a479f3f6554034bf8fa5e4cad0))
+- [**breaking**] Define error codes in an enum and expose them in new variants ([#138](https://github.com/n0-computer/irpc/issues/138)) - ([b08b40b](https://github.com/n0-computer/irpc/commit/b08b40b5132b013a0c56f29a4b6739d54dc4dbd8))
+- Add new syntax candy fn to send a stream of updates to the server... ([#64](https://github.com/n0-computer/irpc/issues/64)) - ([3b52798](https://github.com/n0-computer/irpc/commit/3b52798acf5e969c9f32ea689c92e884006da9c2))
+- [**breaking**] Poll an mpsc receiver, and read it as a Stream ([#149](https://github.com/n0-computer/irpc/issues/149)) - ([51e8ac0](https://github.com/n0-computer/irpc/commit/51e8ac04381ed5089ca4ed713c8cd40426123f02))
+- [**breaking**] Make oneshot is_rpc right for mapped senders, and define is_rpc by possible failures ([#159](https://github.com/n0-computer/irpc/issues/159)) - ([10a4503](https://github.com/n0-computer/irpc/commit/10a450379c630957f28500eef3ff3dfb2b6403ae))
+- [**breaking**] A cancelled remote mpsc send is not delivered, like a local one ([#167](https://github.com/n0-computer/irpc/issues/167)) - ([f6269d6](https://github.com/n0-computer/irpc/commit/f6269d6366bd13dcc68ea92f9ae1ed6329bd2e59))
+- [**breaking**] Treat a cancelled send like a dropped sender ([#169](https://github.com/n0-computer/irpc/issues/169)) - ([6930072](https://github.com/n0-computer/irpc/commit/6930072b7a3d81c22f5b6629526d5fab7a9d2014))
+- [**breaking**] Irpc error reorg ([#164](https://github.com/n0-computer/irpc/issues/164)) - ([b792c2b](https://github.com/n0-computer/irpc/commit/b792c2b40fccddbb0bee4a54427184493d07d57a))
+
+### 🐛 Bug Fixes
+
+- *(irpc-derive)* [**breaking**] Use hidden reexports for crates used in the macro ([#121](https://github.com/n0-computer/irpc/issues/121)) - ([deb8adc](https://github.com/n0-computer/irpc/commit/deb8adcd568847620359cca2eae03d83c951b822))
+- Do not block sends while a remote mpsc sender waits for closed ([#140](https://github.com/n0-computer/irpc/issues/140)) - ([37ce2e2](https://github.com/n0-computer/irpc/commit/37ce2e24d0c8aee200fed80c8db79f48f92b5550))
+- Reject varints larger than u64 in read_varint_u64 ([#144](https://github.com/n0-computer/irpc/issues/144)) - ([ad815c5](https://github.com/n0-computer/irpc/commit/ad815c58602d2b81291853c78419d99cb87bf295))
+- Reset the stream when a oneshot sender future is cancelled ([#143](https://github.com/n0-computer/irpc/issues/143)) - ([4630a53](https://github.com/n0-computer/irpc/commit/4630a53bdc539839196434357c41a58c9287dd42))
+- [**breaking**] Preserve protocol attributes and visibility in rpc_requests ([#158](https://github.com/n0-computer/irpc/issues/158)) - ([c6a2eb8](https://github.com/n0-computer/irpc/commit/c6a2eb88a940553902f7b88b8e796c564fe9598c))
+- Write a request again when 0-RTT is rejected during its write ([#170](https://github.com/n0-computer/irpc/issues/170)) - ([1711def](https://github.com/n0-computer/irpc/commit/1711def20adc1ef8d00a35fe1d27478ead3e95e0))
+- Keep notification updates in their request span ([#174](https://github.com/n0-computer/irpc/issues/174)) - ([a0fc384](https://github.com/n0-computer/irpc/commit/a0fc3845d734935317436c4c8f1a5ff22e6aa507))
+- Don't read after error ([#176](https://github.com/n0-computer/irpc/issues/176)) - ([867335f](https://github.com/n0-computer/irpc/commit/867335f0e0c3c440b48d7bbefd05c303aa98569e))
+
+### 🚜 Refactor
+
+- Split modules into files ([#104](https://github.com/n0-computer/irpc/issues/104)) - ([2d33601](https://github.com/n0-computer/irpc/commit/2d33601f128207f5002cb1b6d1a22a92e09cde29))
+- Simplify docsrs cfg ([#105](https://github.com/n0-computer/irpc/issues/105)) - ([b6f8c46](https://github.com/n0-computer/irpc/commit/b6f8c46676a37e4d36915ad1a7dfa550f53635a9))
+- [**breaking**] Move irpc-iroh into irpc ([#122](https://github.com/n0-computer/irpc/issues/122)) - ([cfb3991](https://github.com/n0-computer/irpc/commit/cfb39918592f73b827143e850c5d3a5302e2b83a))
+- [**breaking**] IncomingRemoteConnection cleanups ([#128](https://github.com/n0-computer/irpc/issues/128)) - ([891d2dc](https://github.com/n0-computer/irpc/commit/891d2dc9afb84bf799f75a9f509899142e11315a))
+- [**breaking**] Remove deprecated functions ([#136](https://github.com/n0-computer/irpc/issues/136)) - ([e2e5b00](https://github.com/n0-computer/irpc/commit/e2e5b006275f8563384dfaf374076408464c4af2))
+- [**breaking**] Move the opentelemetry integration into irpc-opentelemetry ([#129](https://github.com/n0-computer/irpc/issues/129)) - ([e8c0dc5](https://github.com/n0-computer/irpc/commit/e8c0dc5fc927296469ccbcb16593d283be8adda8))
+- [**breaking**] Make WithChannels non-exhaustive ([#139](https://github.com/n0-computer/irpc/issues/139)) - ([dfb08a0](https://github.com/n0-computer/irpc/commit/dfb08a0f7a3a36a2ab26dee48cb78b6564140674))
+- [**breaking**] Let irpc create request spans on client and server ([#142](https://github.com/n0-computer/irpc/issues/142)) - ([93b6c42](https://github.com/n0-computer/irpc/commit/93b6c421d79826a1919c6ac6d2c21dc22a3dd51d))
+- Read remote mpsc messages through a buffer and a sync parser ([#150](https://github.com/n0-computer/irpc/issues/150)) - ([7e98535](https://github.com/n0-computer/irpc/commit/7e985354ca1452a7685ceb10d61fd4fd5c824600))
+- [**breaking**] Hide channel internals ([#172](https://github.com/n0-computer/irpc/issues/172)) - ([153f6b7](https://github.com/n0-computer/irpc/commit/153f6b71b7109709f9eaa91ca827f8194f2f05d1))
+
+### 📚 Documentation
+
+- *(irpc-iroh)* Add example for bidi RPC on a single connection ([#108](https://github.com/n0-computer/irpc/issues/108)) - ([179111a](https://github.com/n0-computer/irpc/commit/179111aa09317301f585f360affff0dde6c9adc1))
+- *(irpc-iroh)* Add authorized-request example ([#109](https://github.com/n0-computer/irpc/issues/109)) - ([d26d83c](https://github.com/n0-computer/irpc/commit/d26d83c243a656ed87440f9c9261188e6b14b6ba))
+
+### 🧪 Testing
+
+- Find the server span by its parent in span_propagation_concurrent ([#154](https://github.com/n0-computer/irpc/issues/154)) - ([c991ea4](https://github.com/n0-computer/irpc/commit/c991ea447a935c287de4d6750a2d2bde8ab6f3b6))
+- Run the tests with traced_test ([#141](https://github.com/n0-computer/irpc/issues/141)) - ([f1100ae](https://github.com/n0-computer/irpc/commit/f1100ae47bac33e27b7e42e07d6e53f2bbbdc57d))
+
+### ⚙️ Miscellaneous Tasks
+
+- *(secruity)* Hardening + lock files + dependabot cooldown ([#113](https://github.com/n0-computer/irpc/issues/113)) - ([e4863e3](https://github.com/n0-computer/irpc/commit/e4863e3e50401f3b100f3f142f68b92b20a81e2f))
+- Add semver check ([#106](https://github.com/n0-computer/irpc/issues/106)) - ([f5e9fd5](https://github.com/n0-computer/irpc/commit/f5e9fd5c8bb5a55f727e83268693ed75d6dd52f4))
+- [**breaking**] Bump all deps ([#110](https://github.com/n0-computer/irpc/issues/110)) - ([5fbf9e6](https://github.com/n0-computer/irpc/commit/5fbf9e60edb18ef1e9eb12ad4b887592fa792224))
+- Add check-external-types to makefile and CI ([#112](https://github.com/n0-computer/irpc/issues/112)) - ([d9470f2](https://github.com/n0-computer/irpc/commit/d9470f24fd94c29b713df658f0722e4e26d03ecf))
+- Bump opentelemetry crates ([#152](https://github.com/n0-computer/irpc/issues/152)) - ([624ab03](https://github.com/n0-computer/irpc/commit/624ab03bcd7011fa4be800f4f97e637d18f932e3))
+- Run the doctests ([#171](https://github.com/n0-computer/irpc/issues/171)) - ([676a0d6](https://github.com/n0-computer/irpc/commit/676a0d66734d0c034a28ef31ae0d58b9441fbd27))
+- Update n0-error to 1.0.3 ([#177](https://github.com/n0-computer/irpc/issues/177)) - ([f5f9f3c](https://github.com/n0-computer/irpc/commit/f5f9f3c2114a831be8f327c52abdd7b06bd94de0))
+
 ## [0.17.0](https://github.com/n0-computer/irpc/compare/v0.16.0..0.17.0) - 2026-06-15
 
 ### ⛰️  Features

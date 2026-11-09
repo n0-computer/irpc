@@ -1,6 +1,6 @@
 [package]
 name = "irpc"
-version = "0.17.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>", "n0 team"]
 keywords = ["api", "protocol", "network", "rpc"]
@@ -43,7 +43,7 @@ futures-buffered ={ version = "0.2.9", optional = true }
 n0-future = { workspace = true }
 futures-util = { workspace = true, optional = true }
 # for the derive reexport/feature
-irpc-derive = { version = "0.17.0", path = "./irpc-derive", optional = true }
+irpc-derive = { version = "1.0.0", path = "./irpc-derive", optional = true }
 # used for the iroh transport
 iroh = { workspace = true, optional = true }
 portable-atomic = { version = "1", optional = true }

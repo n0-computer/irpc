@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "irpc"
-version = "0.17.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1563,7 +1563,7 @@ dependencies = [
 
 [[package]]
 name = "irpc-derive"
-version = "0.17.0"
+version = "1.0.0"
 dependencies = [
  "proc-macro2",
  "quote",
