@@ -636,6 +636,20 @@ impl<S: Service> Client<S> {
         Self(ClientInner::Local(tx), PhantomData)
     }
 
+    /// Returns the established connection of a remote client.
+    ///
+    /// Returns `None` for a local client. For a remote client, see
+    /// [`rpc::RemoteConnection::connection`]: for example, a client from
+    /// [`Self::noq`] or [`Self::iroh`] returns `None` until its first request
+    /// has connected.
+    #[cfg(feature = "rpc")]
+    pub fn connection(&self) -> Option<rpc::ConnectionHandle> {
+        match &self.0 {
+            ClientInner::Local(_) => None,
+            ClientInner::Remote(conn) => conn.connection(),
+        }
+    }
+
     /// Get the local sender. This is useful if you don't care about remote
     /// requests.
     pub fn as_local(&self) -> Option<LocalSender<S>> {
