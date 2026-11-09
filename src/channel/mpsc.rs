@@ -342,7 +342,8 @@ impl<T: Send + Sync + 'static> Receiver<T> {
     /// senders are dropped or the remote sender finishes its stream.
     ///
     /// Returns [`RecvError`] when receiving fails. Receiving on a local
-    /// channel never fails.
+    /// channel never fails. An error ends the channel, and later calls
+    /// return `Ok(None)`.
     ///
     /// ## Cancellation safety
     ///
@@ -358,6 +359,7 @@ impl<T: Send + Sync + 'static> Receiver<T> {
     /// senders are dropped or the remote sender finishes its stream.
     ///
     /// See [`Self::recv`] for errors.
+    /// After returning an error, later polls return `Ok(None)`.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, RecvError>> {
         match &mut self.0 {
             ReceiverInner::Tokio(rx) => rx.poll_recv(cx).map(Ok),
