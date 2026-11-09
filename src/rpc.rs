@@ -1010,6 +1010,7 @@ struct NoqReceiver<T> {
     recv: noq::RecvStream,
     span: tracing::Span,
     received: u64,
+    /// EOF or an error has ended the channel; later polls return `Ok(None)`.
     finished: bool,
     /// Zero-initialized space the receiver reads into, so the most it reads ahead.
     buf: SmallVec<[u8; INLINE_FRAME_SIZE]>,
@@ -1137,8 +1138,11 @@ impl<T> Debug for NoqReceiver<T> {
     }
 }
 
-impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, mpsc::RecvError>> {
+impl<T: RpcMessage> NoqReceiver<T> {
+    fn poll_recv_inner(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<T>, mpsc::RecvError>> {
         loop {
             match parse_frame(&self.buf[..self.end])? {
                 Frame::Whole { body } => {
@@ -1192,6 +1196,22 @@ impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
                 }
             }
         }
+    }
+}
+
+impl<T: RpcMessage> DynReceiver<T> for NoqReceiver<T> {
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, mpsc::RecvError>> {
+        if self.finished {
+            return Poll::Ready(Ok(None));
+        }
+        let result = self.poll_recv_inner(cx);
+        if matches!(&result, Poll::Ready(Err(_))) {
+            // The error ends the channel, including any messages read ahead.
+            self.finished = true;
+            self.end = 0;
+            clear_frame(&mut self.buf);
+        }
+        result
     }
 }
 
@@ -1910,6 +1930,65 @@ async fn read_request_frame<S: Service>(recv: &mut noq::RecvStream) -> ReadFrame
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "noq_endpoint_setup")]
+    #[tokio::test]
+    #[n0_tracing_test::traced_test]
+    async fn mpsc_frame_error_ends_receiver() -> testresult::TestResult<()> {
+        use std::future::poll_fn;
+
+        let (server, cert) = crate::noq::make_server_endpoint("127.0.0.1:0".parse()?)?;
+        let client = crate::noq::make_client_endpoint("127.0.0.1:0".parse()?, &[cert.as_slice()])?;
+        let connecting = client.connect(server.local_addr()?, "localhost")?;
+        let accepting = async { server.accept().await.unwrap().await };
+        let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+
+        for (bytes, expected_code) in [
+            // An invalid bool followed by a valid bool in a separate frame.
+            (vec![1, 2, 1, 0], ErrorCode::MessageDecodeFailed),
+            // An overflowing length prefix.
+            (vec![0xff; 10], ErrorCode::MessageMaxSizeExceeded),
+        ] {
+            let (mut send, _response) = client_conn.open_bi().await?;
+            // Make the stream visible to the server.
+            send.write_all(&[0]).await?;
+            let (_response, recv) = server_conn.accept_bi().await?;
+            // Seed read-ahead directly so the decode case does not depend on
+            // whether the transport delivers both frames in a single read.
+            let mut receiver = NoqReceiver::<bool> {
+                recv,
+                span: tracing::Span::none(),
+                received: 0,
+                finished: false,
+                end: bytes.len(),
+                buf: SmallVec::from_vec(bytes),
+                _marker: PhantomData,
+            };
+            let err = poll_fn(|cx| receiver.poll_recv(cx)).await.unwrap_err();
+            match expected_code {
+                ErrorCode::MessageDecodeFailed => assert!(matches!(
+                    err,
+                    mpsc::RecvError::Rpc {
+                        source: RpcRecvError::DecodeFailed { .. },
+                        ..
+                    }
+                )),
+                ErrorCode::MessageMaxSizeExceeded => assert!(matches!(
+                    err,
+                    mpsc::RecvError::Rpc {
+                        source: RpcRecvError::MaxSizeExceeded { .. },
+                        ..
+                    }
+                )),
+                _ => unreachable!(),
+            }
+            for _ in 0..2 {
+                assert_eq!(poll_fn(|cx| receiver.poll_recv(cx)).await?, None);
+            }
+            assert_eq!(send.stopped().await?, Some(expected_code.to_code()));
+        }
+        Ok(())
+    }
 
     #[test]
     fn error_code_round_trips() {
