@@ -3,7 +3,7 @@ use std::fmt;
 
 use iroh::{
     endpoint::{
-        Accepting, Connection, ConnectionError, IncomingZeroRttConnection,
+        Accepting, ConnectingError, Connection, ConnectionError, IncomingZeroRttConnection,
         OutgoingZeroRttConnection, RecvStream, SendStream, VarInt, ZeroRttStatus,
     },
     protocol::{AcceptError, ProtocolHandler},
@@ -73,9 +73,12 @@ impl RemoteConnection for OutgoingZeroRttConnection {
     fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
         let conn = self.clone();
         Box::pin(async move {
-            conn.handshake_completed()
-                .await
-                .map_err(iroh::endpoint::ConnectError::from)?;
+            match conn.handshake_completed().await {
+                Ok(_) => {}
+                // Like open_bi, so a close keeps its code.
+                Err(ConnectingError::ConnectionError { source, .. }) => return Err(source.into()),
+                Err(err) => return Err(iroh::endpoint::ConnectError::from(err).into()),
+            }
             conn.close_reason().map_or(Ok(()), |err| Err(err.into()))
         })
     }
