@@ -125,6 +125,7 @@ use smallvec::{SmallVec, smallvec};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tracing::{Instrument, debug, trace, warn};
 
+pub(crate) mod client;
 #[cfg(feature = "iroh")]
 pub(crate) mod iroh_impl;
 pub(crate) mod noq_impl;
@@ -627,6 +628,15 @@ pub trait RemoteConnection: Send + Sync + Debug + 'static {
     ///
     /// For connections that were fully authenticated before allowing to send any data, this should return `false`.
     fn zero_rtt_rejected(&self) -> BoxFuture<bool>;
+
+    /// Prepares the connection without opening an application stream.
+    ///
+    /// Lazy connections also run their initializer. The default returns
+    /// [`RequestError::ConnectUnsupported`]. Custom implementations can override
+    /// this method to establish a connection or check that it is still open.
+    fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
+        Box::pin(async { Err(e!(RequestError::ConnectUnsupported)) })
+    }
 }
 
 /// A connection to a remote service that can be used to send the initial message.

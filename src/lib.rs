@@ -347,6 +347,8 @@ pub mod rpc {
 }
 #[cfg(feature = "rpc")]
 pub mod rpc;
+#[cfg(feature = "rpc")]
+pub use rpc::client::RemoteClientBuilder;
 /// RPC over iroh connections, with dial by endpoint id.
 #[cfg(feature = "iroh")]
 pub mod iroh {
@@ -598,34 +600,78 @@ impl<S: Service> From<tokio::sync::mpsc::Sender<S::Message>> for Client<S> {
 impl<S: Service> Client<S> {
     /// Create a new client to a remote service using the given noq `endpoint`
     /// and a socket `addr` of the remote service.
+    ///
+    /// Use [`Self::noq_builder`] to initialize each new connection.
     #[cfg(feature = "rpc")]
     pub fn noq(endpoint: ::noq::Endpoint, addr: std::net::SocketAddr) -> Self {
-        Self::boxed(rpc::noq_impl::NoqLazyRemoteConnection::new(endpoint, addr))
+        Self::noq_builder(endpoint, addr).build()
+    }
+
+    /// Creates a builder for a noq client that connects on demand.
+    ///
+    /// Use [`RemoteClientBuilder::on_connect`] to authenticate each connection,
+    /// including after a reconnect. Setup runs on the built client's first
+    /// request or a call to [`Self::connect`].
+    #[cfg(feature = "rpc")]
+    pub fn noq_builder(
+        endpoint: ::noq::Endpoint,
+        addr: std::net::SocketAddr,
+    ) -> RemoteClientBuilder<S> {
+        RemoteClientBuilder::noq(endpoint, addr)
     }
 
     /// Creates a new client to a remote service using the given iroh `endpoint`.
     ///
     /// The client connects to `addr` with `alpn` on the first request, and
-    /// connects again if the connection fails.
+    /// connects again if the connection fails. Use [`Self::iroh_builder`] to
+    /// initialize each new connection.
     #[cfg(feature = "iroh")]
     pub fn iroh(
         endpoint: ::iroh::Endpoint,
         addr: impl Into<::iroh::EndpointAddr>,
         alpn: impl AsRef<[u8]>,
     ) -> Self {
-        let conn = rpc::iroh_impl::IrohLazyRemoteConnection::new(
-            endpoint,
-            addr.into(),
-            alpn.as_ref().to_vec(),
-        );
-        Self::boxed(conn)
+        Self::iroh_builder(endpoint, addr, alpn).build()
+    }
+
+    /// Creates a builder for an iroh client that connects on demand.
+    ///
+    /// Use [`RemoteClientBuilder::on_connect`] to authenticate each connection,
+    /// including after a reconnect. Setup runs on the built client's first
+    /// request or a call to [`Self::connect`].
+    #[cfg(feature = "iroh")]
+    pub fn iroh_builder(
+        endpoint: ::iroh::Endpoint,
+        addr: impl Into<::iroh::EndpointAddr>,
+        alpn: impl AsRef<[u8]>,
+    ) -> RemoteClientBuilder<S> {
+        RemoteClientBuilder::iroh(endpoint, addr.into(), alpn.as_ref().to_vec())
     }
 
     /// Create a new client from a `rpc::RemoteConnection` trait object.
     /// This is used for transports other than noq, such as the iroh transport.
+    ///
+    /// Use [`RemoteClientBuilder`] to initialize a native noq or iroh
+    /// connection before its first request.
     #[cfg(feature = "rpc")]
     pub fn boxed(remote: impl rpc::RemoteConnection) -> Self {
         Self(ClientInner::Remote(Box::new(remote)), PhantomData)
+    }
+
+    /// Connects and runs setup without opening an application stream.
+    ///
+    /// Lazy clients connect on their first request. Call this to see connection
+    /// or initialization errors before making a request. An initialized
+    /// connection is reused. A fixed native connection is checked for closure.
+    /// For a local client, this returns `Ok(())` immediately. Custom remote
+    /// implementations that do not support this operation return
+    /// [`RequestError::ConnectUnsupported`].
+    #[cfg(feature = "rpc")]
+    pub async fn connect(&self) -> Result<(), RequestError> {
+        match &self.0 {
+            ClientInner::Local(_) => Ok(()),
+            ClientInner::Remote(connection) => connection.connect().await,
+        }
     }
 
     /// Creates a new client from a `tokio::sync::mpsc::Sender`.
@@ -997,6 +1043,14 @@ pub enum RequestError {
         #[error(std_err)]
         source: ::noq::ConnectionError,
     },
+    /// Application setup for a newly established connection failed.
+    #[cfg(feature = "rpc")]
+    #[error("Error initializing connection")]
+    Initialization { source: n0_error::AnyError },
+    /// A custom remote connection does not implement eager connection setup.
+    #[cfg(feature = "rpc")]
+    #[error("Remote connection does not support eager connection setup")]
+    ConnectUnsupported,
 }
 
 /// Error type that subsumes all possible errors in this crate, for convenience.
@@ -1068,6 +1122,12 @@ impl From<RequestError> for io::Error {
             RequestError::ConnectionFailed { source, .. } => source.into(),
             #[cfg(feature = "iroh")]
             RequestError::IrohConnect { source, .. } => io::Error::other(source),
+            #[cfg(feature = "rpc")]
+            RequestError::Initialization { source, .. } => io::Error::other(source),
+            #[cfg(feature = "rpc")]
+            RequestError::ConnectUnsupported { .. } => {
+                io::Error::new(io::ErrorKind::Unsupported, e)
+            }
         }
     }
 }
