@@ -704,7 +704,7 @@ impl From<noq::RecvStream> for crate::channel::none::NoReceiver {
 
 impl<T: RpcMessage> From<noq::RecvStream> for mpsc::Receiver<T> {
     fn from(read: noq::RecvStream) -> Self {
-        mpsc::Receiver::Boxed(Box::new(NoqReceiver {
+        mpsc::Receiver::from_boxed(Box::new(NoqReceiver {
             recv: read,
             span: tracing::Span::current(),
             received: 0,
@@ -725,7 +725,7 @@ impl From<noq::SendStream> for NoSender {
 
 impl<T: RpcMessage> From<noq::SendStream> for oneshot::Sender<T> {
     fn from(writer: noq::SendStream) -> Self {
-        oneshot::Sender::Boxed(Box::new(NoqOneshotSender {
+        oneshot::Sender::from_boxed(Box::new(NoqOneshotSender {
             writer,
             // A server creates the sender in the request span, and logs the response in it.
             span: tracing::Span::current(),
@@ -764,7 +764,7 @@ impl<T: RpcMessage> oneshot::DynSender<T> for NoqOneshotSender {
 
 impl<T: RpcMessage> From<noq::SendStream> for mpsc::Sender<T> {
     fn from(write: noq::SendStream) -> Self {
-        mpsc::Sender::Boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
+        mpsc::Sender::from_boxed(Arc::new(NoqSender(tokio::sync::Mutex::new(
             NoqSenderState::Open(NoqSenderInner {
                 send: write,
                 buffer: SmallVec::new(),

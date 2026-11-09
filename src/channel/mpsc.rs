@@ -114,21 +114,27 @@ pub fn channel<T>(buffer: usize) -> (Sender<T>, Receiver<T>) {
 /// Single producer, single consumer sender.
 ///
 /// For the local case, this wraps a tokio::sync::mpsc::Sender.
-pub enum Sender<T> {
+pub struct Sender<T>(SenderInner<T>);
+
+enum SenderInner<T> {
     Tokio(tokio::sync::mpsc::Sender<T>),
     Boxed(Arc<dyn DynSender<T>>),
 }
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        match self {
-            Self::Tokio(tx) => Self::Tokio(tx.clone()),
-            Self::Boxed(inner) => Self::Boxed(inner.clone()),
-        }
+        Self(match &self.0 {
+            SenderInner::Tokio(tx) => SenderInner::Tokio(tx.clone()),
+            SenderInner::Boxed(inner) => SenderInner::Boxed(inner.clone()),
+        })
     }
 }
 
 impl<T> Sender<T> {
+    pub(crate) fn from_boxed(inner: Arc<dyn DynSender<T>>) -> Self {
+        Self(SenderInner::Boxed(inner))
+    }
+
     /// Returns true if sending can fail in more ways than the receiver being dropped.
     ///
     /// This is about which failures can occur, not about where the receiver is.
@@ -141,9 +147,9 @@ impl<T> Sender<T> {
     where
         T: 'static,
     {
-        match self {
-            Sender::Tokio(_) => false,
-            Sender::Boxed(x) => x.is_rpc(),
+        match &self.0 {
+            SenderInner::Tokio(_) => false,
+            SenderInner::Boxed(x) => x.is_rpc(),
         }
     }
 
@@ -199,21 +205,21 @@ impl<T: Send + Sync + 'static> Sender<T> {
             sender: self,
             _p: PhantomData,
         });
-        Sender::Boxed(inner)
+        Sender::from_boxed(inner)
     }
 
     /// Future that resolves when the sender is closed
     pub async fn closed(&self) {
-        match self {
-            Sender::Tokio(tx) => tx.closed().await,
-            Sender::Boxed(sink) => sink.closed().await,
+        match &self.0 {
+            SenderInner::Tokio(tx) => tx.closed().await,
+            SenderInner::Boxed(sink) => sink.closed().await,
         }
     }
 }
 
 impl<T> From<tokio::sync::mpsc::Sender<T>> for Sender<T> {
     fn from(tx: tokio::sync::mpsc::Sender<T>) -> Self {
-        Self::Tokio(tx)
+        Self(SenderInner::Tokio(tx))
     }
 }
 
@@ -221,15 +227,15 @@ impl<T> TryFrom<Sender<T>> for tokio::sync::mpsc::Sender<T> {
     type Error = Sender<T>;
 
     fn try_from(value: Sender<T>) -> Result<Self, Self::Error> {
-        match value {
-            Sender::Tokio(tx) => Ok(tx),
-            Sender::Boxed(_) => Err(value),
+        match value.0 {
+            SenderInner::Tokio(tx) => Ok(tx),
+            SenderInner::Boxed(_) => Err(value),
         }
     }
 }
 
 /// A sender that can be wrapped in a `Arc<dyn DynSender<T>>`.
-pub trait DynSender<T>: Debug + Send + Sync + 'static {
+pub(crate) trait DynSender<T>: Debug + Send + Sync + 'static {
     /// Send a message.
     ///
     /// For the remote case, the receiver gets a message either completely or
@@ -265,29 +271,22 @@ pub trait DynSender<T>: Debug + Send + Sync + 'static {
 }
 
 /// A receiver that can be wrapped in a `Box<dyn DynReceiver<T>>`.
-pub trait DynReceiver<T>: Debug + Send + Sync + 'static {
+pub(crate) trait DynReceiver<T>: Debug + Send + Sync + 'static {
     /// Polls for the next message, keeping a message read in part for the next poll.
     ///
     /// Returns `Ok(None)` once the sender has closed the channel.
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, RecvError>>;
-
-    /// Receives the next message.
-    fn recv(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<T>, RecvError>> + Send + Sync + '_>> {
-        Box::pin(poll_fn(move |cx| self.poll_recv(cx)))
-    }
 }
 
 impl<T> Debug for Sender<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tokio(x) => f
+        match &self.0 {
+            SenderInner::Tokio(x) => f
                 .debug_struct("Tokio")
                 .field("avail", &x.capacity())
                 .field("cap", &x.max_capacity())
                 .finish(),
-            Self::Boxed(inner) => f.debug_tuple("Boxed").field(&inner).finish(),
+            SenderInner::Boxed(inner) => f.debug_tuple("Boxed").field(&inner).finish(),
         }
     }
 }
@@ -305,12 +304,12 @@ impl<T: Send + 'static> Sender<T> {
     /// wrote part of the message, the next send finishes it, and such a receiver
     /// delivers it. So a retry after a cancelled send can deliver the message twice.
     pub async fn send(&self, value: T) -> Result<(), SendError> {
-        match self {
-            Sender::Tokio(tx) => tx
+        match &self.0 {
+            SenderInner::Tokio(tx) => tx
                 .send(value)
                 .await
                 .map_err(|_| e!(SendError::ReceiverClosed)),
-            Sender::Boxed(sink) => sink.send(value).await,
+            SenderInner::Boxed(sink) => sink.send(value).await,
         }
     }
 
@@ -339,15 +338,15 @@ impl<T: Send + 'static> Sender<T> {
     /// wrote part of the message, the next send finishes it, and such a receiver
     /// delivers it. So a retry after a cancelled send can deliver the message twice.
     pub async fn try_send(&self, value: T) -> Result<bool, SendError> {
-        match self {
-            Sender::Tokio(tx) => match tx.try_send(value) {
+        match &self.0 {
+            SenderInner::Tokio(tx) => match tx.try_send(value) {
                 Ok(()) => Ok(true),
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     Err(e!(SendError::ReceiverClosed))
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(false),
             },
-            Sender::Boxed(sink) => sink.try_send(value).await,
+            SenderInner::Boxed(sink) => sink.try_send(value).await,
         }
     }
 }
@@ -355,9 +354,18 @@ impl<T: Send + 'static> Sender<T> {
 impl<T> crate::sealed::Sealed for Sender<T> {}
 impl<T> crate::Sender for Sender<T> {}
 
-pub enum Receiver<T> {
+/// A receiver for local or remote messages.
+pub struct Receiver<T>(ReceiverInner<T>);
+
+enum ReceiverInner<T> {
     Tokio(tokio::sync::mpsc::Receiver<T>),
     Boxed(Box<dyn DynReceiver<T>>),
+}
+
+impl<T> Receiver<T> {
+    pub(crate) fn from_boxed(inner: Box<dyn DynReceiver<T>>) -> Self {
+        Self(ReceiverInner::Boxed(inner))
+    }
 }
 
 impl<T: Send + Sync + 'static> Receiver<T> {
@@ -381,9 +389,9 @@ impl<T: Send + Sync + 'static> Receiver<T> {
     /// Returns `Ok(None)` if the sender has been dropped or the remote end has
     /// cleanly closed the connection.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, RecvError>> {
-        match self {
-            Self::Tokio(rx) => rx.poll_recv(cx).map(Ok),
-            Self::Boxed(rx) => rx.poll_recv(cx),
+        match &mut self.0 {
+            ReceiverInner::Tokio(rx) => rx.poll_recv(cx).map(Ok),
+            ReceiverInner::Boxed(rx) => rx.poll_recv(cx),
         }
     }
 
@@ -419,7 +427,7 @@ impl<T: Send + Sync + 'static> Receiver<T> {
             receiver: self,
             _p: PhantomData,
         });
-        Receiver::Boxed(inner)
+        Receiver::from_boxed(inner)
     }
 
     #[cfg(feature = "stream")]
@@ -441,7 +449,7 @@ impl<T: Send + Sync + 'static> n0_future::Stream for Receiver<T> {
 
 impl<T> From<tokio::sync::mpsc::Receiver<T>> for Receiver<T> {
     fn from(rx: tokio::sync::mpsc::Receiver<T>) -> Self {
-        Self::Tokio(rx)
+        Self(ReceiverInner::Tokio(rx))
     }
 }
 
@@ -449,22 +457,22 @@ impl<T> TryFrom<Receiver<T>> for tokio::sync::mpsc::Receiver<T> {
     type Error = Receiver<T>;
 
     fn try_from(value: Receiver<T>) -> Result<Self, Self::Error> {
-        match value {
-            Receiver::Tokio(tx) => Ok(tx),
-            Receiver::Boxed(_) => Err(value),
+        match value.0 {
+            ReceiverInner::Tokio(tx) => Ok(tx),
+            ReceiverInner::Boxed(_) => Err(value),
         }
     }
 }
 
 impl<T> Debug for Receiver<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tokio(inner) => f
+        match &self.0 {
+            ReceiverInner::Tokio(inner) => f
                 .debug_struct("Tokio")
                 .field("avail", &inner.capacity())
                 .field("cap", &inner.max_capacity())
                 .finish(),
-            Self::Boxed(inner) => f.debug_tuple("Boxed").field(&inner).finish(),
+            ReceiverInner::Boxed(inner) => f.debug_tuple("Boxed").field(&inner).finish(),
         }
     }
 }
@@ -513,15 +521,9 @@ where
     }
 
     fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync + '_>> {
-        match self {
-            FilterMapSender {
-                sender: Sender::Tokio(tx),
-                ..
-            } => Box::pin(tx.closed()),
-            FilterMapSender {
-                sender: Sender::Boxed(sink),
-                ..
-            } => sink.closed(),
+        match &self.sender.0 {
+            SenderInner::Tokio(tx) => Box::pin(tx.closed()),
+            SenderInner::Boxed(sink) => sink.closed(),
         }
     }
 }
