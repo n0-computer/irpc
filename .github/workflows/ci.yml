@@ -39,6 +39,9 @@ jobs:
           tool: cargo-make
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets --all-features
+      - name: cargo test --doc
+        # Once, on one platform: the other test runs skip doctests.
+        run: cargo test --locked --workspace --all-features --doc
       - run: cargo make format-check
       - name: Assert lockfile unchanged
         # cargo make takes no --locked; assert the lockfile instead.
