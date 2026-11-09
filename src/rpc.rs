@@ -356,6 +356,17 @@ impl WriteError {
             _ => None,
         }
     }
+
+    /// Returns whether the server rejected 0-RTT while this client wrote the request.
+    pub(crate) fn is_zero_rtt_rejected(&self) -> bool {
+        match self {
+            Self::Io { source, .. } => matches!(
+                source.get_ref().and_then(|err| err.downcast_ref()),
+                Some(noq::WriteError::ZeroRttRejected)
+            ),
+            _ => false,
+        }
+    }
 }
 
 /// Returns the irpc error code that the peer closed the connection with, if any, other than 0.
@@ -1719,5 +1730,12 @@ mod tests {
         assert_eq!(io::Error::from(err).kind(), io::ErrorKind::ConnectionReset);
         let err = WriteError::from(noq::WriteError::Stopped(16u32.into()));
         assert!(matches!(err, WriteError::Io { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn write_error_detects_zero_rtt_rejection() {
+        assert!(WriteError::from(noq::WriteError::ZeroRttRejected).is_zero_rtt_rejected());
+        assert!(!WriteError::from(noq::WriteError::ClosedStream).is_zero_rtt_rejected());
+        assert!(!WriteError::from(noq::WriteError::Stopped(16u32.into())).is_zero_rtt_rejected());
     }
 }
