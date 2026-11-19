@@ -1107,6 +1107,25 @@ fn parse_frame(buf: &[u8]) -> io::Result<Frame> {
 }
 
 impl<T> NoqReceiver<T> {
+    /// Makes room in the buffer to read more of the frame that starts at 0.
+    ///
+    /// A full buffer doubles in size, from [`INLINE_FRAME_SIZE`] up, so it
+    /// follows the bytes that arrived, not the length that the peer claims. It
+    /// grows no further than `frame_len`, the length of the whole frame, if the
+    /// length prefix is complete.
+    ///
+    /// Afterwards, `buf[end..]` is never empty: a read into an empty slice
+    /// returns 0 bytes, the same as the end of the stream. Doubling grows any
+    /// buffer, and the frame is longer than the bytes that are in the buffer.
+    fn make_room(&mut self, frame_len: Option<usize>) {
+        if self.end == self.buf.len() {
+            let doubled = (self.buf.len() * 2).max(INLINE_FRAME_SIZE);
+            let new_len = frame_len.map_or(doubled, |len| len.min(doubled));
+            self.buf.resize(new_len, 0);
+        }
+        debug_assert!(self.end < self.buf.len(), "no room to read the frame");
+    }
+
     /// Handles the end of the stream, and returns `None`.
     ///
     /// The stream can end in the middle of a message if the send of that
@@ -1180,15 +1199,7 @@ impl<T: RpcMessage> NoqReceiver<T> {
                     return Poll::Ready(Err(e!(RpcRecvError::MaxSizeExceeded).into()));
                 }
                 Frame::Partial { frame_len } => {
-                    // The frame starts at 0, so the buffer must hold all of it.
-                    // It grows only when full, and at most doubles, so its size
-                    // follows the bytes that arrived, not the length the peer claims.
-                    if let Some(len) = frame_len
-                        && self.end == self.buf.len()
-                    {
-                        let grown = (self.buf.len() * 2).max(INLINE_FRAME_SIZE);
-                        self.buf.resize(len.min(grown), 0);
-                    }
+                    self.make_room(frame_len);
                     let mut read = ReadBuf::new(&mut self.buf[self.end..]);
                     ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
                     let n = read.filled().len();
