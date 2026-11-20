@@ -12,6 +12,11 @@
 //! updates from the client. A `Request` error code is about the request, and a
 //! `Message` error code is about a channel message, see [`ErrorCode`].
 //!
+//! Requests and channel messages from a remote peer decode with [`postcard`],
+//! with one stack frame per level of nesting. A recursive type in a protocol
+//! lets a peer send a deeply nested message that overflows the stack, which
+//! aborts the process. Use types with a fixed nesting depth in a protocol.
+//!
 //! # Bad requests
 //!
 //! A request is bad if it is larger than [`MAX_MESSAGE_SIZE`], or if it does
