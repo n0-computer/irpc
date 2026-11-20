@@ -1107,6 +1107,25 @@ fn parse_frame(buf: &[u8]) -> io::Result<Frame> {
 }
 
 impl<T> NoqReceiver<T> {
+    /// Makes room in the buffer to read more of the frame that starts at 0.
+    ///
+    /// A full buffer doubles in size, from [`INLINE_FRAME_SIZE`] up, so it
+    /// follows the bytes that arrived, not the length that the peer claims. It
+    /// grows no further than `frame_len`, the length of the whole frame, if the
+    /// length prefix is complete.
+    ///
+    /// Afterwards, `buf[end..]` is never empty: a read into an empty slice
+    /// returns 0 bytes, the same as the end of the stream. Doubling grows any
+    /// buffer, and the frame is longer than the bytes that are in the buffer.
+    fn make_room(&mut self, frame_len: Option<usize>) {
+        if self.end == self.buf.len() {
+            let doubled = (self.buf.len() * 2).max(INLINE_FRAME_SIZE);
+            let new_len = frame_len.map_or(doubled, |len| len.min(doubled));
+            self.buf.resize(new_len, 0);
+        }
+        debug_assert!(self.end < self.buf.len(), "no room to read the frame");
+    }
+
     /// Handles the end of the stream, and returns `None`.
     ///
     /// The stream can end in the middle of a message if the send of that
@@ -1149,9 +1168,9 @@ impl<T: RpcMessage> NoqReceiver<T> {
                     let msg = decode_frame(&self.buf[body.clone()]);
                     self.buf.copy_within(body.end..self.end, 0);
                     self.end -= body.end;
-                    // For large frames, we resized the buffer to exactly the frame size.
-                    // After consuming the frame, the buffer is empty and we can
-                    // move it back inline, releasing the heap storage.
+                    // A large frame grew the buffer onto the heap. After consuming
+                    // the frame, the buffer is empty and we can move it back inline,
+                    // releasing the heap storage.
                     if self.end == 0 && self.buf.spilled() {
                         self.buf.truncate(INLINE_FRAME_SIZE);
                         self.buf.shrink_to_fit();
@@ -1180,12 +1199,7 @@ impl<T: RpcMessage> NoqReceiver<T> {
                     return Poll::Ready(Err(e!(RpcRecvError::MaxSizeExceeded).into()));
                 }
                 Frame::Partial { frame_len } => {
-                    // The frame starts at 0, so the buffer must hold all of it.
-                    if let Some(len) = frame_len
-                        && self.buf.len() < len
-                    {
-                        self.buf.resize(len, 0);
-                    }
+                    self.make_room(frame_len);
                     let mut read = ReadBuf::new(&mut self.buf[self.end..]);
                     ready!(Pin::new(&mut self.recv).poll_read(cx, &mut read))?;
                     let n = read.filled().len();
@@ -1987,6 +2001,76 @@ mod tests {
             }
             assert_eq!(send.stopped().await?, Some(expected_code.to_code()));
         }
+        Ok(())
+    }
+
+    /// The buffer of an mpsc receiver grows with the bytes that arrive, not
+    /// with the length prefix of the frame.
+    #[cfg(feature = "noq_endpoint_setup")]
+    #[tokio::test]
+    #[n0_tracing_test::traced_test]
+    async fn mpsc_buffer_follows_received_bytes() -> testresult::TestResult<()> {
+        use std::{future::poll_fn, time::Duration};
+
+        let (server, cert) = crate::noq::make_server_endpoint("127.0.0.1:0".parse()?)?;
+        let client = crate::noq::make_client_endpoint("127.0.0.1:0".parse()?, &[cert.as_slice()])?;
+        let connecting = client.connect(server.local_addr()?, "localhost")?;
+        let accepting = async { server.accept().await.unwrap().await };
+        let (client_conn, server_conn) = tokio::try_join!(connecting, accepting)?;
+
+        // A prefix that claims the largest frame, with nothing after it.
+        let (mut send, _response) = client_conn.open_bi().await?;
+        let mut claim = Vec::new();
+        claim.write_varint_u64(MAX_MESSAGE_SIZE)?;
+        send.write_all(&claim).await?;
+        let (_response, recv) = server_conn.accept_bi().await?;
+        let mut receiver = NoqReceiver::<Vec<u8>> {
+            recv,
+            span: tracing::Span::none(),
+            received: 0,
+            finished: false,
+            end: 0,
+            buf: smallvec![0; INLINE_FRAME_SIZE],
+            _marker: PhantomData,
+        };
+        let poll = poll_fn(|cx| receiver.poll_recv(cx));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), poll)
+                .await
+                .is_err()
+        );
+        assert_eq!(receiver.buf.len(), INLINE_FRAME_SIZE);
+
+        // A real large message, sent in two parts.
+        let (mut send, _response) = client_conn.open_bi().await?;
+        let msg = vec![7u8; 1024 * 1024];
+        let mut body = postcard::to_stdvec(&msg)?;
+        body.extend(postcard::to_stdvec(&MessageEnd::Complete)?);
+        let bytes = frame(&body);
+        let (head, tail) = bytes.split_at(1000);
+        send.write_all(head).await?;
+        let (_response, recv) = server_conn.accept_bi().await?;
+        let mut receiver = NoqReceiver::<Vec<u8>> {
+            recv,
+            span: tracing::Span::none(),
+            received: 0,
+            finished: false,
+            end: 0,
+            buf: smallvec![0; INLINE_FRAME_SIZE],
+            _marker: PhantomData,
+        };
+        let poll = poll_fn(|cx| receiver.poll_recv(cx));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), poll)
+                .await
+                .is_err()
+        );
+        assert!(receiver.buf.len() <= 2 * 1000, "{}", receiver.buf.len());
+        send.write_all(tail).await?;
+        send.finish()?;
+        assert_eq!(poll_fn(|cx| receiver.poll_recv(cx)).await?, Some(msg));
+        assert!(!receiver.buf.spilled());
+        assert_eq!(poll_fn(|cx| receiver.poll_recv(cx)).await?, None);
         Ok(())
     }
 
