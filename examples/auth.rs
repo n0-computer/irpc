@@ -1,7 +1,9 @@
 //! This example demonstrates a few things:
 //! * Using irpc with a cloneable server struct instead of with an actor loop
 //! * Manually implementing the connection loop
-//! * Authenticating peers
+//! * Authenticating peers, again after each reconnect
+
+use std::time::Duration;
 
 use anyhow::Result;
 use iroh::{Endpoint, endpoint::presets, protocol::Router};
@@ -17,9 +19,9 @@ async fn main() -> Result<()> {
 }
 
 async fn remote() -> Result<()> {
+    let server = StorageServer::new("secret".to_string());
     let (server_router, server_addr) = {
         let endpoint = Endpoint::bind(presets::N0).await?;
-        let server = StorageServer::new("secret".to_string());
         let router = Router::builder(endpoint.clone())
             .accept(StorageServer::ALPN, server.clone())
             .spawn();
@@ -27,10 +29,9 @@ async fn remote() -> Result<()> {
         (router, addr)
     };
 
-    // correct authentication
+    // Authentication runs before the first request on every new connection.
     let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
-    let api = StorageClient::connect(client_endpoint, server_addr.clone());
-    api.auth("secret").await?;
+    let api = StorageClient::connect(client_endpoint, server_addr.clone(), "secret".into()).await?;
     api.set("hello".to_string(), "world".to_string()).await?;
     api.set("goodbye".to_string(), "world".to_string()).await?;
     let value = api.get("hello".to_string()).await?;
@@ -40,16 +41,33 @@ async fn remote() -> Result<()> {
         println!("list value = {value:?}");
     }
 
-    // invalid authentication
-    let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
-    let api = StorageClient::connect(client_endpoint, server_addr.clone());
-    assert!(api.auth("bad").await.is_err());
-    assert!(api.get("hello".to_string()).await.is_err());
+    // Closing the connection discards its authentication state, just as a server
+    // restart would. The same client must authenticate before its next Get.
+    server.disconnect_clients();
+    println!("Server closed the connection. Reusing the same client...");
 
-    // no authentication
+    // The client may not have observed the old connection's close yet. Retry
+    // this read, which is safe to repeat. Do not blindly retry writes: the
+    // server might have applied them before the response was lost.
+    let value = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match api.get("hello".into()).await {
+                Ok(value) => break value,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await?;
+    assert_eq!(value.as_deref(), Some("world"));
+    println!("The same client authenticated the replacement connection.");
+
+    // Eager connection setup reports invalid credentials before any normal RPC.
     let client_endpoint = Endpoint::builder(presets::N0).bind().await?;
-    let api = StorageClient::connect(client_endpoint, server_addr);
-    assert!(api.get("hello".to_string()).await.is_err());
+    assert!(
+        StorageClient::connect(client_endpoint, server_addr, "bad".into())
+            .await
+            .is_err()
+    );
 
     drop(server_router);
     Ok(())
@@ -68,16 +86,16 @@ mod storage {
     use anyhow::Result;
     use iroh::{
         Endpoint,
-        endpoint::Connection,
+        endpoint::{Connection, WeakConnectionHandle},
         protocol::{AcceptError, ProtocolHandler},
     };
+    // Import the macro
+    use irpc::rpc::read_request;
     use irpc::{
         Client, WithChannels,
         channel::{mpsc, oneshot},
         rpc_requests,
     };
-    // Import the macro
-    use irpc::{iroh::IrohLazyRemoteConnection, rpc::read_request};
     use serde::{Deserialize, Serialize};
     use tracing::info;
 
@@ -126,10 +144,12 @@ mod storage {
     pub struct StorageServer {
         state: Arc<Mutex<BTreeMap<String, String>>>,
         auth_token: String,
+        connections: Arc<Mutex<Vec<WeakConnectionHandle>>>,
     }
 
     impl ProtocolHandler for StorageServer {
         async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+            self.connections.lock().unwrap().push(conn.weak_handle());
             let mut authed = false;
             while let Some(msg) = read_request::<StorageProtocol>(&conn).await? {
                 match msg {
@@ -168,6 +188,16 @@ mod storage {
             Self {
                 state: Default::default(),
                 auth_token,
+                connections: Default::default(),
+            }
+        }
+
+        /// Closes active connections so clients must authenticate again.
+        pub fn disconnect_clients(&self) {
+            for handle in self.connections.lock().unwrap().drain(..) {
+                if let Some(conn) = handle.upgrade() {
+                    conn.close(0u32.into(), b"reconnect demonstration");
+                }
             }
         }
 
@@ -225,20 +255,27 @@ mod storage {
     impl StorageClient {
         pub const ALPN: &[u8] = ALPN;
 
-        pub fn connect(endpoint: Endpoint, addr: impl Into<iroh::EndpointAddr>) -> StorageClient {
-            let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), Self::ALPN.to_vec());
-            StorageClient {
-                inner: Client::boxed(conn),
-            }
-        }
-
-        pub async fn auth(&self, token: &str) -> Result<(), anyhow::Error> {
-            self.inner
-                .rpc(Auth {
-                    token: token.to_string(),
+        /// Connects and authenticates, then repeats authentication on reconnect.
+        pub async fn connect(
+            endpoint: Endpoint,
+            addr: impl Into<iroh::EndpointAddr>,
+            token: String,
+        ) -> Result<StorageClient> {
+            let inner = Client::iroh_builder(endpoint, addr, Self::ALPN)
+                .on_connect(move |client| {
+                    let token = token.clone();
+                    async move {
+                        client
+                            .rpc(Auth { token })
+                            .await?
+                            .map_err(anyhow::Error::msg)
+                    }
                 })
-                .await?
-                .map_err(|err| anyhow::anyhow!(err))
+                .build();
+            // Optional: authenticate now so bad credentials fail at construction.
+            // Without this, the first request connects and authenticates lazily.
+            inner.connect().await?;
+            Ok(StorageClient { inner })
         }
 
         pub async fn get(&self, key: String) -> Result<Option<String>, irpc::Error> {

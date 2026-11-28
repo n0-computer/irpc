@@ -1,6 +1,4 @@
 //! RPC over [`noq`] connections, with dial by socket address.
-use std::sync::Arc;
-
 use n0_future::{future::Boxed as BoxFuture, task::JoinSet};
 use noq::{ConnectionError, PathId, RecvStream, SendStream, VarInt};
 use tracing::{Instrument, debug, debug_span, warn};
@@ -9,20 +7,6 @@ use crate::{
     RequestError, Service,
     rpc::{Handler, IncomingRemoteConnection, RemoteConnection},
 };
-
-/// A connection to a remote service.
-///
-/// Initially this does just have the endpoint and the address. Once a
-/// connection is established, it will be stored.
-#[derive(Debug, Clone)]
-pub(crate) struct NoqLazyRemoteConnection(Arc<NoqLazyRemoteConnectionInner>);
-
-#[derive(Debug)]
-struct NoqLazyRemoteConnectionInner {
-    pub endpoint: noq::Endpoint,
-    pub addr: std::net::SocketAddr,
-    pub connection: tokio::sync::Mutex<Option<noq::Connection>>,
-}
 
 impl RemoteConnection for noq::Connection {
     fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
@@ -42,61 +26,11 @@ impl RemoteConnection for noq::Connection {
     fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
         Box::pin(async { false })
     }
-}
 
-impl NoqLazyRemoteConnection {
-    pub fn new(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
-        Self(Arc::new(NoqLazyRemoteConnectionInner {
-            endpoint,
-            addr,
-            connection: Default::default(),
-        }))
+    fn connect(&self) -> BoxFuture<std::result::Result<(), RequestError>> {
+        let result = self.close_reason().map_or(Ok(()), |err| Err(err.into()));
+        Box::pin(async move { result })
     }
-}
-
-impl RemoteConnection for NoqLazyRemoteConnection {
-    fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
-        Box::new(self.clone())
-    }
-
-    fn open_bi(
-        &self,
-    ) -> BoxFuture<std::result::Result<(noq::SendStream, noq::RecvStream), RequestError>> {
-        let this = self.0.clone();
-        Box::pin(async move {
-            let mut guard = this.connection.lock().await;
-            let pair = match guard.as_mut() {
-                Some(conn) => {
-                    // try to reuse the connection
-                    match conn.open_bi().await {
-                        Ok(pair) => pair,
-                        Err(_) => {
-                            // try with a new connection, just once
-                            *guard = None;
-                            connect_and_open_bi(&this.endpoint, &this.addr, guard).await?
-                        }
-                    }
-                }
-                None => connect_and_open_bi(&this.endpoint, &this.addr, guard).await?,
-            };
-            Ok(pair)
-        })
-    }
-
-    fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
-        Box::pin(async { false })
-    }
-}
-
-async fn connect_and_open_bi(
-    endpoint: &noq::Endpoint,
-    addr: &std::net::SocketAddr,
-    mut guard: tokio::sync::MutexGuard<'_, Option<noq::Connection>>,
-) -> Result<(noq::SendStream, noq::RecvStream), RequestError> {
-    let conn = endpoint.connect(*addr, "localhost")?.await?;
-    let (send, recv) = conn.open_bi().await?;
-    *guard = Some(conn);
-    Ok((send, recv))
 }
 
 /// Utility function to listen for incoming connections and handle them with the provided handler.
